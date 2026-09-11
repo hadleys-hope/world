@@ -773,3 +773,10 @@ def houses_step(w: World):
     w.h_sludge = np.minimum(w.h_sludge, 1.0)
 
 
+def water_step(w: World):
+    c = w.cfg
+    w.water_plant_ok = w.water_plant_heat and w.trunk_ok
+    if w.water_plant_ok:
+        w.water_tank_m3 = min(c["water_tank_m3"], w.water_tank_m3 + c["water_plant_m3_h"] / 60.0)
+    if w.water_tank_m3 <= 0 and w.t % 60 == 0:
+        w.log("ALARM", "Water tank empty")
