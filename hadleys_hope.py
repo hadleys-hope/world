@@ -414,3 +414,109 @@ def env_step(w: World):
         w.s_ice = np.maximum(0.0, w.s_ice - 0.005)
 
 
+# ------------------------------------------------------------------------------------
+# Reactor
+# ------------------------------------------------------------------------------------
+
+def reactor_step(w: World):
+    c = w.cfg
+    nom = c["reactor_gross_mw"]
+    ramp = c["ramp_frac_per_min"] * nom
+    flow = (0.5 * (w.r_pump_a > 0.2) + 0.5 * (w.r_pump_b > 0.2)) * w.r_hx
+    w.r_mode_ticks += 1
+
+    # pump wear
+    if w.r_mode in ("ONLINE", "RUNBACK"):
+        if w.rng.random() < c["p_pump_wear"]:
+            which = "pump_b" if w.r_pump_b > 0.2 else "pump_a"
+            setattr(w, "r_" + which, 0.1)
+            w.open_issue("pump_trip", f"reactor:{which}", -1, "wear", "pump", c["reactor_pos"], "critical")
+            w.log("ALARM", f"Reactor {which.upper()} tripped")
+
+    if w.r_mode == "ONLINE":
+        if flow < 0.75:
+            w.r_mode = "RUNBACK"
+            w.r_mode_ticks = 0
+            w.log("ALARM", "Reactor RUNBACK: coolant flow reduced")
+    if w.r_mode == "RUNBACK" and flow >= 0.99:
+        w.r_mode = "ONLINE"
+        w.log("INFO", "Reactor back ONLINE")
+
+    if w.r_mode in ("ONLINE", "RUNBACK"):
+        cap = nom * (1.0 if w.r_mode == "ONLINE" else 0.5) * min(1.0, flow / 0.5 if w.r_mode == "RUNBACK" else 1.0)
+        target = min(w.r_setpoint_mw, cap)
+        w.r_power_mw += clamp(target - w.r_power_mw, -ramp, ramp)
+        w.r_decay_mw = 0.0
+        thermal = w.r_power_mw / 0.3
+        t_eq = 300.0 + 480.0 * (thermal / 20.0) / max(flow, 0.05)
+        w.r_core_temp += (t_eq - w.r_core_temp) * 0.05
+        w.r_core_temp = clamp(w.r_core_temp, 300, 1400)
+        w.r_available_mw = max(0.0, min(cap, w.r_power_mw + ramp) - c["reactor_self_mw"] - 0.15 * c["heat_export_mw"])
+        w.water_plant_heat = True
+        if flow < 0.3 or w.r_core_temp > c["core_temp_limit"]:
+            reactor_scram(w, "protection: temperature/flow")
+    elif w.r_mode in ("SCRAM", "COOLING", "EMERGENCY"):
+        w.r_power_mw = 0.0
+        w.r_available_mw = 0.0
+        w.water_plant_heat = False
+        t_since = max(1, (w.t - w.r_shutdown_t) * 60)
+        w.r_decay_mw = 0.066 * 20.0 * (t_since ** -0.2 - (t_since + 3.0e7) ** -0.2)
+        pumps_powered = w.trunk_ok and w.substation_ok
+        if not pumps_powered:
+            w.r_battery_h = max(0.0, w.r_battery_h - 1 / 60)
+        else:
+            w.r_battery_h = min(c["pump_battery_h"], w.r_battery_h + 1 / 240)
+        flow_now = flow if (pumps_powered or w.r_battery_h > 0) else 0.02 * w.r_hx   # natural circulation only
+        t_eq = 300.0 + 480.0 * (w.r_decay_mw / 20.0) / max(flow_now, 0.002)
+        w.r_core_temp += (t_eq - w.r_core_temp) * 0.02
+        w.r_core_temp = clamp(w.r_core_temp, 300, 1400)
+        if w.r_mode == "SCRAM" and w.r_mode_ticks > 30:
+            w.r_mode = "COOLING"
+            w.r_mode_ticks = 0
+        if w.r_mode == "COOLING":
+            if flow_now < 0.05 or w.r_core_temp > c["core_temp_limit"]:
+                w.r_mode = "EMERGENCY"
+                w.r_mode_ticks = 0
+                w.log("ALARM", "Reactor EMERGENCY: heat removal lost")
+            elif w.r_core_temp < 400 and w.r_hx > 0.7 and flow >= 0.5 and pumps_powered and w.r_mode_ticks > 360:
+                w.r_mode = "STARTING"
+                w.r_mode_ticks = 0
+                w.log("INFO", "Reactor STARTING")
+        if w.r_mode == "EMERGENCY":
+            if w.r_core_temp > c["core_temp_limit"]:
+                w.r_emergency_ticks += 1
+                if w.r_emergency_ticks > 240:
+                    w.r_mode = "CORE_DAMAGE"
+                    w.log("ALARM", "CORE DAMAGE. Simulation over.")
+                    w.finished = True
+                    w.finish_reason = "Reactor core damage"
+            else:
+                w.r_emergency_ticks = 0
+            if flow_now >= 0.4 and w.r_core_temp < 900:
+                w.r_mode = "COOLING"
+                w.r_mode_ticks = 0
+                w.log("INFO", "Reactor heat removal restored, COOLING")
+    elif w.r_mode == "STARTING":
+        w.r_power_mw += ramp * 0.5
+        w.r_available_mw = max(0.0, w.r_power_mw - c["reactor_self_mw"])
+        w.water_plant_heat = w.r_power_mw > 2.0
+        w.r_core_temp += (c["core_temp_nominal"] - w.r_core_temp) * 0.02
+        if w.r_power_mw >= nom * 0.5:
+            w.r_mode = "ONLINE"
+            w.r_mode_ticks = 0
+            w.log("INFO", "Reactor ONLINE")
+    elif w.r_mode == "CORE_DAMAGE":
+        w.r_available_mw = 0.0
+    w.r_faults = [f for f, ok in (("PUMP_A_TRIP", w.r_pump_a > 0.2), ("PUMP_B_TRIP", w.r_pump_b > 0.2),
+                                  ("HEAT_EXCHANGER_DAMAGE", w.r_hx > 0.7)) if not ok]
+
+
+def reactor_scram(w: World, reason):
+    if w.r_mode in ("ONLINE", "RUNBACK", "STARTING"):
+        w.r_mode = "SCRAM"
+        w.r_mode_ticks = 0
+        w.r_shutdown_t = w.t
+        w.r_power_mw = 0.0
+        w.log("ALARM", f"Reactor SCRAM ({reason})")
+
+
