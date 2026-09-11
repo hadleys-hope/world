@@ -733,3 +733,43 @@ def power_step(w: World):
         w.colony_month_income += c["mine_income_per_tick"] * w.mine_frac
 
 
+# ------------------------------------------------------------------------------------
+# Houses: thermal, pipes, water
+# ------------------------------------------------------------------------------------
+
+def houses_step(w: World):
+    c = w.cfg
+    dt = c["tick_seconds"]
+    ua_eff = w.h_ua * (1.0 + 0.015 * w.wind)
+    q_loss = ua_eff * (w.h_t_in - w.t_out)
+    q_int = (w.h_draw_w - w.h_heat_w) * 0.8 + w.h_residents * 80.0   # appliances and people turn into heat
+    w.h_t_in += (w.h_heat_w + q_int - q_loss) * dt / w.h_cap
+    # pipes
+    cold = w.h_t_in < 0.0
+    w.h_frozen = np.where(cold, w.h_frozen + 1, 0)
+    newly_frozen = (w.h_frozen == c["freeze_ticks_to_frozen"]) & w.h_pipes_ok
+    for i in np.flatnonzero(newly_frozen):
+        w.h_pipes_ok[i] = False
+        w.log("WARN", f"House {i + 1}: pipes frozen")
+    burst_now = (w.h_frozen == c["freeze_ticks_to_frozen"] + c["frozen_ticks_to_burst"]) & ~w.h_burst
+    for i in np.flatnonzero(burst_now):
+        w.h_burst[i] = True
+        cost_mul = 0.5 if not w.h_valve_open[i] else 1.0
+        iss = w.open_issue("pipes_burst", f"house:{i}", int(w.h_sector[i]), "freeze", "pipes",
+                           (float(w.h_x[i]), float(w.h_y[i])), "critical")
+        iss.cost *= cost_mul
+    # water
+    supply = w.water_tank_m3 > 0 and w.pump_station_ok
+    w.h_water_ok = supply & w.water_main_ok[w.h_sector] & w.h_pipes_ok & ~w.h_burst
+    use = np.where(w.h_water_ok, c["water_per_house_m3_day"] / 1440.0 * (1 + 0.5 * w.h_residents), 0.0)
+    w.h_water_m3 += use
+    w.h_water_day += use
+    w.h_water_month += use
+    w.sector_water_m3 = np.bincount(w.h_sector, weights=use, minlength=w.S)
+    w.water_tank_m3 = max(0.0, w.water_tank_m3 - float(use.sum()))
+    # sewage: aeration stations need power; sludge accumulates
+    w.h_aeration_ok = w.h_aeration_ok & True
+    w.h_sludge += np.where(w.h_water_ok, c["sludge_per_resident_per_tick"] * (1 + w.h_residents), 0.0)
+    w.h_sludge = np.minimum(w.h_sludge, 1.0)
+
+
