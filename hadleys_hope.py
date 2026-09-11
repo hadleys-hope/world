@@ -520,3 +520,216 @@ def reactor_scram(w: World, reason):
         w.log("ALARM", f"Reactor SCRAM ({reason})")
 
 
+# ------------------------------------------------------------------------------------
+# Grid, balance, ups
+# ------------------------------------------------------------------------------------
+
+def grid_rebuild(w: World):
+    """Recompute who is online down the tree. Spans are cut by fallen poles and low health."""
+    PPS = w.cfg["poles_per_sector"]
+    # fallen pole cuts the span feeding it and the next one
+    fallen = w.p_state == 2
+    cut = np.zeros(w.P, dtype=bool)
+    cut |= fallen
+    nxt = np.roll(fallen, 1)
+    nxt[w.p_k == 0] = False
+    cut |= nxt
+    span_ok = (w.s_health >= 0.2) & ~cut
+    # cumulative along each sector chain
+    span_ok_m = span_ok.reshape(w.S, PPS)
+    chain = np.cumprod(span_ok_m, axis=1).astype(bool)
+    sector_feed = w.trunk_ok & w.substation_ok & w.feeder_ok & w.rp_ok
+    w.feeder_online = sector_feed
+    w.s_online = (chain & sector_feed[:, None]).reshape(-1)
+    # internet cable on the same route
+    net_span = w.n_span_ok & ~cut
+    w.net_chain = np.cumprod(net_span.reshape(w.S, PPS), axis=1).astype(bool).reshape(-1)
+
+
+def houses_decide(w: World):
+    """House programs: thermostat with modes chosen from the power situation."""
+    c = w.cfg
+    target = np.full(w.N, c["comfort_c"])
+    target[w.h_on_ups | (w.h_limit_w > 0)] = c["eco_c"]
+    target[(w.h_limit_w > 0) & (w.h_limit_w <= c["limit_level5_w"])] = c["antifreeze_c"]
+    w.h_target = target
+    on = w.h_heater_on.copy()
+    on[w.h_t_in < target - 0.5] = True
+    on[w.h_t_in > target + 0.5] = False
+    w.h_heater_on = on
+    # valve closes when pipes burst (a good program does this)
+    w.h_valve_open = ~w.h_burst
+
+
+def houses_demand(w: World):
+    """Desired draw per house given limit and priorities."""
+    c = w.cfg
+    night = w.is_night()
+    base = w.h_base_w * (0.6 if night else 1.0) + w.rng.uniform(-50, 50, w.N)
+    base = np.maximum(base, 80.0)
+    heater = np.where(w.h_heater_on, w.h_heater_w, 0.0)
+    aeration = np.where(w.h_aeration_ok, c["aeration_w"], 0.0)
+    want = base + heater + aeration
+    limit = w.h_limit_w
+    lim = np.where(limit > 0, limit, 1e9)
+    # priorities inside the limit: aeration and fridge (100 W) first, heater, then the rest
+    essential = aeration + 100.0
+    heat_alloc = np.minimum(heater, np.maximum(0.0, lim - essential))
+    rest = np.minimum(base - 100.0, np.maximum(0.0, lim - essential - heat_alloc))
+    draw = essential + heat_alloc + rest
+    draw = np.minimum(draw, want)
+    return draw, heat_alloc
+
+
+def power_step(w: World):
+    c = w.cfg
+    S = w.S
+    grid_rebuild(w)
+    # sources
+    w.solar_kw = c["solar_peak_kw"] * w.daylight * (1 - w.dust) * w.solar_health
+    reactor_kw = w.r_available_mw * 1000.0 if (w.trunk_ok and w.substation_ok) else 0.0
+    available = reactor_kw + (w.solar_kw if w.substation_ok else 0.0)
+
+    # demand from houses with current limits
+    houses_decide(w)
+    house_pole_online = w.s_online[w.h_pole] & w.h_wiring_ok
+    draw, heat_alloc = houses_demand(w)
+    # infrastructure loads
+    infra = {
+        "mine": c["mine_kw"] * w.mine_frac,
+        "water_plant": c["water_plant_kw"] if w.water_plant_ok else 0.0,
+        "waste_storage": c["waste_storage_kw"],
+        "ops_center": c["ops_center_kw"],
+        "comms": c["comms_kw"] + (c["comms_kw"] * 0.5 if w.tower_line_ok else 0.0),
+        "cabinets": c["cabinet_kw"] * S,
+        "gates": c["gate_kw"] * S,
+        "lamps": 0.0,
+        "road_heating": c["road_heating_kw"] if (w.road_icy and w.shedding < 2) else 0.0,
+        "pump_station": c["pump_station_kw"],
+        "ups_charge": 0.0,
+    }
+    lamps_on = w.p_lamp_ok & (w.s_online) & (w.shedding < 4)
+    lamp_kw = c["lamp_kw"] * (1.2 if w.storm_lighting else 1.0)
+    infra["lamps"] = float(lamps_on.sum()) * lamp_kw
+    w.p_lamp_on = lamps_on
+    w.road_heating_on = infra["road_heating"] > 0
+    # ups charging demand
+    need = np.maximum(0.0, c["ups_sector_kwh"] - w.ups_kwh)
+    charge_kw = np.where((need > 0) & w.feeder_online & (w.shedding < 2), c["ups_charge_kw"], 0.0)
+    center_need = c["ups_center_kwh"] - w.ups_center_kwh
+    center_charge = c["ups_charge_kw"] if (center_need > 0 and w.substation_ok and w.trunk_ok and w.shedding < 2) else 0.0
+    infra["ups_charge"] = float(charge_kw.sum()) + center_charge
+
+    grid_house_draw = np.where(house_pole_online, draw, 0.0)
+    sector_draw = np.bincount(w.h_sector, weights=grid_house_draw, minlength=S) / 1000.0
+    demand = float(sector_draw.sum()) + sum(infra.values())
+    w.sector_demand_kw = sector_draw
+
+    # balance and shedding
+    deficit = max(0.0, demand - available)
+    if deficit > 0 and available > 0:
+        if w.shedding < 8:
+            w.shedding += 1
+            if w.shedding > w.max_shed_logged or w.t - w.shed_log_t > 240:
+                w.log("WARN", f"Load shedding level {w.shedding}, deficit {deficit:.0f} kW")
+                w.max_shed_logged = w.shedding
+                w.shed_log_t = w.t
+        w.surplus_ticks = 0
+    elif available > 0 and demand < available * 0.9:
+        w.surplus_ticks += 1
+        if w.surplus_ticks > 30 and w.shedding > 0:
+            w.shedding -= 1
+            w.surplus_ticks = 0
+            if w.shedding == 0:
+                w.log("INFO", "Load shedding ended")
+                w.max_shed_logged = 0
+    if available <= 0.0:
+        w.shedding = 8
+    reactor_up = w.r_mode not in ("SCRAM", "COOLING", "EMERGENCY", "CORE_DAMAGE")
+    w.mine_frac = (1.0 if w.shedding < 6 else 0.5 if w.shedding < 7 else 0.0) if (available > 0 and reactor_up) else 0.0
+    w.mine_powered = w.mine_frac > 0
+
+    # apply limits for next tick
+    limit = np.zeros(w.N)
+    if w.shedding >= 3:
+        limit[:] = c["limit_level3_w"]
+    if w.shedding >= 5:
+        limit[:] = c["limit_level5_w"]
+    # level 8: whole sectors dropped, from 6 down
+    shed_sectors = np.zeros(S, dtype=bool)
+    if w.shedding >= 8 and available > 0:
+        excess = deficit
+        for s in range(S - 1, -1, -1):
+            if excess <= 0:
+                break
+            shed_sectors[s] = True
+            excess -= float(sector_draw[s])
+    sector_feed = w.feeder_online & ~shed_sectors
+    w.sector_online = sector_feed
+
+    # UPS per sector when feed is lost
+    house_feed_ok = house_pole_online & sector_feed[w.h_sector]
+    on_ups = np.zeros(w.N, dtype=bool)
+    powered = house_feed_ok.copy()
+    for s in range(S):
+        mask = w.h_sector == s
+        if sector_feed[s]:
+            w.ups_kwh[s] = min(c["ups_sector_kwh"], w.ups_kwh[s] + charge_kw[s] / 60.0)
+            w.ups_state[s] = "CHARGING" if charge_kw[s] > 0 else "STANDBY"
+        else:
+            if w.ups_kwh[s] > 0 and w.ups_health[s] > 0.2:
+                # ups feeds houses whose local chain is intact, with a 2 kW limit each
+                m = mask & house_pole_online & ~house_feed_ok
+                limit[m] = np.minimum(np.where(limit[m] > 0, limit[m], 1e9), c["limit_level3_w"])
+                sup = min(c["ups_sector_kw"], float(np.minimum(draw[m], c["limit_level3_w"]).sum()) / 1000.0)
+                w.ups_kwh[s] = max(0.0, w.ups_kwh[s] - sup / 60.0)
+                powered[m] = True
+                on_ups[m] = True
+                w.ups_state[s] = "DISCHARGING"
+                if w.ups_kwh[s] <= 0:
+                    w.ups_state[s] = "DEPLETED"
+                    w.log("ALARM", f"Sector {s + 1} UPS depleted")
+            else:
+                w.ups_state[s] = "DEPLETED" if w.ups_kwh[s] <= 0 else "FAULT"
+    # center ups
+    if w.substation_ok and w.trunk_ok and available > 0:
+        w.ups_center_kwh = min(c["ups_center_kwh"], w.ups_center_kwh + center_charge / 60.0)
+        w.ups_center_state = "CHARGING" if center_charge > 0 else "STANDBY"
+        w.comms_powered = True
+        w.pump_station_ok = True
+    else:
+        if w.ups_center_kwh > 0:
+            w.ups_center_kwh = max(0.0, w.ups_center_kwh - (c["ops_center_kw"] + c["comms_kw"] + c["pump_station_kw"]) / 60.0)
+            w.ups_center_state = "DISCHARGING"
+            w.comms_powered = True
+            w.pump_station_ok = True
+        else:
+            w.ups_center_state = "DEPLETED"
+            w.comms_powered = False
+            w.pump_station_ok = False
+
+    # final house feed
+    real_draw = np.where(powered, draw, 0.0)
+    heat = np.where(powered, heat_alloc, 0.0)
+    w.h_power_ok = powered
+    w.h_on_ups = on_ups
+    w.h_limit_w = limit
+    w.h_draw_w = real_draw
+    w.h_heat_w = heat
+    kwh = real_draw / 1000.0 / 60.0
+    w.h_meter_kwh += kwh
+    w.h_meter_month += kwh
+    w.h_meter_day += kwh
+    w.available_kw = available
+    w.demand_kw = demand
+    w.deficit_kw = deficit
+    w.infra_loads_kw = {k: round(v, 1) for k, v in infra.items()}
+    # lamps: dark sectors
+    lamps_by_sector = np.bincount(w.p_sector, weights=w.p_lamp_on.astype(float), minlength=S)
+    w.sector_dark = (lamps_by_sector < 2) & np.array([w.is_night()] * S)
+    # mine income
+    if w.mine_frac > 0:
+        w.colony_budget += c["mine_income_per_tick"] * w.mine_frac
+        w.colony_month_income += c["mine_income_per_tick"] * w.mine_frac
+
+
