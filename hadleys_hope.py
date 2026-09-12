@@ -1077,3 +1077,248 @@ def _repair_rover(w: World, r: Rover):
             r.target_radius = R
 
 
+# ------------------------------------------------------------------------------------
+# Incidents, damage, repair resolution
+# ------------------------------------------------------------------------------------
+
+def damage_target(w: World, target: str, cause: str, severity: float):
+    c = w.cfg
+    kind, _, arg = target.partition(":")
+    if kind == "span":
+        i = int(arg)
+        w.s_health[i] = max(0.0, w.s_health[i] - severity)
+        if w.s_health[i] < 0.2:
+            w.open_issue("span_broken", target, int(w.p_sector[i]), cause, "span", (float(w.p_x[i]), float(w.p_y[i])))
+    elif kind == "net_span":
+        i = int(arg)
+        w.n_span_ok[i] = False
+        w.open_issue("cable_broken", target, int(w.p_sector[i]), cause, "net_span", (float(w.p_x[i]), float(w.p_y[i])))
+    elif kind == "pole":
+        i = int(arg)
+        if severity > 0.7:
+            w.p_state[i] = 2
+            w.p_lamp_ok[i] = False
+            w.open_issue("pole_fallen", target, int(w.p_sector[i]), cause, "pole", (float(w.p_x[i]), float(w.p_y[i])), "critical")
+        elif severity > 0.3:
+            w.p_state[i] = max(w.p_state[i], 1)
+            w.open_issue("pole_tilted", target, int(w.p_sector[i]), cause, "pole", (float(w.p_x[i]), float(w.p_y[i])))
+    elif kind == "lamp":
+        i = int(arg)
+        w.p_lamp_ok[i] = False
+        w.open_issue("lamp_broken", target, int(w.p_sector[i]), cause, "lamp", (float(w.p_x[i]), float(w.p_y[i])), "info")
+    elif kind == "house":
+        i = int(arg)
+        w.h_wiring_ok[i] = False
+        w.open_issue("house_wiring", target, int(w.h_sector[i]), cause, "wiring", (float(w.h_x[i]), float(w.h_y[i])))
+    elif kind == "aeration":
+        i = int(arg)
+        w.h_aeration_ok[i] = False
+        w.open_issue("aeration_failure", target, int(w.h_sector[i]), cause, "aeration", (float(w.h_x[i]), float(w.h_y[i])))
+    elif kind == "terminal":
+        i = int(arg)
+        w.h_terminal_ok[i] = False
+        w.open_issue("terminal_broken", target, int(w.h_sector[i]), cause, "terminal", (float(w.h_x[i]), float(w.h_y[i])), "info")
+    elif kind == "cabinet":
+        s = int(arg)
+        w.cabinet_ok[s] = False
+        a = math.radians(s * 60 + 30)
+        w.open_issue("cabinet_damaged", target, s, cause, "cabinet", (95 * math.cos(a), 95 * math.sin(a)))
+    elif kind == "gate":
+        s = int(arg)
+        w.gate_ok[s] = False
+        a = math.radians(s * 60)
+        R = c["ring_road_radius"]
+        w.open_issue("gate_damaged", target, s, cause, "gate", (R * math.cos(a), R * math.sin(a)))
+    elif kind == "road":
+        s = int(arg)
+        w.road_integrity[s] = max(0.0, w.road_integrity[s] - severity * 100)
+    elif kind == "feeder":
+        s = int(arg)
+        w.feeder_ok[s] = False
+        a = math.radians(s * 60 + 30)
+        w.open_issue("feeder_broken", target, s, cause, "feeder", (60 * math.cos(a), 60 * math.sin(a)), "critical")
+    elif kind == "rp":
+        s = int(arg)
+        w.rp_ok[s] = False
+        a = math.radians(s * 60 + 30)
+        w.open_issue("rp_damaged", target, s, cause, "rp", (85 * math.cos(a), 85 * math.sin(a)), "critical")
+    elif kind == "trunk":
+        w.trunk_ok = False
+        w.open_issue("trunk_broken", "trunk", -1, cause, "trunk", (-360, 0), "critical")
+    elif kind == "substation":
+        w.substation_ok = False
+        w.open_issue("substation_damaged", "substation", -1, cause, "substation", (0, 0), "critical")
+    elif kind == "tower_line":
+        w.tower_line_ok = False
+        w.open_issue("tower_line_broken", "tower_line", -1, cause, "tower_line", (-220, -190), "warning")
+    elif kind == "solar":
+        w.solar_health = max(0.0, w.solar_health - severity)
+        w.open_issue("solar_damaged", "solar", -1, cause, "solar", (-640, -110), "info")
+    elif kind == "reactor":
+        comp = arg
+        if comp == "heat_exchanger":
+            w.r_hx = max(0.0, w.r_hx - severity)
+            w.open_issue("heat_exchanger_damage", target, -1, cause, "heat_exchanger", c["reactor_pos"], "critical")
+        elif comp in ("pump_a", "pump_b"):
+            setattr(w, "r_" + comp, 0.1)
+            w.open_issue("pump_trip", target, -1, cause, "pump", c["reactor_pos"], "critical")
+    elif kind == "ups":
+        s = int(arg)
+        w.ups_health[s] = 0.1
+        a = math.radians(s * 60 + 30)
+        w.open_issue("ups_damaged", target, s, cause, "ups", (100 * math.cos(a), 100 * math.sin(a)))
+
+
+def resolve_issue(w: World, iss: Issue):
+    kind, _, arg = iss.target.partition(":")
+    if kind == "span":
+        w.s_health[int(arg)] = 1.0
+    elif kind == "net_span":
+        w.n_span_ok[int(arg)] = True
+    elif kind == "pole":
+        i = int(arg)
+        w.p_state[i] = 0
+        w.p_lamp_ok[i] = True
+        # a fallen pole also cut the spans and the cable: they are fixed with it
+        w.s_health[i] = max(w.s_health[i], 1.0)
+        if w.p_k[i] + 1 < w.cfg["poles_per_sector"]:
+            w.s_health[i + 1] = 1.0
+            w.n_span_ok[i + 1] = True
+        w.n_span_ok[i] = True
+    elif kind == "lamp":
+        w.p_lamp_ok[int(arg)] = True
+    elif kind == "house":
+        i = int(arg)
+        if iss.kind == "pipes_burst":
+            w.h_burst[i] = False
+            w.h_pipes_ok[i] = True
+            w.h_frozen[i] = 0
+        else:
+            w.h_wiring_ok[i] = True
+    elif kind == "aeration":
+        w.h_aeration_ok[int(arg)] = True
+    elif kind == "terminal":
+        w.h_terminal_ok[int(arg)] = True
+    elif kind == "cabinet":
+        w.cabinet_ok[int(arg)] = True
+    elif kind == "gate":
+        w.gate_ok[int(arg)] = True
+    elif kind == "road":
+        w.road_integrity[int(arg)] = 100.0
+    elif kind == "feeder":
+        w.feeder_ok[int(arg)] = True
+    elif kind == "rp":
+        w.rp_ok[int(arg)] = True
+    elif kind == "trunk":
+        w.trunk_ok = True
+    elif kind == "substation":
+        w.substation_ok = True
+    elif kind == "tower_line":
+        w.tower_line_ok = True
+    elif kind == "solar":
+        w.solar_health = 1.0
+    elif kind == "reactor":
+        comp = arg
+        if comp == "heat_exchanger":
+            w.r_hx = 1.0
+        else:
+            setattr(w, "r_" + comp, 1.0)
+    elif kind == "ups":
+        w.ups_health[int(arg)] = 1.0
+    iss.status = "resolved"
+    iss.resolved_t = w.t
+    finance_record(w, iss.cost, iss.payer, iss.sector, iss.cause, f"repair {iss.kind} {iss.target}")
+    w.log("INFO", f"Repaired {iss.kind} at {iss.target}, {iss.cost:.0f} cr")
+
+
+def spawn_xeno(w: World, s):
+    a = math.radians(s * 60 + w.rng.uniform(5, 55))
+    r = w.rng.uniform(140, 330)
+    w.xeno_markers.append({"x": r * math.cos(a), "y": r * math.sin(a), "until": w.t + 90, "sector": s})
+
+
+def incidents_step(w: World):
+    c = w.cfg
+    S = w.S
+    rng = w.rng
+    night = w.is_night()
+    # weather on spans: logistic in wind, ice, cold
+    v = w.wind
+    z = 0.35 * (v - 22.0) + 3.0 * w.s_ice + 0.03 * (-w.t_out - 40) - 6.5
+    p = 1.0 / (1.0 + np.exp(-z)) * 0.02
+    p = p * np.where(w.p_state == 1, 2.0, 1.0)
+    hit = rng.random(w.P) < p
+    for i in np.flatnonzero(hit & (w.s_health >= 0.2)):
+        damage_target(w, f"span:{i}", "weather", 1.0)
+        if rng.random() < 0.5:
+            damage_target(w, f"net_span:{i}", "weather", 1.0)
+    # xenomorphs
+    pxeno = c["p_xeno"] * (3.0 if night else 1.0)
+    for s in range(S):
+        if rng.random() < pxeno * (2.0 if w.sector_dark[s] else 1.0):
+            spawn_xeno(w, s)
+            w.lockdown_ticks[s] = 120
+            w.gate_state[s] = "LOCKDOWN"
+            w.log("ALARM", f"Xenomorphs in sector {s + 1}: LOCKDOWN")
+            roll = rng.random()
+            base = s * c["poles_per_sector"]
+            if roll < 0.4:
+                damage_target(w, f"cabinet:{s}", "xenomorph", 1.0)
+            elif roll < 0.7:
+                damage_target(w, f"pole:{base + int(rng.integers(1, c['poles_per_sector']))}", "xenomorph", 0.9)
+            else:
+                hs = np.flatnonzero(w.h_sector == s)
+                damage_target(w, f"house:{int(rng.choice(hs))}", "xenomorph", 1.0)
+    # nest near the processor: marines show up and shoot the cooling
+    if rng.random() < c["p_xeno"] * 0.5:
+        w.nest_alert = 300
+        w.marines_active = 300
+        w.log("ALARM", "Xenomorph nest activity under the atmosphere processor. Marines deployed.")
+    if w.nest_alert > 0:
+        w.nest_alert -= 1
+        w.marines_active = max(0, w.marines_active - 1)
+        if rng.random() < c["p_nest_fire"] / 10:
+            comp = "heat_exchanger" if rng.random() < 0.6 else ("pump_a" if rng.random() < 0.5 else "pump_b")
+            damage_target(w, f"reactor:{comp}", "marines", 0.6)
+            w.log("ALARM", f"Stray marine fire damaged reactor {comp}")
+    # vandals
+    if rng.random() < c["p_vandal"] * (2.0 if night else 1.0):
+        s = int(rng.integers(0, S))
+        roll = rng.random()
+        base = s * c["poles_per_sector"]
+        if roll < 0.4:
+            damage_target(w, f"lamp:{base + int(rng.integers(0, c['poles_per_sector']))}", "vandal", 1.0)
+        elif roll < 0.6:
+            damage_target(w, f"gate:{s}", "vandal", 1.0)
+        elif roll < 0.8:
+            hs = np.flatnonzero(w.h_sector == s)
+            damage_target(w, f"terminal:{int(rng.choice(hs))}", "vandal", 1.0)
+        else:
+            hs = np.flatnonzero(w.h_sector == s)
+            damage_target(w, f"aeration:{int(rng.choice(hs))}", "vandal", 1.0)
+    # animals
+    if rng.random() < c["p_animal"]:
+        i = int(rng.integers(0, w.N))
+        if rng.random() < 0.5:
+            damage_target(w, f"house:{i}", "wildlife", 1.0)
+        else:
+            damage_target(w, f"aeration:{i}", "wildlife", 1.0)
+    # rover collisions with poles in the dark
+    for s in range(S):
+        if w.sector_dark[s] and rng.random() < c["p_rover_hit"]:
+            base = s * c["poles_per_sector"]
+            damage_target(w, f"pole:{base + int(rng.integers(0, c['poles_per_sector']))}", "impact", 0.9)
+            w.log("WARN", f"Rover hit a pole in dark sector {s + 1}")
+    # xeno marker expiry
+    w.xeno_markers = [m for m in w.xeno_markers if m["until"] > w.t]
+    # funding of open issues
+    for iss in w.issues:
+        if iss.status in ("open", "unfunded") and (w.t - iss.opened_t) % 30 == 0:
+            if finance_reserve(w, iss):
+                iss.status = "funded"
+            else:
+                if iss.status == "open":
+                    w.log("WARN", f"No funds for {iss.kind} at {iss.target} ({iss.cost:.0f} cr)")
+                iss.status = "unfunded"
+
+
