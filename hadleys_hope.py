@@ -1577,8 +1577,256 @@ def house_geometry(w: World):
     }
 
 
-HTML = ""
 
+# ------------------------------------------------------------------------------------
+# Browser UI (served at /). Plain canvas, polls /state four times per second.
+# ------------------------------------------------------------------------------------
+
+HTML = r"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Hadley's Hope</title>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --text:#d9dde6; --dim:#8a93a6; --ok:#5ec07a; --warn:#e0b04a; --bad:#e2574d; --blue:#5aa9ff; --cyan:#4fd1c5; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:13px/1.35 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; display:flex; height:100vh; overflow:hidden; }
+  #map { flex:1 1 auto; position:relative; }
+  canvas { display:block; width:100%; height:100%; }
+  #side { width:490px; flex:0 0 490px; background:var(--panel); border-left:1px solid var(--line); overflow-y:auto; padding:10px 12px; }
+  h1 { font-size:15px; margin:0 0 6px; } h2 { font-size:12px; color:var(--dim); text-transform:uppercase; letter-spacing:.06em; margin:14px 0 6px; }
+  .row { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+  button { background:#232835; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:4px 8px; cursor:pointer; font-size:12px; }
+  button:hover { background:#2d3444; } button.on { border-color:var(--blue); color:var(--blue); }
+  .kpi { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+  .card { background:#1f2430; border:1px solid var(--line); border-radius:8px; padding:6px 8px; }
+  .card .v { font-size:17px; font-weight:600; } .card .l { color:var(--dim); font-size:11px; }
+  table { width:100%; border-collapse:collapse; font-size:11.5px; } th,td { padding:2px 3px; text-align:right; border-bottom:1px solid var(--line); white-space:nowrap; } th { color:var(--dim); font-weight:500; } td:first-child, th:first-child { text-align:left; }
+  .ok { color:var(--ok); } .warn { color:var(--warn); } .bad { color:var(--bad); } .dim { color:var(--dim); }
+  #log { font-family: ui-monospace, Menlo, Consolas, monospace; font-size:11px; max-height:230px; overflow-y:auto; background:#0f1115; border:1px solid var(--line); border-radius:6px; padding:6px; }
+  #log div { padding:1px 0; } .ALARM { color:var(--bad); } .WARN { color:var(--warn); } .INFO { color:var(--dim); }
+  #legend { position:absolute; left:10px; bottom:10px; background:rgba(23,26,33,.9); border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:11px; color:var(--dim); line-height:1.5; }
+  #legend b { color:var(--text); }
+  #banner { position:absolute; left:10px; top:10px; background:rgba(23,26,33,.9); border:1px solid var(--line); border-radius:8px; padding:6px 10px; font-size:13px; }
+  #finished { position:absolute; inset:0; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,.6); font-size:28px; color:var(--bad); }
+  pre { white-space:pre-wrap; font-size:11px; background:#0f1115; padding:6px; border-radius:6px; border:1px solid var(--line); }
+</style></head>
+<body>
+<div id="map"><canvas id="c"></canvas>
+  <div id="banner">connecting...</div>
+  <div id="legend"><b>Map</b>: house colour = indoor temperature (blue cold, orange warm), red frame = no power, blue frame = on sector UPS, x = burst pipes.<br>
+  Yellow lines = power (moving dashes = energised), blue = water, cyan = internet cable, cyan dots = packets, red dot = packet with no uplink.<br>
+  Poles: dot; orange = tilted, red x = fallen; glow = street lamp on. Gates on the ring road: green open, grey closed, red lockdown.<br>
+  Rovers: G garbage, S sludge hauler, E engineers, P plumber. Red diamonds = xenomorphs. ! = open issue.</div>
+  <div id="finished"></div>
+</div>
+<div id="side">
+  <h1>Hadley's Hope, LV-426</h1>
+  <div class="row"><span id="time" style="font-weight:600;min-width:120px"></span>
+    <button id="pause">Pause</button>
+    <span class="dim">speed</span><button data-s="1">1x</button><button data-s="20">20x</button><button data-s="120">120x</button><button data-s="600">600x</button></div>
+  <h2>Inject</h2>
+  <div class="row">
+    <button data-i="span">break span</button><button data-i="pole">fell pole</button><button data-i="xeno">xenomorphs</button>
+    <button data-i="storm">storm</button><button data-i="trunk">cut trunk</button><button data-i="pump">pump trip</button>
+    <button data-i="marines">marines fire</button><button data-i="scram">SCRAM</button><button data-i="road">break road</button><button data-i="money">+50k cr</button>
+  </div>
+  <h2>Colony</h2>
+  <div class="kpi" id="kpi"></div>
+  <h2>Reactor and power</h2>
+  <div id="reactor" class="card"></div>
+  <h2>Sectors</h2>
+  <table id="sectors"><thead><tr><th>#</th><th>cr</th><th>kW</th><th>avg C</th><th>min C</th><th>pwr</th><th>water</th><th>net</th><th>UPS</th><th>waste</th><th>san</th><th>gate</th><th>road</th></tr></thead><tbody></tbody></table>
+  <h2>Open issues <span id="nissues" class="dim"></span></h2>
+  <div id="issues" class="dim" style="font-size:11px;max-height:120px;overflow-y:auto"></div>
+  <h2>Events</h2>
+  <div id="log"></div>
+  <h2>Last monthly report</h2>
+  <pre id="report">no month closed yet</pre>
+</div>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+let G = null, S = null, packetsSeen = new Map(), lastFetch = 0, animT = 0;
+const post = (o) => fetch('/cmd', {method:'POST', body: JSON.stringify(o)});
+document.getElementById('pause').onclick = () => post({cmd:'pause'});
+document.querySelectorAll('button[data-s]').forEach(b => b.onclick = () => post({cmd:'speed', value:+b.dataset.s}));
+document.querySelectorAll('button[data-i]').forEach(b => b.onclick = () => post({cmd:'inject', value:b.dataset.i}));
+
+async function loadGeom(){ G = await (await fetch('/geometry')).json(); }
+async function poll(){
+  try { const s = await (await fetch('/state')).json(); S = s; lastFetch = performance.now(); renderSide(s); }
+  catch(e) { document.getElementById('banner').textContent = 'no connection'; }
+  setTimeout(poll, 250);
+}
+
+// ---------- coordinate transform ----------
+let sc = 1, ox = 0, oy = 0;
+function fit(){
+  const W = cv.clientWidth, H = cv.clientHeight; cv.width = W * devicePixelRatio; cv.height = H * devicePixelRatio;
+  const x0=-780, x1=440, y0=-440, y1=440;
+  sc = Math.min(W/(x1-x0), H/(y1-y0)); ox = W/2 - sc*(x0+x1)/2; oy = H/2 - sc*(y0+y1)/2;
+}
+const X = x => ox + sc*x, Y = y => oy + sc*y;
+function polar(a, r){ const t = a*Math.PI/180; return [r*Math.cos(t), r*Math.sin(t)]; }
+
+// ---------- colours ----------
+function tempColor(t){ // -60..25 -> blue..white..orange
+  const u = Math.max(0, Math.min(1, (t + 40) / 65));
+  if (u < 0.6) { const k = u/0.6; return `rgb(${Math.round(60+150*k)},${Math.round(110+120*k)},${Math.round(230-20*k)})`; }
+  const k = (u-0.6)/0.4; return `rgb(${Math.round(210+45*k)},${Math.round(230-90*k)},${Math.round(210-150*k)})`;
+}
+const modeColor = {ONLINE:'#5ec07a', RUNBACK:'#e0b04a', SCRAM:'#e2574d', COOLING:'#e2574d', EMERGENCY:'#ff2a2a', CORE_DAMAGE:'#ff0000', STARTING:'#5aa9ff'};
+
+// ---------- drawing helpers ----------
+function line(x0,y0,x1,y1,color,w,dash,off){ ctx.beginPath(); ctx.strokeStyle=color; ctx.lineWidth=w; ctx.setLineDash(dash||[]); ctx.lineDashOffset=off||0; ctx.moveTo(X(x0),Y(y0)); ctx.lineTo(X(x1),Y(y1)); ctx.stroke(); ctx.setLineDash([]); }
+function flow(x0,y0,x1,y1,color,w,on,speed){ line(x0,y0,x1,y1,on?color:'#3a3f4a',w); if(on) line(x0,y0,x1,y1,'#ffffff',Math.max(1,w-1),[3,9],-animT*speed); }
+function dot(x,y,r,color){ ctx.beginPath(); ctx.fillStyle=color; ctx.arc(X(x),Y(y),r,0,Math.PI*2); ctx.fill(); }
+function text(x,y,s,color,size,align){ ctx.fillStyle=color||'#d9dde6'; ctx.font=`${size||11}px sans-serif`; ctx.textAlign=align||'center'; ctx.fillText(s,X(x),Y(y)); }
+function box(x,y,w,h,fill,stroke,label,sub){ ctx.fillStyle=fill; ctx.strokeStyle=stroke; ctx.lineWidth=1.2; ctx.beginPath(); if(ctx.roundRect) ctx.roundRect(X(x)-w/2,Y(y)-h/2,w,h,6); else ctx.rect(X(x)-w/2,Y(y)-h/2,w,h); ctx.fill(); ctx.stroke(); if(label) text(x,y-3,label,'#e8ecf3',11); if(sub) text(x,y+10,sub,'#9aa3b5',10); }
+
+function draw(){
+  fit(); ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+  ctx.clearRect(0,0,cv.clientWidth,cv.clientHeight);
+  animT = performance.now()/40;
+  if(!G || !S) { requestAnimationFrame(draw); return; }
+  const c = G.cfg, R = c.ring_road_radius, ns = c.sectors;
+  const night = S.env.night;
+  // sectors
+  for(let s=0;s<ns;s++){
+    const a0=(s*60)*Math.PI/180, a1=((s+1)*60)*Math.PI/180;
+    ctx.beginPath(); ctx.arc(X(0),Y(0),sc*(R+40),a0,a1); ctx.arc(X(0),Y(0),sc*(c.hub_radius+10),a1,a0,true); ctx.closePath();
+    const sec=S.sectors[s];
+    ctx.fillStyle = sec.gate==='LOCKDOWN' ? 'rgba(226,87,77,.10)' : (!sec.online ? 'rgba(226,87,77,.05)' : (sec.dark ? 'rgba(0,0,0,.35)' : 'rgba(255,255,255,.025)'));
+    ctx.fill(); ctx.strokeStyle='#262b36'; ctx.lineWidth=1; ctx.stroke();
+    const [lx,ly]=polar(s*60+30, R+58); text(lx,ly,`S${s+1}`,'#6d7689',12);
+  }
+  // roads: ring segments and spokes
+  for(let s=0;s<ns;s++){
+    const integ=S.sectors[s].road; const col = integ<20?'#e2574d':(integ<50?'#8a6a2a':'#3d4350');
+    ctx.beginPath(); ctx.strokeStyle=col; ctx.lineWidth=S.power.road_heating?5:4; ctx.arc(X(0),Y(0),sc*R,(s*60)*Math.PI/180,((s+1)*60)*Math.PI/180); ctx.stroke();
+    const [sx,sy]=polar(s*60,c.hub_radius), [ex,ey]=polar(s*60,R); line(sx,sy,ex,ey,'#2e3440',2);
+  }
+  line(-R,0,c.reactor[0]+60,0,'#3d4350',4); // spoke to the reactor complex (under the trunk)
+  // gates
+  for(let s=0;s<ns;s++){ const [gx,gy]=polar(s*60,R); const st=S.sectors[s].gate; const col = st==='LOCKDOWN'?'#e2574d':(st==='OPEN'?'#5ec07a':'#8a93a6');
+    ctx.save(); ctx.translate(X(gx),Y(gy)); ctx.rotate(s*60*Math.PI/180); ctx.fillStyle=col; ctx.fillRect(-3,-9,6,18); ctx.restore(); if(!S.sectors[s].gate_ok) text(gx,gy-12,'!','#e2574d',12); }
+  // water pipes: plant -> hub, hub -> sector mains
+  const waterOn = S.water.tank_m3>0 && S.water.pump;
+  flow(c.reactor[0], 100, -c.hub_radius-4, 8, '#5aa9ff', 2, S.water.plant, 1.2);
+  for(let s=0;s<ns;s++){ const [x0,y0]=polar(s*60+36,c.hub_radius), [x1,y1]=polar(s*60+36,R-30); flow(x0,y0,x1,y1,'#5aa9ff',1.5, waterOn && S.sectors[s].water_ok>0, 1.0); }
+  // power: trunk, feeders, spans
+  const reactorUp = S.reactor.available_mw>0;
+  flow(c.reactor[0]+40, -4, -c.hub_radius, -4, '#f2c14e', 3, S.power.trunk && reactorUp, 2.5);
+  flow(c.reactor[0]+40, -60, c.tower[0]+20, c.tower[1]+30, '#f2c14e', 1.2, S.power.tower_line && S.power.trunk && reactorUp, 2);
+  for(let s=0;s<ns;s++){ const [x1,y1]=polar(s*60+30,c.hub_radius+18); const [x0,y0]=polar(s*60+30,c.hub_radius-30); flow(x0,y0,x1,y1,'#f2c14e',2,S.power.feeder[s]&&S.sectors[s].online,2); }
+  const PPS=c.poles_per_sector;
+  for(let i=0;i<G.poles.x.length;i++){
+    const k=G.poles.k[i], s=G.poles.sector[i];
+    let px0,py0; if(k===0){ [px0,py0]=polar(s*60+30,c.hub_radius+18); } else { px0=G.poles.x[i-1]; py0=G.poles.y[i-1]; }
+    const px1=G.poles.x[i], py1=G.poles.y[i];
+    flow(px0,py0,px1,py1,'#f2c14e',1.6,S.poles.span[i]===1,2);
+    // internet cable, offset perpendicular
+    const dx=px1-px0, dy=py1-py0, L=Math.hypot(dx,dy)||1, nx=-dy/L*6, ny=dx/L*6;
+    line(px0+nx,py0+ny,px1+nx,py1+ny,S.poles.net[i]===1?'#4fd1c5':'#4a3030',1);
+  }
+  // house drops to poles (faint)
+  for(let i=0;i<G.houses.x.length;i++){ const p=G.houses.pole[i]; line(G.houses.x[i],G.houses.y[i],G.poles.x[p],G.poles.y[p],'rgba(242,193,78,.12)',1); }
+  // hub
+  dot(0,0,sc*c.hub_radius,'#1c2028'); ctx.beginPath(); ctx.strokeStyle=S.power.substation?'#f2c14e':'#e2574d'; ctx.lineWidth=2; ctx.arc(X(0),Y(0),sc*c.hub_radius,0,Math.PI*2); ctx.stroke();
+  text(0,-30,'substation',S.power.substation?'#f2c14e':'#e2574d',11); text(0,-16,`UPS center ${S.power.ups_center_kwh} kWh`,'#9aa3b5',10);
+  text(0,0,S.net.comms?'comms node':'comms DOWN',S.net.comms&&S.net.uplink?'#4fd1c5':'#e2574d',11); text(0,16,'ops center, water pump','#9aa3b5',10);
+  text(0,32,`tank ${S.water.tank_m3} m3`,waterOn?'#5aa9ff':'#e2574d',10);
+  // reactor complex
+  const rc=modeColor[S.reactor.mode]||'#888';
+  box(c.reactor[0],-110,110,34,'#20242e','#7a6a2a','solar',`${S.power.solar_kw} kW`);
+  box(c.reactor[0],0,120,54,'#20242e',rc,`REACTOR ${S.reactor.mode}`,`${S.reactor.power_mw} MW  core ${S.reactor.core_temp} C`);
+  if(S.reactor.marines) text(c.reactor[0],-38,'MARINES IN THE SUBLEVELS','#e2574d',10);
+  box(c.reactor[0],100,110,34,'#20242e',S.water.plant?'#5aa9ff':'#e2574d','water plant',S.water.plant?'melting ice':'no heat');
+  box(c.reactor[0],200,110,34,'#20242e','#6a7a2a','waste storage',`+${S.finance.waste_station}`);
+  box(c.reactor[0],300,110,34,'#20242e',S.power.mine?'#a08a2a':'#5a5a5a','mine',S.power.mine?`${S.power.infra.mine} kW`:'stopped');
+  // tower
+  const [tx,ty]=[c.tower[0],c.tower[1]];
+  ctx.beginPath(); ctx.strokeStyle=S.net.uplink?'#4fd1c5':'#e2574d'; ctx.lineWidth=2; ctx.moveTo(X(tx)-10,Y(ty)+18); ctx.lineTo(X(tx),Y(ty)-18); ctx.lineTo(X(tx)+10,Y(ty)+18); ctx.stroke();
+  text(tx,ty+32,S.net.uplink?'uplink OK':'uplink LOST',S.net.uplink?'#4fd1c5':'#e2574d',10);
+  line(-c.hub_radius+8,-8,tx+6,ty+14,S.net.uplink?'#4fd1c5':'#4a3030',1.2);
+  if(S.net.uplink){ for(let k=0;k<3;k++){ ctx.beginPath(); ctx.strokeStyle=`rgba(79,209,197,${0.5-0.15*k})`; ctx.arc(X(tx),Y(ty)-14,8+6*k+((animT*2)%6),-2.2,-0.9); ctx.stroke(); } }
+  // poles and lamps
+  for(let i=0;i<G.poles.x.length;i++){ const x=G.poles.x[i],y=G.poles.y[i],st=S.poles.state[i];
+    if(S.poles.lamp[i]===1){ const g=ctx.createRadialGradient(X(x),Y(y),0,X(x),Y(y),sc*28); g.addColorStop(0,'rgba(255,230,140,.35)'); g.addColorStop(1,'rgba(255,230,140,0)'); ctx.fillStyle=g; ctx.beginPath(); ctx.arc(X(x),Y(y),sc*28,0,Math.PI*2); ctx.fill(); }
+    if(st===2){ text(x,y+4,'x','#e2574d',13); } else dot(x,y,3,st===1?'#e0b04a':'#c9cfdb'); }
+  // houses
+  const hs=S.houses; const sz=Math.max(4,sc*9);
+  for(let i=0;i<G.houses.x.length;i++){ const x=X(G.houses.x[i]),y=Y(G.houses.y[i]);
+    ctx.fillStyle=tempColor(hs.t[i]); ctx.fillRect(x-sz/2,y-sz/2,sz,sz);
+    if(!hs.power[i]){ ctx.strokeStyle='#e2574d'; ctx.lineWidth=1.5; ctx.strokeRect(x-sz/2,y-sz/2,sz,sz); }
+    else if(hs.ups[i]){ ctx.strokeStyle='#5aa9ff'; ctx.lineWidth=1.5; ctx.strokeRect(x-sz/2,y-sz/2,sz,sz); }
+    else if(hs.limit[i]>0){ ctx.strokeStyle='#e0b04a'; ctx.lineWidth=1; ctx.strokeRect(x-sz/2,y-sz/2,sz,sz); }
+    if(hs.heater[i]&&hs.power[i]){ ctx.fillStyle='#ff7a30'; ctx.fillRect(x-1.5,y-1.5,3,3); }
+    if(hs.burst[i]){ ctx.strokeStyle='#5aa9ff'; ctx.lineWidth=1.5; ctx.beginPath(); ctx.moveTo(x-sz/2,y-sz/2); ctx.lineTo(x+sz/2,y+sz/2); ctx.moveTo(x+sz/2,y-sz/2); ctx.lineTo(x-sz/2,y+sz/2); ctx.stroke(); }
+  }
+  // internet packets
+  const now=performance.now();
+  for(const p of S.net.packets){ const key=p.t+':'+p.from+':'+p.id; if(!packetsSeen.has(key)) packetsSeen.set(key, now); }
+  for(const [key,t0] of packetsSeen){ if(now-t0>1800){ packetsSeen.delete(key); continue; }
+    const [t,from,id]=key.split(':'); const pk=S.net.packets.find(q=>q.t+':'+q.from+':'+q.id===key); if(!pk) continue;
+    let path=[];
+    if(from==='house'){ const i=+id, p=G.houses.pole[i], s=G.houses.sector[i]; path.push([G.houses.x[i],G.houses.y[i]]);
+      for(let k=G.poles.k[p];k>=0;k--){ const j=s*PPS+k; path.push([G.poles.x[j],G.poles.y[j]]); } const [hx,hy]=polar(s*60+30,c.hub_radius+18); path.push([hx,hy]); path.push([0,0]); }
+    else { path.push([0,0]); }
+    if(pk.uplink) path.push([tx+6,ty+14]);
+    const u=(now-t0)/1800; let seg=Math.floor(u*(path.length-1)), f=u*(path.length-1)-seg; if(seg>=path.length-1){seg=path.length-2;f=1;}
+    const [ax,ay]=path[seg],[bx,by]=path[seg+1]; dot(ax+(bx-ax)*f,ay+(by-ay)*f,2.5,pk.uplink?(pk.kind==='reactor'?'#f2c14e':'#4fd1c5'):'#e2574d'); }
+  // waste bins and sludge stores at the ring
+  for(let s=0;s<ns;s++){ const [bx,by]=polar(s*60+30,R+22); const w=S.sectors[s].waste; ctx.fillStyle=w>=1?'#e2574d':(w>=0.9?'#e0b04a':'#3d4350'); ctx.fillRect(X(bx)-5,Y(by)-5,10,10); ctx.fillStyle='#8a93a6'; ctx.fillRect(X(bx)-4,Y(by)+4-8*Math.min(1,w),8,8*Math.min(1,w)); }
+  // rovers
+  const rc2={garbage:['G','#9bd36a'],sludge:['S','#b48ead'],repair:['E','#f2c14e'],plumber:['P','#5aa9ff']};
+  for(const r of S.rovers){ const [l,col]=rc2[r.name==='engineer-2'?'repair':(r.name==='engineer'?'repair':r.name)]||['?','#fff']; dot(r.x,r.y,7,col); text(r.x,r.y+4,l,'#111',10); text(r.x,r.y+16,r.state.toLowerCase().replace('_',' '),'#9aa3b5',9); }
+  // xenomorphs
+  for(const x of S.xenos){ ctx.save(); ctx.translate(X(x.x),Y(x.y)); ctx.rotate(Math.PI/4); ctx.fillStyle='#e2574d'; ctx.fillRect(-5,-5,10,10); ctx.restore(); }
+  // issues
+  for(const i of S.issues){ const col=i.sev==='critical'?'#e2574d':(i.sev==='warning'?'#e0b04a':'#8a93a6'); dot(i.x+8,i.y-8,6,col); text(i.x+8,i.y-4,'!','#111',10); }
+  // banner
+  const e=S.env; document.getElementById('banner').innerHTML = `<b>${S.time}</b> &nbsp; ${e.t_out} C, wind ${e.wind} m/s${e.storm?' <span class="bad">STORM</span>':''}${e.precip==='snow'?' snow':''}${e.night?' night':' day'}${S.paused?' <span class="warn">PAUSED</span>':''} &nbsp; ${S.speed} min/s`;
+  const fin=document.getElementById('finished'); if(S.finished){ fin.style.display='flex'; fin.textContent='SIMULATION OVER: '+S.finish_reason; }
+  requestAnimationFrame(draw);
+}
+
+function cls(ok, warn){ return ok?'ok':(warn?'warn':'bad'); }
+function renderSide(s){
+  document.getElementById('time').textContent = s.time;
+  document.getElementById('pause').textContent = s.paused?'Resume':'Pause';
+  document.querySelectorAll('button[data-s]').forEach(b=>b.classList.toggle('on', +b.dataset.s===s.speed));
+  const p=s.power, r=s.reactor, w=s.water, f=s.finance;
+  const kp=[
+    ['Colony budget', f.colony.toLocaleString()+' cr', f.colony>20000?'ok':(f.colony>0?'warn':'bad')],
+    ['Sector budgets', f.sectors.map(x=>Math.round(x/1000)+'k').join(' '), Math.min(...f.sectors)>2000?'ok':'warn'],
+    ['Power available', p.available_kw+' kW', p.available_kw>p.demand_kw?'ok':'bad'],
+    ['Power demand', p.demand_kw+' kW'+(p.shedding?` / shedding L${p.shedding}`:''), p.shedding?'warn':'ok'],
+    ['Water tank', w.tank_m3+' m3, '+w.houses_ok+'/300 houses', w.tank_m3>100&&w.houses_ok>280?'ok':'warn'],
+    ['Pipes', `${w.frozen} frozen, ${w.burst} burst`, w.burst===0?'ok':'bad'],
+    ['Internet', `${s.net.houses_online}/300 online, uplink ${s.net.uplink?'OK':'LOST'}`, s.net.uplink&&s.net.houses_online>280?'ok':'warn'],
+    ['Open issues', s.issues_total+(f.unpaid?` (unpaid ${f.unpaid} cr)`:''), s.issues_total<5?'ok':'warn'],
+    ['Month income (colony)', f.month_income.toLocaleString()+' cr', 'dim'],
+    ['Month expense (colony)', f.month_expense.toLocaleString()+' cr', 'dim'],
+  ];
+  document.getElementById('kpi').innerHTML = kp.map(([l,v,c])=>`<div class="card"><div class="v ${c}">${v}</div><div class="l">${l}</div></div>`).join('');
+  const inf=p.infra;
+  document.getElementById('reactor').innerHTML = `<div><b class="${r.mode==='ONLINE'?'ok':(r.mode==='RUNBACK'||r.mode==='STARTING'?'warn':'bad')}">${r.mode}</b> &nbsp; ${r.power_mw} MW gross, ${r.available_mw} MW to grid, core ${r.core_temp} C${r.decay_mw?`, decay ${r.decay_mw} MW`:''}</div>
+    <div class="dim">pumps A ${r.pump_a} B ${r.pump_b}, heat exchanger ${r.hx}, batteries ${r.battery_h} h, link ${r.link?'ok':'<span class="bad">lost</span>'}${r.faults.length?', faults: '+r.faults.join(', '):''}</div>
+    <div class="dim">solar ${p.solar_kw} kW; loads: mine ${inf.mine}, houses ${Math.round(p.demand_kw-Object.values(inf).reduce((a,b)=>a+b,0))}, water plant ${inf.water_plant}, road heating ${inf.road_heating}, lamps ${inf.lamps}, comms ${inf.comms}, ups charge ${inf.ups_charge} kW</div>
+    <div class="dim">trunk ${p.trunk?'ok':'<span class="bad">CUT</span>'}, substation ${p.substation?'ok':'<span class="bad">DOWN</span>'}, UPS center ${p.ups_center} ${p.ups_center_kwh} kWh</div>`;
+  document.querySelector('#sectors tbody').innerHTML = s.sectors.map(x=>`<tr><td>${x.id}${x.dark?' <span class="warn">dark</span>':''}</td><td>${x.budget}</td><td>${x.demand_kw}</td><td class="${x.avg_t>15?'ok':(x.avg_t>4?'warn':'bad')}">${x.avg_t}</td><td class="${x.min_t>4?'ok':'bad'}">${x.min_t}</td><td class="${cls(x.power_ok===50,x.power_ok>30)}">${x.power_ok}</td><td class="${cls(x.water_ok===50,x.water_ok>30)}">${x.water_ok}</td><td class="${cls(x.net_ok===50,x.net_ok>30)}">${x.net_ok}</td><td class="${x.ups==='DISCHARGING'?'warn':(x.ups==='DEPLETED'?'bad':'dim')}">${x.ups.slice(0,4)} ${x.ups_kwh}</td><td class="${x.waste>=1?'bad':(x.waste>=0.9?'warn':'dim')}">${Math.round(x.waste*100)}%</td><td class="${x.sanitary>70?'ok':'bad'}">${x.sanitary}</td><td class="${x.gate==='OPEN'?'ok':(x.gate==='LOCKDOWN'?'bad':'warn')}">${x.gate.slice(0,4)}</td><td class="${x.road>20?'dim':'bad'}">${x.road}%</td></tr>`).join('');
+  document.getElementById('nissues').textContent = `(${s.issues_total})`;
+  document.getElementById('issues').innerHTML = s.issues.slice().reverse().map(i=>`<div><span class="${i.sev==='critical'?'bad':(i.sev==='warning'?'warn':'dim')}">${i.kind}</span> ${i.target} ${i.sector>0?'S'+i.sector:''} ${i.cause}, ${i.cost} cr (${i.payer}) <span class="dim">${i.status}, ${Math.round(i.age/60)} h</span></div>`).join('') || '<div>none</div>';
+  document.getElementById('log').innerHTML = s.events.map(e=>`<div class="${e.level}">${String(e.t).padStart(6)} ${e.text}</div>`).join('');
+  const rp=s.report; if(rp){ document.getElementById('report').textContent =
+    `Month ${rp.month}: owners paid ${Math.round(rp.houses_total)} cr (energy ${Math.round(rp.energy_total)}, water ${Math.round(rp.water_total)}, repairs ${Math.round(rp.repairs_total)}), ${Math.round(rp.kwh_total)} kWh\n`+
+    `colony: income ${rp.colony_income}, expense ${rp.colony_expense}, budget ${rp.colony_budget}, unpaid ${rp.unpaid}\n`+
+    `sector income ${rp.sector_income.join(' | ')}\nsector expense ${rp.sector_expense.join(' | ')}\n`+
+    `expense by cause: ${Object.entries(rp.by_cause).map(([k,v])=>k+' '+v).join(', ')}\n`+
+    `top houses: ${rp.top_houses.map(h=>`#${h.house} (S${h.sector}) ${h.total}`).join(', ')}`; }
+}
+loadGeom().then(()=>{ poll(); draw(); });
+window.addEventListener('resize', fit);
+</script></body></html>
+"""
 # ------------------------------------------------------------------------------------
 # Simulation thread and HTTP server
 # ------------------------------------------------------------------------------------
