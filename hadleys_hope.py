@@ -780,3 +780,38 @@ def water_step(w: World):
         w.water_tank_m3 = min(c["water_tank_m3"], w.water_tank_m3 + c["water_plant_m3_h"] / 60.0)
     if w.water_tank_m3 <= 0 and w.t % 60 == 0:
         w.log("ALARM", "Water tank empty")
+# ------------------------------------------------------------------------------------
+# Internet
+# ------------------------------------------------------------------------------------
+
+def internet_step(w: World):
+    c = w.cfg
+    S = w.S
+    center_ok = w.comms_ok and getattr(w, "comms_powered", True)
+    w.uplink_ok = center_ok and w.tower_ok and w.tower_line_ok and w.trunk_ok and w.substation_ok
+    for s in range(S):
+        if w.sector_online[s] and w.rp_ok[s]:
+            w.cabinet_ups_h[s] = min(2.0, w.cabinet_ups_h[s] + 1 / 240)
+            powered = True
+        else:
+            w.cabinet_ups_h[s] = max(0.0, w.cabinet_ups_h[s] - 1 / 60)
+            powered = w.cabinet_ups_h[s] > 0
+        w.cabinet_online[s] = bool(w.cabinet_ok[s] and powered and center_ok)
+    w.net_sector_online = w.cabinet_online
+    house_net = w.net_chain[w.h_pole] & w.h_terminal_ok & w.cabinet_online[w.h_sector] & w.h_power_ok
+    w.h_net_online = house_net
+    # packets for the ui: telemetry from a few random houses, a control packet to the reactor
+    if w.t % 2 == 0:
+        online = np.flatnonzero(house_net)
+        if len(online):
+            pick = w.rng.choice(online, size=min(4, len(online)), replace=False)
+            for i in pick:
+                w.packets.append({"t": w.t, "from": "house", "id": int(i), "sector": int(w.h_sector[i]),
+                                  "uplink": bool(w.uplink_ok), "kind": "telemetry"})
+    if w.t % 5 == 0 and center_ok:
+        w.packets.append({"t": w.t, "from": "hub", "id": -1, "sector": -1, "uplink": bool(w.uplink_ok and w.r_link_ok),
+                          "kind": "reactor" if w.r_link_ok else "lost"})
+    w.r_link_ok = center_ok and w.trunk_ok
+    w.packets = [p for p in w.packets if w.t - p["t"] < 6]
+
+
