@@ -1426,3 +1426,154 @@ def _expense_by_cause(w: World):
     return out
 
 
+# ------------------------------------------------------------------------------------
+# Tick
+# ------------------------------------------------------------------------------------
+
+def world_tick(w: World):
+    if w.finished:
+        return
+    w.t += 1
+    env_step(w)
+    reactor_step(w)
+    power_step(w)
+    houses_step(w)
+    water_step(w)
+    internet_step(w)
+    incidents_step(w)
+    roads_step(w)
+    if w.t % (w.cfg["ticks_per_day"] * w.cfg["days_per_month"]) == 0:
+        finance_month_close(w)
+
+
+def inject(w: World, cmd: str):
+    rng = w.rng
+    if cmd == "span":
+        i = int(rng.integers(0, w.P))
+        damage_target(w, f"span:{i}", "vandal", 1.0)
+        w.log("WARN", f"[manual] span {i} broken")
+    elif cmd == "pole":
+        i = int(rng.integers(0, w.P))
+        damage_target(w, f"pole:{i}", "impact", 1.0)
+        w.log("WARN", f"[manual] pole {i} fallen")
+    elif cmd == "xeno":
+        s = int(rng.integers(0, w.S))
+        spawn_xeno(w, s)
+        w.lockdown_ticks[s] = 120
+        damage_target(w, f"cabinet:{s}", "xenomorph", 1.0)
+        w.log("ALARM", f"[manual] xenomorph attack in sector {s + 1}")
+    elif cmd == "storm":
+        w.storm_ticks = 400
+        w.storm_lighting = True
+        w.log("WARN", "[manual] snowstorm")
+    elif cmd == "trunk":
+        damage_target(w, "trunk", "xenomorph", 1.0)
+    elif cmd == "pump":
+        damage_target(w, "reactor:pump_b", "wear", 1.0)
+    elif cmd == "marines":
+        w.nest_alert = 300
+        w.marines_active = 300
+        damage_target(w, "reactor:heat_exchanger", "marines", 0.8)
+        w.log("ALARM", "[manual] marines hit the heat exchanger")
+    elif cmd == "scram":
+        reactor_scram(w, "operator")
+    elif cmd == "money":
+        w.colony_budget += 50000
+        w.log("INFO", "[manual] corporation transferred 50 000 cr to the colony")
+    elif cmd == "road":
+        s = int(rng.integers(0, w.S))
+        damage_target(w, f"road:{s}", "impact", 1.0)
+        w.log("WARN", f"[manual] road segment {s + 1} collapsed")
+
+
+# ------------------------------------------------------------------------------------
+# Snapshot for the UI
+# ------------------------------------------------------------------------------------
+
+def snapshot(w: World):
+    S = w.S
+    sec = []
+    for s in range(S):
+        m = w.h_sector == s
+        sec.append({
+            "id": s + 1,
+            "online": bool(w.sector_online[s]),
+            "demand_kw": round(float(w.sector_demand_kw[s]), 1),
+            "avg_t": round(float(w.h_t_in[m].mean()), 1),
+            "min_t": round(float(w.h_t_in[m].min()), 1),
+            "water_ok": int(w.h_water_ok[m].sum()),
+            "power_ok": int(w.h_power_ok[m].sum()),
+            "net_ok": int(w.h_net_online[m].sum()),
+            "water_m3_h": round(float(w.sector_water_m3[s]) * 60, 2),
+            "ups": w.ups_state[s], "ups_kwh": round(float(w.ups_kwh[s]), 0),
+            "budget": round(float(w.sector_budget[s]), 0),
+            "waste": round(float(w.waste_level[s]), 2),
+            "sludge": round(float(w.sludge_store[s]), 2),
+            "sanitary": round(float(w.sanitary[s]), 0),
+            "gate": w.gate_state[s], "gate_ok": bool(w.gate_ok[s]),
+            "road": round(float(w.road_integrity[s]), 0),
+            "cabinet": bool(w.cabinet_online[s]),
+            "dark": bool(w.sector_dark[s]),
+            "lamps_on": int(w.p_lamp_on[w.p_sector == s].sum()),
+        })
+    issues = [{"id": i.id, "kind": i.kind, "target": i.target, "sector": i.sector + 1, "cause": i.cause,
+               "cost": i.cost, "payer": i.payer, "status": i.status, "sev": i.severity,
+               "x": round(i.pos[0]), "y": round(i.pos[1]), "age": w.t - i.opened_t}
+              for i in w.open_issues()][-40:]
+    return {
+        "t": w.t, "time": w.time_str(), "paused": w.paused, "speed": w.speed,
+        "finished": w.finished, "finish_reason": w.finish_reason,
+        "env": {"t_out": round(w.t_out, 1), "wind": round(w.wind, 1), "precip": w.precip,
+                "daylight": round(w.daylight, 2), "dust": round(w.dust, 2), "storm": w.storm_ticks > 0,
+                "night": w.is_night(), "icy": w.road_icy, "visibility": w.visibility},
+        "power": {"available_kw": round(w.available_kw), "demand_kw": round(w.demand_kw),
+                  "deficit_kw": round(w.deficit_kw), "shedding": w.shedding, "solar_kw": round(w.solar_kw, 1),
+                  "trunk": w.trunk_ok, "substation": w.substation_ok, "tower_line": w.tower_line_ok,
+                  "feeder": [bool(x) for x in w.feeder_online], "mine": w.mine_powered,
+                  "ups_center": w.ups_center_state, "ups_center_kwh": round(w.ups_center_kwh),
+                  "infra": w.infra_loads_kw, "road_heating": w.road_heating_on, "storm_lighting": w.storm_lighting},
+        "reactor": {"mode": w.r_mode, "power_mw": round(w.r_power_mw, 2), "available_mw": round(w.r_available_mw, 2),
+                    "core_temp": round(w.r_core_temp), "decay_mw": round(w.r_decay_mw, 2),
+                    "pump_a": round(w.r_pump_a, 2), "pump_b": round(w.r_pump_b, 2), "hx": round(w.r_hx, 2),
+                    "battery_h": round(w.r_battery_h, 1), "faults": w.r_faults, "link": w.r_link_ok,
+                    "marines": w.marines_active > 0},
+        "water": {"tank_m3": round(w.water_tank_m3, 1), "plant": w.water_plant_ok, "heat": w.water_plant_heat,
+                  "pump": w.pump_station_ok, "houses_ok": int(w.h_water_ok.sum()),
+                  "burst": int(w.h_burst.sum()), "frozen": int((~w.h_pipes_ok).sum())},
+        "net": {"uplink": w.uplink_ok, "tower": w.tower_ok, "comms": w.comms_ok, "houses_online": int(w.h_net_online.sum()),
+                "packets": w.packets[-40:]},
+        "finance": {"colony": round(w.colony_budget), "sectors": [round(float(x)) for x in w.sector_budget],
+                    "unpaid": round(w.unfunded_total), "month": w.month,
+                    "month_expense": round(w.colony_month_expense), "month_income": round(w.colony_month_income),
+                    "waste_station": round(w.waste_station_level, 2)},
+        "sectors": sec,
+        "houses": {"t": [round(float(x), 1) for x in w.h_t_in], "power": w.h_power_ok.astype(int).tolist(),
+                   "ups": w.h_on_ups.astype(int).tolist(), "water": w.h_water_ok.astype(int).tolist(),
+                   "net": w.h_net_online.astype(int).tolist(), "heater": w.h_heater_on.astype(int).tolist(),
+                   "burst": w.h_burst.astype(int).tolist(), "sludge": [round(float(x), 2) for x in w.h_sludge],
+                   "limit": [int(x) for x in w.h_limit_w]},
+        "poles": {"state": w.p_state.tolist(), "lamp": w.p_lamp_on.astype(int).tolist(),
+                  "span": w.s_online.astype(int).tolist(), "net": w.net_chain.astype(int).tolist(),
+                  "ice": [round(float(x), 2) for x in w.s_ice]},
+        "rovers": [{"name": r.name, "state": r.state, "x": round(rover_xy(w, r)[0]), "y": round(rover_xy(w, r)[1]),
+                    "load": round(r.load, 2)} for r in w.rovers],
+        "xenos": [{"x": round(m["x"]), "y": round(m["y"])} for m in w.xeno_markers],
+        "issues": issues, "issues_total": len(w.open_issues()),
+        "events": list(w.events)[:40],
+        "report": w.last_report,
+    }
+
+
+def house_geometry(w: World):
+    return {
+        "houses": {"x": [round(float(x)) for x in w.h_x], "y": [round(float(y)) for y in w.h_y],
+                   "sector": w.h_sector.tolist(), "type": w.h_type.tolist(), "pole": w.h_pole.tolist()},
+        "poles": {"x": [round(float(x)) for x in w.p_x], "y": [round(float(y)) for y in w.p_y],
+                  "sector": w.p_sector.tolist(), "k": w.p_k.tolist()},
+        "cfg": {"hub_radius": w.cfg["hub_radius"], "ring_road_radius": w.cfg["ring_road_radius"],
+                "reactor": w.cfg["reactor_pos"], "tower": w.cfg["tower_pos"], "waste_station": w.cfg["waste_station_pos"],
+                "sectors": w.S, "poles_per_sector": w.cfg["poles_per_sector"]},
+        "types": TYPE_NAMES,
+    }
+
+
