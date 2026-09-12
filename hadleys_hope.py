@@ -1577,3 +1577,119 @@ def house_geometry(w: World):
     }
 
 
+HTML = ""
+
+# ------------------------------------------------------------------------------------
+# Simulation thread and HTTP server
+# ------------------------------------------------------------------------------------
+
+def sim_loop(w: World):
+    last = time.time()
+    acc = 0.0
+    while True:
+        now = time.time()
+        acc += (now - last) * w.speed
+        last = now
+        n = int(acc)
+        acc -= n
+        if w.paused or w.finished:
+            time.sleep(0.05)
+            acc = 0.0
+            continue
+        with w.lock:
+            for _ in range(min(n, 200)):
+                world_tick(w)
+        time.sleep(0.01)
+
+
+def make_handler(w: World, html: str, geom_json: str):
+    from http.server import BaseHTTPRequestHandler
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, fmt, *args):
+            pass
+
+        def _send(self, code, ctype, body: bytes):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            if self.path == "/" or self.path.startswith("/index"):
+                self._send(200, "text/html; charset=utf-8", html.encode("utf-8"))
+            elif self.path.startswith("/geometry"):
+                self._send(200, "application/json", geom_json.encode("utf-8"))
+            elif self.path.startswith("/state"):
+                with w.lock:
+                    body = json.dumps(snapshot(w)).encode("utf-8")
+                self._send(200, "application/json", body)
+            else:
+                self._send(404, "text/plain", b"not found")
+
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(n) if n else b"{}"
+            try:
+                req = json.loads(raw.decode("utf-8") or "{}")
+            except Exception:
+                req = {}
+            cmd = req.get("cmd", "")
+            with w.lock:
+                if cmd == "pause":
+                    w.paused = not w.paused
+                elif cmd == "speed":
+                    w.speed = int(clamp(int(req.get("value", 20)), 0, 600))
+                elif cmd == "inject":
+                    inject(w, req.get("value", ""))
+                elif cmd == "reactor":
+                    v = req.get("value", "")
+                    if v == "scram":
+                        reactor_scram(w, "operator")
+                    elif v == "setpoint":
+                        w.r_setpoint_mw = float(clamp(float(req.get("mw", 5.0)), 1.2, 6.0))
+            self._send(200, "application/json", b'{"ok": true}')
+
+    return Handler
+
+
+def main():
+    import argparse
+    from http.server import ThreadingHTTPServer
+
+    ap = argparse.ArgumentParser(description="Hadley's Hope colony simulation")
+    ap.add_argument("--port", type=int, default=CFG["http_port"])
+    ap.add_argument("--speed", type=int, default=CFG["default_speed"], help="simulated minutes per real second")
+    ap.add_argument("--seed", type=int, default=CFG["seed"])
+    ap.add_argument("--headless", type=int, default=0, help="run N ticks without the server, print a summary and exit")
+    args = ap.parse_args()
+    CFG["seed"] = args.seed
+    w = World(CFG)
+    w.speed = args.speed
+    if args.headless:
+        t0 = time.time()
+        for _ in range(args.headless):
+            world_tick(w)
+        dt = time.time() - t0
+        snap = snapshot(w)
+        print(f"{args.headless} ticks in {dt:.2f} s ({args.headless / max(dt, 1e-9):.0f} ticks/s)")
+        print(json.dumps({k: snap[k] for k in ("time", "env", "power", "reactor", "water", "finance")}, indent=1, ensure_ascii=False))
+        print("open issues:", snap["issues_total"])
+        for e in list(w.events)[:15]:
+            print(f"  t={e['t']:6d} {e['level']:5s} {e['text']}")
+        return
+    threading.Thread(target=sim_loop, args=(w,), daemon=True).start()
+    handler = make_handler(w, HTML, json.dumps(house_geometry(w)))
+    srv = ThreadingHTTPServer(("0.0.0.0", args.port), handler)
+    print(f"Hadley's Hope simulation: open http://localhost:{args.port}  (speed {w.speed} min/s, seed {args.seed})")
+    print("Ctrl+C to stop")
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("\nstopped at", w.time_str())
+
+
+if __name__ == "__main__":
+    main()
