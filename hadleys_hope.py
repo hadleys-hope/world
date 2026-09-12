@@ -815,3 +815,265 @@ def internet_step(w: World):
     w.packets = [p for p in w.packets if w.t - p["t"] < 6]
 
 
+# ------------------------------------------------------------------------------------
+# Roads, gates, rovers, waste, sewage
+# ------------------------------------------------------------------------------------
+
+def angle_diff(a, b):
+    """Signed shortest difference b - a in degrees."""
+    d = (b - a + 180.0) % 360.0 - 180.0
+    return d
+
+
+def road_segment_of(angle):
+    return int((angle % 360.0) // 60.0)
+
+
+def path_blocked(w: World, a0, a1, direction, rover: Rover):
+    """Walk from a0 to a1 in the given direction (+1 ccw / -1 cw); return True if a broken road or a locked gate is in the way."""
+    a = a0
+    steps = 0
+    while abs(angle_diff(a, a1)) > 1.0 and steps < 400:
+        seg = road_segment_of(a + direction * 0.5)
+        if w.road_integrity[seg] < 20 and rover.kind != "repair":
+            return True
+        # gate at multiples of 60
+        nxt = a + direction * 1.0
+        if int(a // 60) != int(nxt // 60):
+            g = int((nxt if direction > 0 else a) // 60) % 6
+            if w.gate_state[g] == "LOCKDOWN":
+                return True
+        a = nxt
+        steps += 1
+    return False
+
+
+def rover_move(w: World, r: Rover):
+    """Move rover toward its target: along the ring first, then radially."""
+    R = w.cfg["ring_road_radius"]
+    if r.wait > 0:
+        r.wait -= 1
+        return False
+    # radial move back to the ring if we are off it and the angle differs
+    if abs(angle_diff(r.angle, r.target_angle)) > 1.0:
+        if abs(r.radius - R) > 2:
+            r.radius += clamp(R - r.radius, -25, 25)
+            return False
+        d = angle_diff(r.angle, r.target_angle)
+        direction = 1 if d > 0 else -1
+        if path_blocked(w, r.angle, r.target_angle, direction, r):
+            if not path_blocked(w, r.angle, r.target_angle, -direction, r):
+                direction = -direction
+            else:
+                r.wait = 5
+                return False
+        step = min(abs(d), r.speed * (0.5 if w.road_icy and not w.road_heating_on else 1.0))
+        new_angle = r.angle + direction * step
+        # gate crossing costs a couple of ticks
+        if int(r.angle // 60) != int(new_angle // 60):
+            r.wait = 2
+        r.angle = new_angle % 360.0
+        return False
+    r.angle = r.target_angle
+    if abs(r.radius - r.target_radius) > 2:
+        r.radius += clamp(r.target_radius - r.radius, -25, 25)
+        return False
+    r.radius = r.target_radius
+    return True
+
+
+def rover_xy(w: World, r: Rover):
+    a = math.radians(r.angle)
+    return r.radius * math.cos(a), r.radius * math.sin(a)
+
+
+def sector_storage_angle(s):
+    return s * 60.0 + 30.0
+
+
+def roads_step(w: World):
+    c = w.cfg
+    S = w.S
+    # degradation: freeze-thaw-ish wear and traffic
+    wear = 0.0004 + (0.001 if w.road_icy and not w.road_heating_on else 0.0)
+    w.road_integrity = np.maximum(0.0, w.road_integrity - wear)
+    for s in range(S):
+        if w.road_integrity[s] < 20:
+            w.open_issue("road_blocked", f"road:{s}", s, "wear", "road",
+                         (c["ring_road_radius"] * math.cos(math.radians(s * 60 + 30)),
+                          c["ring_road_radius"] * math.sin(math.radians(s * 60 + 30))))
+    # gates
+    for s in range(S):
+        if w.lockdown_ticks[s] > 0:
+            w.lockdown_ticks[s] -= 1
+            w.gate_state[s] = "LOCKDOWN"
+            if w.lockdown_ticks[s] == 0:
+                w.gate_state[s] = "OPEN"
+                w.log("INFO", f"Sector {s + 1} lockdown lifted")
+        elif not w.gate_ok[s]:
+            w.gate_state[s] = "CLOSED"
+        elif not w.sector_online[s] and w.ups_state[s] in ("DEPLETED", "FAULT"):
+            pass  # unpowered: keep last state
+        else:
+            w.gate_state[s] = "OPEN"
+    # waste accumulation and sanitary index
+    residents = np.bincount(w.h_sector, weights=w.h_residents, minlength=S)
+    w.waste_level = np.minimum(1.2, w.waste_level + residents * c["waste_per_resident_per_tick"])
+    sludge_req = np.bincount(w.h_sector, weights=(w.h_sludge >= 0.95).astype(float), minlength=S)
+    overflow = w.waste_level >= 1.0
+    sewage_bad = (~w.h_aeration_ok) | (w.h_sludge >= 1.0)
+    sew_bad_frac = np.bincount(w.h_sector, weights=sewage_bad.astype(float), minlength=S) / c["houses_per_sector"]
+    w.sanitary = np.clip(w.sanitary - overflow * 0.05 - sew_bad_frac * 0.1 + (~overflow) * 0.02, 0, 100)
+    # rovers
+    garbage, sludge = w.rovers[0], w.rovers[1]
+    _garbage_rover(w, garbage)
+    _sludge_rover(w, sludge, sludge_req)
+    for r in w.rovers[2:]:
+        _repair_rover(w, r)
+
+
+def _garbage_rover(w: World, r: Rover):
+    c = w.cfg
+    R = c["ring_road_radius"]
+    if r.state == "IDLE":
+        need = np.flatnonzero(w.waste_level >= 0.9)
+        if len(need):
+            s = int(need[np.argmax(w.waste_level[need])])
+            r.job = s
+            r.state = "TO_BIN"
+            r.target_angle = sector_storage_angle(s)
+            r.target_radius = R + 20
+    elif r.state == "TO_BIN":
+        if rover_move(w, r):
+            r.state = "LOADING"
+            r.timer = 10
+    elif r.state == "LOADING":
+        r.timer -= 1
+        if r.timer <= 0:
+            s = r.job
+            take = min(1.0 - r.load, float(w.waste_level[s]))
+            w.waste_level[s] -= take
+            r.load += take
+            if finance_pay(w, "waste_trip", s, "normal_operation", f"waste collection sector {s + 1}"):
+                w.log("INFO", f"Garbage rover emptied sector {s + 1} bin")
+            else:
+                w.log("WARN", f"Sector {s + 1} could not pay for waste collection")
+            if r.load >= 0.99 or not np.any(w.waste_level >= 0.9):
+                r.state = "TO_STATION"
+                r.target_angle = 180.0
+                r.target_radius = 520.0
+            else:
+                r.state = "IDLE"
+    elif r.state == "TO_STATION":
+        if rover_move(w, r):
+            r.state = "UNLOADING"
+            r.timer = 15
+    elif r.state == "UNLOADING":
+        r.timer -= 1
+        if r.timer <= 0:
+            w.waste_station_level += r.load
+            r.load = 0.0
+            r.state = "IDLE"
+            r.target_angle = 195.0
+            r.target_radius = R
+
+
+def _sludge_rover(w: World, r: Rover, sludge_req):
+    c = w.cfg
+    R = c["ring_road_radius"]
+    if r.state == "IDLE":
+        full = np.flatnonzero(w.h_sludge >= 0.95)
+        if len(full):
+            i = int(full[0])
+            r.job = i
+            r.state = "TO_HOUSE"
+            r.target_angle = float(w.h_angle[i])
+            r.target_radius = float(w.h_radius[i]) + 12
+        elif r.load > 0.5:
+            r.state = "TO_STORE"
+            s = int(np.argmin(w.sludge_store))
+            r.job = s
+            r.target_angle = sector_storage_angle(s) + 8
+            r.target_radius = R + 20
+    elif r.state == "TO_HOUSE":
+        if rover_move(w, r):
+            r.state = "PUMPING"
+            r.timer = 8
+    elif r.state == "PUMPING":
+        r.timer -= 1
+        if r.timer <= 0:
+            i = r.job
+            r.load = min(1.0, r.load + float(w.h_sludge[i]) * 0.25)
+            w.h_sludge[i] = 0.05
+            finance_pay(w, "sludge_trip", int(w.h_sector[i]), "normal_operation", f"sludge collection house {i + 1}")
+            r.state = "IDLE"
+            if r.load >= 0.99:
+                r.state = "TO_STORE"
+                s = int(np.argmin(w.sludge_store))
+                r.job = s
+                r.target_angle = sector_storage_angle(s) + 8
+                r.target_radius = R + 20
+    elif r.state == "TO_STORE":
+        if rover_move(w, r):
+            s = r.job
+            w.sludge_store[s] = min(1.0, w.sludge_store[s] + r.load * 0.2)
+            r.load = 0.0
+            r.state = "IDLE"
+            r.target_radius = R
+    # sector storage slowly processed
+    w.sludge_store = np.maximum(0.0, w.sludge_store - 0.00005)
+
+
+HOUSE_TARGETS = ("house", "aeration", "terminal")
+REPAIR_PRIORITY = {"reactor": 0, "trunk": 1, "substation": 1, "feeder": 2, "rp": 2, "ups": 3, "pole": 3, "span": 4,
+                   "cabinet": 4, "tower_line": 5, "net_span": 5, "gate": 5, "road": 5, "lamp": 6, "solar": 6}
+
+
+def _repair_rover(w: World, r: Rover):
+    c = w.cfg
+    R = c["ring_road_radius"]
+    if r.state == "IDLE":
+        # engineer takes infrastructure, plumber takes house-level issues
+        cands = [i for i in w.issues if i.status == "funded"
+                 and ((i.target.split(":")[0] in HOUSE_TARGETS) == (r.kind == "plumber"))]
+        if cands:
+            cands.sort(key=lambda i: (REPAIR_PRIORITY.get(i.target.split(":")[0], 9), i.severity != "critical", i.opened_t))
+            iss = cands[0]
+            r.job = iss
+            iss.status = "in_progress"
+            iss.started_t = w.t
+            r.state = "TO_TARGET"
+            x, y = iss.pos
+            r.target_angle = math.degrees(math.atan2(y, x)) % 360.0
+            r.target_radius = max(90.0, min(560.0, math.hypot(x, y) + 15))
+            if iss.target.startswith("reactor") or iss.target.startswith("trunk") or iss.target.startswith("solar") \
+                    or iss.target.startswith("water_plant"):
+                r.target_angle = 180.0
+                r.target_radius = 560.0
+            if iss.target.startswith("tower"):
+                r.target_angle = 220.0
+                r.target_radius = 480.0
+            if iss.target.startswith("substation") or iss.target.startswith("feeder") or iss.target.startswith("hub"):
+                r.target_radius = 95.0
+    elif r.state == "TO_TARGET":
+        if rover_move(w, r):
+            r.state = "REPAIRING"
+            r.timer = r.job.duration
+            # xenomorph attack on a crew in a dark sector
+            s = r.job.sector
+            if s >= 0 and w.sector_dark[s] and w.rng.random() < 0.15:
+                w.log("ALARM", f"Repair crew attacked by xenomorphs in dark sector {s + 1}, repair aborted")
+                r.job.status = "funded"
+                r.job = None
+                r.state = "IDLE"
+                r.wait = 60
+                spawn_xeno(w, s)
+    elif r.state == "REPAIRING":
+        r.timer -= 1
+        if r.timer <= 0:
+            resolve_issue(w, r.job)
+            r.job = None
+            r.state = "IDLE"
+            r.target_radius = R
+
+
