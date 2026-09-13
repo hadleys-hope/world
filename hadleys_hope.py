@@ -608,7 +608,7 @@ def power_step(w: World):
         "pump_station": c["pump_station_kw"],
         "ups_charge": 0.0,
     }
-    lamps_on = w.p_lamp_ok & (w.s_online) & (w.shedding < 4)
+    lamps_on = w.p_lamp_ok & (w.s_online) & (w.shedding < 4) & (w.is_night() or w.storm_ticks > 0 or w.precip == "snow")
     lamp_kw = c["lamp_kw"] * (1.2 if w.storm_lighting else 1.0)
     infra["lamps"] = float(lamps_on.sum()) * lamp_kw
     w.p_lamp_on = lamps_on
