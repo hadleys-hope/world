@@ -1370,6 +1370,17 @@ def finance_pay(w: World, cost_key, sector, cause, note):
     return False
 
 
+def finance_day_close(w: World):
+    """Owners pay energy and water daily, so sectors have cash flow during the month."""
+    c = w.cfg
+    bill = w.h_meter_day * c["tariff_kwh"] + w.h_water_day * c["tariff_water_m3"]
+    income = np.bincount(w.h_sector, weights=bill, minlength=w.S)
+    w.sector_budget += income
+    w.month_income += income
+    w.h_meter_day[:] = 0
+    w.h_water_day[:] = 0
+
+
 def finance_month_close(w: World):
     c = w.cfg
     S = w.S
@@ -1379,8 +1390,8 @@ def finance_month_close(w: World):
     internet = np.full(w.N, c["internet_fee"])
     repairs = w.h_repairs_month.copy()
     house_total = energy + water + sewage + internet + repairs
-    # owners pay their sector
-    income = np.bincount(w.h_sector, weights=house_total, minlength=S)
+    # energy and water were paid daily; fees and repair reimbursements are paid now
+    income = np.bincount(w.h_sector, weights=sewage + internet + repairs, minlength=S)
     w.sector_budget += income
     w.month_income += income
     # colony upkeep
@@ -1444,6 +1455,8 @@ def world_tick(w: World):
     internet_step(w)
     incidents_step(w)
     roads_step(w)
+    if w.t % w.cfg["ticks_per_day"] == 0:
+        finance_day_close(w)
     if w.t % (w.cfg["ticks_per_day"] * w.cfg["days_per_month"]) == 0:
         finance_month_close(w)
 
