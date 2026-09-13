@@ -48,8 +48,8 @@ CFG = {
     "calm_wind": (4.0, 14.0),
     "daylight_max": 0.3,
     # houses
-    "heater_kw": [2.5, 3.0, 3.0, 4.0],          # by type: barracks, standard, insulated, manager
-    "ua_w_per_k": [55.0, 45.0, 32.0, 60.0],
+    "heater_kw": [3.5, 3.0, 3.0, 4.5],          # by type: barracks, standard, insulated, manager
+    "ua_w_per_k": [38.0, 32.0, 22.0, 45.0],
     "heat_cap_j_per_k": [0.8e7, 1.0e7, 1.3e7, 1.8e7],
     "base_load_w": [200, 300, 300, 600],
     "type_counts": [120, 120, 45, 15],
@@ -740,7 +740,7 @@ def power_step(w: World):
 def houses_step(w: World):
     c = w.cfg
     dt = c["tick_seconds"]
-    ua_eff = w.h_ua * (1.0 + 0.015 * w.wind)
+    ua_eff = w.h_ua * (1.0 + 0.006 * w.wind)
     q_loss = ua_eff * (w.h_t_in - w.t_out)
     q_int = (w.h_draw_w - w.h_heat_w) * 0.8 + w.h_residents * 80.0   # appliances and people turn into heat
     w.h_t_in += (w.h_heat_w + q_int - q_loss) * dt / w.h_cap
