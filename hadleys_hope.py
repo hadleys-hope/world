@@ -75,15 +75,15 @@ CFG = {
     # finance
     "sector_budget": 10000.0, "colony_budget": 100000.0,
     "tariff_kwh": 0.25, "tariff_water_m3": 3.0, "sewage_fee": 20.0, "internet_fee": 15.0,
-    "mine_income_per_tick": 25.0,
+    "mine_income_per_tick": 3.0,
     "reactor_upkeep_month": 3000.0,
     # incidents: probability per tick
     "p_xeno": 0.00004, "p_vandal": 0.00025, "p_animal": 0.0002, "p_rover_hit": 0.0003,
     "p_nest_fire": 0.02,           # per tick while a xeno attack near the processor is open
     "p_pump_wear": 0.00002,
     # sewage and waste
-    "sludge_per_resident_per_tick": 1.0 / (1440 * 20),   # tank full in ~20 days at 1 resident
-    "waste_per_resident_per_tick": 1.0 / (1440 * 6),     # sector bin full in ~6 days
+    "sludge_per_resident_per_tick": 1.0 / (1440 * 60),   # station tank full in ~30 days for a family
+    "waste_per_resident_per_tick": 1.0 / (1440 * 6 * 50),   # sector bin full in ~6 days
     "hauler_speed_deg": 6.0,
     # ui
     "http_port": 8000,
