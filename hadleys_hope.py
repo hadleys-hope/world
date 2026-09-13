@@ -312,6 +312,8 @@ class World:
             Rover("garbage", "garbage", angle=15.0),
             Rover("sludge", "sludge", angle=195.0),
             Rover("engineer", "repair", angle=105.0, speed=8.0),
+            Rover("engineer-2", "repair", angle=345.0, speed=8.0),
+            Rover("plumber", "plumber", angle=285.0, speed=8.0),
         ]
         self.waste_station_level = 0.0
 
