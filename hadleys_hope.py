@@ -42,7 +42,7 @@ CFG = {
     # environment (LV-426: minus 40..60, permanent dusk, storms)
     "t_mean": -45.0,
     "t_daily_amp": 8.0,
-    "storm_prob_per_tick": 0.0006,
+    "storm_prob_per_tick": 0.0004,
     "storm_len_ticks": (180, 600),
     "storm_wind": (22.0, 34.0),
     "calm_wind": (4.0, 14.0),
@@ -78,7 +78,7 @@ CFG = {
     "mine_income_per_tick": 25.0,
     "reactor_upkeep_month": 3000.0,
     # incidents: probability per tick
-    "p_xeno": 0.00035, "p_vandal": 0.00025, "p_animal": 0.0002, "p_rover_hit": 0.0003,
+    "p_xeno": 0.00004, "p_vandal": 0.00025, "p_animal": 0.0002, "p_rover_hit": 0.0003,
     "p_nest_fire": 0.02,           # per tick while a xeno attack near the processor is open
     "p_pump_wear": 0.00002,
     # sewage and waste
@@ -1244,7 +1244,7 @@ def incidents_step(w: World):
     night = w.is_night()
     # weather on spans: logistic in wind, ice, cold
     v = w.wind
-    z = 0.35 * (v - 22.0) + 3.0 * w.s_ice + 0.03 * (-w.t_out - 40) - 6.5
+    z = 0.35 * (v - 22.0) + 3.0 * w.s_ice + 0.03 * (-w.t_out - 40) - 10.0
     p = 1.0 / (1.0 + np.exp(-z)) * 0.02
     p = p * np.where(w.p_state == 1, 2.0, 1.0)
     hit = rng.random(w.P) < p
