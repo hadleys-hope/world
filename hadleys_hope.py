@@ -157,7 +157,10 @@ class Rover:
 
 
 class World:
+    SCHEMA = 2      # bump when saved worlds become incompatible; old saves are set aside on load
+
     def __init__(self, cfg=CFG):
+        self.schema = self.SCHEMA
         self.cfg = cfg
         self.rng = np.random.default_rng(cfg["seed"])
         self.pyrng = random.Random(cfg["seed"])
@@ -2381,6 +2384,11 @@ class Store:
         try:
             with open(self.pkl, "rb") as f:
                 w = pickle.load(f)
+            if getattr(w, "schema", 1) != World.SCHEMA:
+                old = self.pkl.replace(".pkl", ".old.pkl")
+                os.replace(self.pkl, old)
+                print(f"saved world has schema {getattr(w, 'schema', 1)}, current is {World.SCHEMA}; moved it to {old}, starting a new world")
+                return None
             print(f"resumed world from {self.pkl} at {w.time_str()} (tick {w.t})")
             return w
         except Exception as e:
