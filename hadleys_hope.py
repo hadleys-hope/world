@@ -1674,7 +1674,8 @@ HTML = r"""<!doctype html>
 <script>
 const cv = document.getElementById('c'), ctx = cv.getContext('2d');
 let G = null, S = null, packetsSeen = new Map(), lastFetch = 0, animT = 0;
-const post = (o) => fetch('/cmd', {method:'POST', body: JSON.stringify(o)});
+const ADMIN = new URLSearchParams(location.search).get('admin') || '';
+const post = async (o) => { const r = await fetch('/cmd', {method:'POST', body: JSON.stringify({...o, token: ADMIN})}); if(r.status===403 && !window.__ro){ window.__ro=true; alert('View only. Open the page as /?admin=TOKEN to control the colony.'); } };
 document.getElementById('pause').onclick = () => post({cmd:'pause'});
 document.querySelectorAll('button[data-s]').forEach(b => b.onclick = () => post({cmd:'speed', value:+b.dataset.s}));
 document.querySelectorAll('button[data-i]').forEach(b => b.onclick = () => post({cmd:'inject', value:b.dataset.i}));
@@ -1973,7 +1974,7 @@ def sim_loop(w_holder: dict, store: Optional[Store]):
             last_save = time.time()
 
 
-def make_handler(w_holder: dict, html: str, geom_json: str, store: Optional[Store]):
+def make_handler(w_holder: dict, html: str, geom_json: str, store: Optional[Store], admin_token: str):
     from http.server import BaseHTTPRequestHandler
 
     class Handler(BaseHTTPRequestHandler):
@@ -2019,6 +2020,9 @@ def make_handler(w_holder: dict, html: str, geom_json: str, store: Optional[Stor
                 req = {}
             cmd = req.get("cmd", "")
             w = w_holder["w"]
+            if admin_token and req.get("token", "") != admin_token:
+                self._send(403, "application/json", b'{"ok": false, "error": "admin token required"}')
+                return
             with w.lock:
                 if cmd == "pause":
                     w.paused = not w.paused
@@ -2042,7 +2046,7 @@ def main():
     from http.server import ThreadingHTTPServer
 
     ap = argparse.ArgumentParser(description="Hadley's Hope colony simulation")
-    ap.add_argument("--port", type=int, default=CFG["http_port"])
+    ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", CFG["http_port"])))
     ap.add_argument("--data", default=os.environ.get("DATA_DIR", ""), help="directory for autosave and history (empty = no persistence)")
     ap.add_argument("--fresh", action="store_true", help="ignore a saved world and start over")
     ap.add_argument("--speed", type=int, default=CFG["default_speed"], help="simulated minutes per real second")
@@ -2055,6 +2059,7 @@ def main():
     if w is None:
         w = World(CFG)
     w.speed = args.speed
+    admin_token = os.environ.get("ADMIN_TOKEN", "")
     if args.headless:
         t0 = time.time()
         for _ in range(args.headless):
@@ -2069,10 +2074,10 @@ def main():
         return
     holder = {"w": w}
     threading.Thread(target=sim_loop, args=(holder, store), daemon=True).start()
-    handler = make_handler(holder, HTML, json.dumps(house_geometry(w)), store)
+    handler = make_handler(holder, HTML, json.dumps(house_geometry(w)), store, admin_token)
     srv = ThreadingHTTPServer(("0.0.0.0", args.port), handler)
     print(f"Hadley's Hope simulation: open http://localhost:{args.port}  (speed {w.speed} min/s, seed {args.seed})")
-    print(f"persistence: {args.data or 'off'}")
+    print(f"persistence: {args.data or 'off'}; admin token: {'set' if admin_token else 'not set, everyone can inject'}")
     print("Ctrl+C to stop")
 
     def shutdown(*_):
