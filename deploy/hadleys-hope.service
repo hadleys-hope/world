@@ -1,0 +1,18 @@
+[Unit]
+Description=Hadley's Hope colony simulation
+After=network.target
+
+[Service]
+User=hh
+WorkingDirectory=/opt/hadleys-hope
+Environment=DATA_DIR=/opt/hadleys-hope/data
+Environment=PORT=8000
+EnvironmentFile=-/opt/hadleys-hope/env
+ExecStart=/opt/hadleys-hope/venv/bin/python3 /opt/hadleys-hope/hadleys_hope.py --speed 20
+Restart=always
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
