@@ -6,9 +6,10 @@ After=network.target
 User=hh
 WorkingDirectory=/opt/hadleys-hope
 Environment=DATA_DIR=/opt/hadleys-hope/data
-Environment=PORT=8000
+Environment=PORT=80
 EnvironmentFile=-/opt/hadleys-hope/env
 ExecStart=/opt/hadleys-hope/venv/bin/python3 /opt/hadleys-hope/hadleys_hope.py --speed 20
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 Restart=always
 RestartSec=3
 KillSignal=SIGTERM
