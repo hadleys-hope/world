@@ -46,18 +46,26 @@ metrics, the event log and monthly reports go to `history.db` (sqlite) and are s
 
 ### Own VPS with GitHub Actions
 
-1. On a fresh Ubuntu server as root: copy `deploy/` there and run `sh deploy/server-setup.sh`.
-   It creates a user, a venv with numpy, a systemd service, a data directory and Caddy as a reverse proxy
-   on port 80. Put your token into `/opt/hadleys-hope/env`.
-2. Copy `hadleys_hope.py` to `/opt/hadleys-hope/` and `systemctl start hadleys-hope`.
+1. On a fresh Ubuntu server as root: `git clone` this repository, `cd` into it and run `sh deploy/server-setup.sh`.
+   It creates a user, a venv with numpy, a systemd service listening on port 80, a data directory and opens
+   ports 22 and 80 in ufw. Put your token into `/opt/hadleys-hope/env`.
+2. `systemctl start hadleys-hope`, watch it with `journalctl -u hadleys-hope -f`.
 3. In the GitHub repo add secrets `SSH_HOST`, `SSH_USER`, `SSH_KEY` (a deploy user that can `sudo systemctl restart hadleys-hope`
    and write `/opt/hadleys-hope/`). `.github/workflows/deploy.yml` then smoke-tests, copies the file and restarts the service on every push.
-4. Optional https: point a domain at the server and replace `:80` with the domain in `/etc/caddy/Caddyfile`.
+4. Optional https: point a domain at the server, install Caddy and proxy the domain to port 80 (or set `PORT=8000` in the unit and proxy to it).
 
 Vercel, Netlify and other serverless hosts do not fit: the simulation is a long-running process
 with state in memory, and they end the process after each request.
 
 ## What you see
+
+The page at `/` is a 3D view: the colony wrapped onto a small planet. Drag to rotate, wheel to zoom,
+hover a house for details, click a sector row or a "fly to" button to move the camera. Layer
+checkboxes toggle issues, houses without internet, UPS charging icons, heaters, power and water
+flow, packets, people, xenomorphs and labels. three.js is loaded from jsdelivr; for an offline
+setup put a copy of the `three` npm package into `vendor/three/` next to the script
+(`npm pack three@0.160.0`, unpack, rename `package` to `three`) and it is served locally.
+The flat 2D map stays at `/flat` and is lighter for phones.
 
 Map, left:
 
