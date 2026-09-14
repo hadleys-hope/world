@@ -8,6 +8,10 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import pickle
+import signal
+import sqlite3
 import random
 import threading
 import time
@@ -343,6 +347,16 @@ class World:
         self.storm_ticks = 0
         self.synoptic = 0.0
         self.visibility = 100.0
+
+    # ---- pickling: drop the lock, recreate it on load ----
+    def __getstate__(self):
+        d = self.__dict__.copy()
+        d.pop("lock", None)
+        return d
+
+    def __setstate__(self, d):
+        self.__dict__.update(d)
+        self.lock = threading.Lock()
 
     # ---- helpers ----
     def log(self, level, text):
@@ -1853,13 +1867,85 @@ window.addEventListener('resize', fit);
 </script></body></html>
 """
 # ------------------------------------------------------------------------------------
+# Persistence: pickle of the world for resume, sqlite for history
+# ------------------------------------------------------------------------------------
+
+class Store:
+    def __init__(self, data_dir: str):
+        self.dir = data_dir
+        os.makedirs(data_dir, exist_ok=True)
+        self.pkl = os.path.join(data_dir, "world.pkl")
+        self.db = os.path.join(data_dir, "history.db")
+        con = sqlite3.connect(self.db)
+        con.executescript("""
+            CREATE TABLE IF NOT EXISTS hourly (t INTEGER PRIMARY KEY, time TEXT, t_out REAL, wind REAL, storm INTEGER,
+                available_kw REAL, demand_kw REAL, shedding INTEGER, reactor_mode TEXT, core_temp REAL,
+                water_tank REAL, houses_power INTEGER, houses_water INTEGER, houses_net INTEGER, burst INTEGER,
+                issues INTEGER, colony REAL, sectors TEXT, avg_t REAL, min_t REAL);
+            CREATE TABLE IF NOT EXISTS events (t INTEGER, level TEXT, text TEXT);
+            CREATE TABLE IF NOT EXISTS reports (month INTEGER PRIMARY KEY, saved_t INTEGER, json TEXT);
+        """)
+        con.commit()
+        con.close()
+        self.last_event_t = -1
+        self.last_report_month = 0
+
+    def load_world(self) -> Optional[World]:
+        if not os.path.exists(self.pkl):
+            return None
+        try:
+            with open(self.pkl, "rb") as f:
+                w = pickle.load(f)
+            print(f"resumed world from {self.pkl} at {w.time_str()} (tick {w.t})")
+            return w
+        except Exception as e:
+            print(f"could not load {self.pkl}: {e}; starting a new world")
+            return None
+
+    def save_world(self, w: World):
+        tmp = self.pkl + ".tmp"
+        with open(tmp, "wb") as f:
+            pickle.dump(w, f, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp, self.pkl)
+
+    def record_hour(self, w: World):
+        con = sqlite3.connect(self.db)
+        con.execute("INSERT OR REPLACE INTO hourly VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+            w.t, w.time_str(), round(w.t_out, 1), round(w.wind, 1), int(w.storm_ticks > 0),
+            round(w.available_kw), round(w.demand_kw), w.shedding, w.r_mode, round(w.r_core_temp),
+            round(w.water_tank_m3, 1), int(w.h_power_ok.sum()), int(w.h_water_ok.sum()), int(w.h_net_online.sum()),
+            int(w.h_burst.sum()), len(w.open_issues()), round(w.colony_budget),
+            json.dumps([round(float(x)) for x in w.sector_budget]), round(float(w.h_t_in.mean()), 1),
+            round(float(w.h_t_in.min()), 1)))
+        new_events = [e for e in list(w.events) if e["t"] > self.last_event_t]
+        if new_events:
+            con.executemany("INSERT INTO events VALUES (?,?,?)", [(e["t"], e["level"], e["text"]) for e in reversed(new_events)])
+            self.last_event_t = max(e["t"] for e in new_events)
+        if w.last_report and w.last_report["month"] > self.last_report_month:
+            con.execute("INSERT OR REPLACE INTO reports VALUES (?,?,?)", (w.last_report["month"], w.t, json.dumps(w.last_report)))
+            self.last_report_month = w.last_report["month"]
+        con.commit()
+        con.close()
+
+    def history(self, hours: int):
+        con = sqlite3.connect(self.db)
+        con.row_factory = sqlite3.Row
+        rows = con.execute("SELECT * FROM hourly ORDER BY t DESC LIMIT ?", (hours,)).fetchall()
+        reports = con.execute("SELECT json FROM reports ORDER BY month").fetchall()
+        con.close()
+        return {"hourly": [dict(r) for r in reversed(rows)], "reports": [json.loads(r[0]) for r in reports]}
+
+
+# ------------------------------------------------------------------------------------
 # Simulation thread and HTTP server
 # ------------------------------------------------------------------------------------
 
-def sim_loop(w: World):
+def sim_loop(w_holder: dict, store: Optional[Store]):
     last = time.time()
     acc = 0.0
+    last_save = time.time()
     while True:
+        w = w_holder["w"]
         now = time.time()
         acc += (now - last) * w.speed
         last = now
@@ -1868,14 +1954,26 @@ def sim_loop(w: World):
         if w.paused or w.finished:
             time.sleep(0.05)
             acc = 0.0
-            continue
-        with w.lock:
-            for _ in range(min(n, 200)):
-                world_tick(w)
-        time.sleep(0.01)
+        else:
+            with w.lock:
+                for _ in range(min(n, 200)):
+                    world_tick(w)
+                    if store and w.t % 60 == 0:
+                        try:
+                            store.record_hour(w)
+                        except Exception as e:
+                            print("history write failed:", e)
+            time.sleep(0.01)
+        if store and time.time() - last_save > 300:
+            with w.lock:
+                try:
+                    store.save_world(w)
+                except Exception as e:
+                    print("autosave failed:", e)
+            last_save = time.time()
 
 
-def make_handler(w: World, html: str, geom_json: str):
+def make_handler(w_holder: dict, html: str, geom_json: str, store: Optional[Store]):
     from http.server import BaseHTTPRequestHandler
 
     class Handler(BaseHTTPRequestHandler):
@@ -1896,8 +1994,18 @@ def make_handler(w: World, html: str, geom_json: str):
             elif self.path.startswith("/geometry"):
                 self._send(200, "application/json", geom_json.encode("utf-8"))
             elif self.path.startswith("/state"):
+                w = w_holder["w"]
                 with w.lock:
                     body = json.dumps(snapshot(w)).encode("utf-8")
+                self._send(200, "application/json", body)
+            elif self.path.startswith("/history"):
+                hours = 720
+                if "hours=" in self.path:
+                    try:
+                        hours = int(clamp(int(self.path.split("hours=")[1].split("&")[0]), 1, 24 * 365))
+                    except ValueError:
+                        pass
+                body = json.dumps(store.history(hours) if store else {"hourly": [], "reports": []}).encode("utf-8")
                 self._send(200, "application/json", body)
             else:
                 self._send(404, "text/plain", b"not found")
@@ -1910,6 +2018,7 @@ def make_handler(w: World, html: str, geom_json: str):
             except Exception:
                 req = {}
             cmd = req.get("cmd", "")
+            w = w_holder["w"]
             with w.lock:
                 if cmd == "pause":
                     w.paused = not w.paused
@@ -1934,12 +2043,17 @@ def main():
 
     ap = argparse.ArgumentParser(description="Hadley's Hope colony simulation")
     ap.add_argument("--port", type=int, default=CFG["http_port"])
+    ap.add_argument("--data", default=os.environ.get("DATA_DIR", ""), help="directory for autosave and history (empty = no persistence)")
+    ap.add_argument("--fresh", action="store_true", help="ignore a saved world and start over")
     ap.add_argument("--speed", type=int, default=CFG["default_speed"], help="simulated minutes per real second")
     ap.add_argument("--seed", type=int, default=CFG["seed"])
     ap.add_argument("--headless", type=int, default=0, help="run N ticks without the server, print a summary and exit")
     args = ap.parse_args()
     CFG["seed"] = args.seed
-    w = World(CFG)
+    store = Store(args.data) if args.data else None
+    w = None if (args.fresh or not store) else store.load_world()
+    if w is None:
+        w = World(CFG)
     w.speed = args.speed
     if args.headless:
         t0 = time.time()
@@ -1953,15 +2067,26 @@ def main():
         for e in list(w.events)[:15]:
             print(f"  t={e['t']:6d} {e['level']:5s} {e['text']}")
         return
-    threading.Thread(target=sim_loop, args=(w,), daemon=True).start()
-    handler = make_handler(w, HTML, json.dumps(house_geometry(w)))
+    holder = {"w": w}
+    threading.Thread(target=sim_loop, args=(holder, store), daemon=True).start()
+    handler = make_handler(holder, HTML, json.dumps(house_geometry(w)), store)
     srv = ThreadingHTTPServer(("0.0.0.0", args.port), handler)
     print(f"Hadley's Hope simulation: open http://localhost:{args.port}  (speed {w.speed} min/s, seed {args.seed})")
+    print(f"persistence: {args.data or 'off'}")
     print("Ctrl+C to stop")
+
+    def shutdown(*_):
+        if store:
+            with w.lock:
+                store.save_world(w)
+            print("world saved at", w.time_str())
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, shutdown)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
-        print("\nstopped at", w.time_str())
+        shutdown()
 
 
 if __name__ == "__main__":
