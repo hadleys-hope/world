@@ -41,8 +41,14 @@ CFG = {
     "pole_radius_step": 40,
     "poles_per_sector": 6,
     "reactor_pos": (-640, 0),
-    "tower_pos": (-420, -360),
-    "waste_station_pos": (-640, 200),
+    "tower_pos": (-500, -270),
+    "tower_junction": (-500, 0),
+    "solar_pos": (-740, -150),
+    "water_plant_pos": (-640, 110),
+    "radwaste_pos": (-640, 210),
+    "mine_pos": (-640, 310),
+    "waste_station_pos": (-560, 70),
+    "walkers": 40,
     # environment (LV-426: minus 40..60, permanent dusk, storms)
     "t_mean": -45.0,
     "t_daily_amp": 8.0,
@@ -325,6 +331,13 @@ class World:
         self.xeno_markers: list[dict] = []          # visible xenomorphs on the map
         self.marines_active = 0
         self.nest_alert = 0
+        W = cfg["walkers"]
+        self.w_home = self.rng.integers(0, N, W)
+        self.w_state = np.zeros(W, dtype=int)       # 0 home, 1 to hub, 2 at hub, 3 to home
+        self.w_prog = np.zeros(W)
+        self.w_timer = self.rng.integers(30, 600, W)
+        self.w_x = self.h_x[self.w_home].copy()
+        self.w_y = self.h_y[self.w_home].copy()
 
         # ---- finance ----
         self.sector_budget = np.full(S, cfg["sector_budget"])
@@ -796,6 +809,663 @@ def water_step(w: World):
         w.water_tank_m3 = min(c["water_tank_m3"], w.water_tank_m3 + c["water_plant_m3_h"] / 60.0)
     if w.water_tank_m3 <= 0 and w.t % 60 == 0:
         w.log("ALARM", "Water tank empty")
+
+# ------------------------------------------------------------------------------------
+# Browser UI (served at /). Plain canvas, polls /state four times per second.
+# ------------------------------------------------------------------------------------
+
+HTML = r"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Hadley's Hope</title>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --text:#d9dde6; --dim:#8a93a6; --ok:#5ec07a; --warn:#e0b04a; --bad:#e2574d; --blue:#5aa9ff; --cyan:#4fd1c5; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:13px/1.35 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; display:flex; height:100vh; overflow:hidden; }
+  #map { flex:1 1 auto; position:relative; }
+  canvas { display:block; width:100%; height:100%; }
+  #side { width:490px; flex:0 0 490px; background:var(--panel); border-left:1px solid var(--line); overflow-y:auto; padding:10px 12px; }
+  h1 { font-size:15px; margin:0 0 6px; } h2 { font-size:12px; color:var(--dim); text-transform:uppercase; letter-spacing:.06em; margin:14px 0 6px; }
+  .row { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+  button { background:#232835; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:4px 8px; cursor:pointer; font-size:12px; }
+  button:hover { background:#2d3444; } button.on { border-color:var(--blue); color:var(--blue); }
+  .kpi { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+  .card { background:#1f2430; border:1px solid var(--line); border-radius:8px; padding:6px 8px; }
+  .card .v { font-size:17px; font-weight:600; } .card .l { color:var(--dim); font-size:11px; }
+  table { width:100%; border-collapse:collapse; font-size:11.5px; } th,td { padding:2px 3px; text-align:right; border-bottom:1px solid var(--line); white-space:nowrap; } th { color:var(--dim); font-weight:500; } td:first-child, th:first-child { text-align:left; }
+  .ok { color:var(--ok); } .warn { color:var(--warn); } .bad { color:var(--bad); } .dim { color:var(--dim); }
+  #log { font-family: ui-monospace, Menlo, Consolas, monospace; font-size:11px; max-height:230px; overflow-y:auto; background:#0f1115; border:1px solid var(--line); border-radius:6px; padding:6px; }
+  #log div { padding:1px 0; } .ALARM { color:var(--bad); } .WARN { color:var(--warn); } .INFO { color:var(--dim); }
+  #legend { position:absolute; left:10px; bottom:10px; background:rgba(23,26,33,.9); border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:11px; color:var(--dim); line-height:1.5; }
+  #legend b { color:var(--text); }
+  #banner { position:absolute; left:10px; top:10px; background:rgba(23,26,33,.9); border:1px solid var(--line); border-radius:8px; padding:6px 10px; font-size:13px; }
+  #finished { position:absolute; inset:0; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,.6); font-size:28px; color:var(--bad); }
+  pre { white-space:pre-wrap; font-size:11px; background:#0f1115; padding:6px; border-radius:6px; border:1px solid var(--line); }
+  @media (max-width: 900px) {
+    body { flex-direction:column; overflow:auto; height:auto; }
+    #map { flex:none; height:62vh; min-height:360px; }
+    #side { width:100%; flex:none; border-left:none; border-top:1px solid var(--line); }
+    #legend { display:none; }
+    #banner { font-size:11px; }
+  }
+</style></head>
+<body>
+<div id="map"><canvas id="c"></canvas>
+  <div id="banner">connecting...</div>
+  <div id="legend"><b>Map</b>: house colour = indoor temperature (blue cold, orange warm), red frame = no power, blue frame = on sector UPS, x = burst pipes.<br>
+  Yellow lines = power (moving dashes = energised), blue = water, cyan = internet cable, cyan dots = packets, red dot = packet with no uplink.<br>
+  Poles: dot; orange = tilted, red x = fallen; glow = street lamp on. Gates on the ring road: green open, grey closed, red lockdown.<br>
+  Rovers: G garbage, S sludge hauler, E engineers, P plumber. Red diamonds = xenomorphs. ! = open issue.</div>
+  <div id="finished"></div>
+  <div id="tip" style="position:absolute;display:none;background:rgba(23,26,33,.95);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:11px;pointer-events:none"></div>
+</div>
+<div id="side">
+  <h1>Hadley's Hope, LV-426</h1>
+  <div class="row"><span id="time" style="font-weight:600;min-width:120px"></span>
+    <button id="pause">Pause</button>
+    <span class="dim">speed</span><button data-s="1">1x</button><button data-s="20">20x</button><button data-s="120">120x</button><button data-s="600">600x</button></div>
+  <h2>Inject</h2>
+  <div class="row">
+    <button data-i="span">break span</button><button data-i="pole">fell pole</button><button data-i="xeno">xenomorphs</button>
+    <button data-i="storm">storm</button><button data-i="trunk">cut trunk</button><button data-i="pump">pump trip</button>
+    <button data-i="marines">marines fire</button><button data-i="scram">SCRAM</button><button data-i="road">break road</button><button data-i="money">+50k cr</button>
+  </div>
+  <h2>Colony</h2>
+  <div class="kpi" id="kpi"></div>
+  <h2>Reactor and power</h2>
+  <div id="reactor" class="card"></div>
+  <h2>Sectors</h2>
+  <table id="sectors"><thead><tr><th>#</th><th>cr</th><th>kW</th><th>avg C</th><th>min C</th><th>pwr</th><th>water</th><th>net</th><th>UPS</th><th>waste</th><th>san</th><th>gate</th><th>road</th></tr></thead><tbody></tbody></table>
+  <h2>Open issues <span id="nissues" class="dim"></span></h2>
+  <div id="issues" class="dim" style="font-size:11px;max-height:120px;overflow-y:auto"></div>
+  <h2>Events</h2>
+  <div id="log"></div>
+  <h2>Last monthly report</h2>
+  <pre id="report">no month closed yet</pre>
+</div>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+let G = null, S = null, packetsSeen = new Map(), lastFetch = 0, animT = 0;
+const ADMIN = new URLSearchParams(location.search).get('admin') || '';
+const post = async (o) => { const r = await fetch('/cmd', {method:'POST', body: JSON.stringify({...o, token: ADMIN})}); if(r.status===403 && !window.__ro){ window.__ro=true; alert('View only. Open the page as /?admin=TOKEN to control the colony.'); } };
+document.getElementById('pause').onclick = () => post({cmd:'pause'});
+document.querySelectorAll('button[data-s]').forEach(b => b.onclick = () => post({cmd:'speed', value:+b.dataset.s}));
+document.querySelectorAll('button[data-i]').forEach(b => b.onclick = () => post({cmd:'inject', value:b.dataset.i}));
+
+async function loadGeom(){ G = await (await fetch('/geometry')).json(); }
+async function poll(){
+  try { const s = await (await fetch('/state')).json(); S = s; lastFetch = performance.now(); renderSide(s); }
+  catch(e) { document.getElementById('banner').textContent = 'no connection'; }
+  setTimeout(poll, 250);
+}
+
+// ---------- coordinate transform ----------
+let sc = 1, ox = 0, oy = 0;
+function fit(){
+  const W = cv.clientWidth, H = cv.clientHeight; cv.width = W * devicePixelRatio; cv.height = H * devicePixelRatio;
+  const x0=-780, x1=440, y0=-440, y1=440;
+  sc = Math.min(W/(x1-x0), H/(y1-y0)); ox = W/2 - sc*(x0+x1)/2; oy = H/2 - sc*(y0+y1)/2;
+}
+const X = x => ox + sc*x, Y = y => oy + sc*y;
+function polar(a, r){ const t = a*Math.PI/180; return [r*Math.cos(t), r*Math.sin(t)]; }
+
+// ---------- colours ----------
+function tempColor(t){ // -60..25 -> blue..white..orange
+  const u = Math.max(0, Math.min(1, (t + 40) / 65));
+  if (u < 0.6) { const k = u/0.6; return `rgb(${Math.round(60+150*k)},${Math.round(110+120*k)},${Math.round(230-20*k)})`; }
+  const k = (u-0.6)/0.4; return `rgb(${Math.round(210+45*k)},${Math.round(230-90*k)},${Math.round(210-150*k)})`;
+}
+const modeColor = {ONLINE:'#5ec07a', RUNBACK:'#e0b04a', SCRAM:'#e2574d', COOLING:'#e2574d', EMERGENCY:'#ff2a2a', CORE_DAMAGE:'#ff0000', STARTING:'#5aa9ff'};
+
+// ---------- drawing helpers ----------
+function line(x0,y0,x1,y1,color,w,dash,off){ ctx.beginPath(); ctx.strokeStyle=color; ctx.lineWidth=w; ctx.setLineDash(dash||[]); ctx.lineDashOffset=off||0; ctx.moveTo(X(x0),Y(y0)); ctx.lineTo(X(x1),Y(y1)); ctx.stroke(); ctx.setLineDash([]); }
+function flow(x0,y0,x1,y1,color,w,on,speed){ line(x0,y0,x1,y1,on?color:'#3a3f4a',w); if(on) line(x0,y0,x1,y1,'#ffffff',Math.max(1,w-1),[3,9],-animT*speed); }
+function dot(x,y,r,color){ ctx.beginPath(); ctx.fillStyle=color; ctx.arc(X(x),Y(y),r,0,Math.PI*2); ctx.fill(); }
+function text(x,y,s,color,size,align){ ctx.fillStyle=color||'#d9dde6'; ctx.font=`${size||11}px sans-serif`; ctx.textAlign=align||'center'; ctx.fillText(s,X(x),Y(y)); }
+function box(x,y,w,h,fill,stroke,label,sub){ ctx.fillStyle=fill; ctx.strokeStyle=stroke; ctx.lineWidth=1.2; ctx.beginPath(); if(ctx.roundRect) ctx.roundRect(X(x)-w/2,Y(y)-h/2,w,h,6); else ctx.rect(X(x)-w/2,Y(y)-h/2,w,h); ctx.fill(); ctx.stroke(); if(label) text(x,y-3,label,'#e8ecf3',11); if(sub) text(x,y+10,sub,'#9aa3b5',10); }
+
+function draw(){
+  fit(); ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+  ctx.clearRect(0,0,cv.clientWidth,cv.clientHeight);
+  animT = performance.now()/40;
+  if(!G || !S) { requestAnimationFrame(draw); return; }
+  const c = G.cfg, R = c.ring_road_radius, ns = c.sectors;
+  const night = S.env.night;
+  // sectors
+  for(let s=0;s<ns;s++){
+    const a0=(s*60)*Math.PI/180, a1=((s+1)*60)*Math.PI/180;
+    ctx.beginPath(); ctx.arc(X(0),Y(0),sc*(R+40),a0,a1); ctx.arc(X(0),Y(0),sc*(c.hub_radius+10),a1,a0,true); ctx.closePath();
+    const sec=S.sectors[s];
+    ctx.fillStyle = sec.gate==='LOCKDOWN' ? 'rgba(226,87,77,.10)' : (!sec.online ? 'rgba(226,87,77,.05)' : (sec.dark ? 'rgba(0,0,0,.35)' : 'rgba(255,255,255,.025)'));
+    ctx.fill(); ctx.strokeStyle='#262b36'; ctx.lineWidth=1; ctx.stroke();
+    const [lx,ly]=polar(s*60+30, R+58); text(lx,ly,`S${s+1}`,'#6d7689',12);
+  }
+  // roads: ring segments and spokes
+  for(let s=0;s<ns;s++){
+    const integ=S.sectors[s].road; const col = integ<20?'#e2574d':(integ<50?'#8a6a2a':'#3d4350');
+    ctx.beginPath(); ctx.strokeStyle=col; ctx.lineWidth=S.power.road_heating?5:4; ctx.arc(X(0),Y(0),sc*R,(s*60)*Math.PI/180,((s+1)*60)*Math.PI/180); ctx.stroke();
+    const [sx,sy]=polar(s*60,c.hub_radius), [ex,ey]=polar(s*60,R); line(sx,sy,ex,ey,'#2e3440',2);
+  }
+  line(-R,0,c.reactor[0]+60,0,'#3d4350',4); // spoke to the reactor complex (under the trunk)
+  // gates
+  for(let s=0;s<ns;s++){ const [gx,gy]=polar(s*60,R); const st=S.sectors[s].gate; const col = st==='LOCKDOWN'?'#e2574d':(st==='OPEN'?'#5ec07a':'#8a93a6');
+    ctx.save(); ctx.translate(X(gx),Y(gy)); ctx.rotate(s*60*Math.PI/180); ctx.fillStyle=col; ctx.fillRect(-3,-9,6,18); ctx.restore(); if(!S.sectors[s].gate_ok) text(gx,gy-12,'!','#e2574d',12); }
+  // water pipes: plant -> hub, hub -> sector mains
+  const waterOn = S.water.tank_m3>0 && S.water.pump;
+  flow(c.reactor[0], 100, -c.hub_radius-4, 8, '#5aa9ff', 2, S.water.plant, 1.2);
+  for(let s=0;s<ns;s++){ const [x0,y0]=polar(s*60+36,c.hub_radius), [x1,y1]=polar(s*60+36,R-30); flow(x0,y0,x1,y1,'#5aa9ff',1.5, waterOn && S.sectors[s].water_ok>0, 1.0); }
+  // power: trunk, feeders, spans
+  const reactorUp = S.reactor.available_mw>0;
+  flow(c.reactor[0]+40, -4, -c.hub_radius, -4, '#f2c14e', 3, S.power.trunk && reactorUp, 2.5);
+  flow(c.reactor[0]+40, -60, c.tower[0]+20, c.tower[1]+30, '#f2c14e', 1.2, S.power.tower_line && S.power.trunk && reactorUp, 2);
+  for(let s=0;s<ns;s++){ const [x1,y1]=polar(s*60+30,c.hub_radius+18); const [x0,y0]=polar(s*60+30,c.hub_radius-30); flow(x0,y0,x1,y1,'#f2c14e',2,S.power.feeder[s]&&S.sectors[s].online,2); }
+  const PPS=c.poles_per_sector;
+  for(let i=0;i<G.poles.x.length;i++){
+    const k=G.poles.k[i], s=G.poles.sector[i];
+    let px0,py0; if(k===0){ [px0,py0]=polar(s*60+30,c.hub_radius+18); } else { px0=G.poles.x[i-1]; py0=G.poles.y[i-1]; }
+    const px1=G.poles.x[i], py1=G.poles.y[i];
+    flow(px0,py0,px1,py1,'#f2c14e',1.6,S.poles.span[i]===1,2);
+    // internet cable, offset perpendicular
+    const dx=px1-px0, dy=py1-py0, L=Math.hypot(dx,dy)||1, nx=-dy/L*6, ny=dx/L*6;
+    line(px0+nx,py0+ny,px1+nx,py1+ny,S.poles.net[i]===1?'#4fd1c5':'#4a3030',1);
+  }
+  // house drops to poles (faint)
+  for(let i=0;i<G.houses.x.length;i++){ const p=G.houses.pole[i]; line(G.houses.x[i],G.houses.y[i],G.poles.x[p],G.poles.y[p],'rgba(242,193,78,.12)',1); }
+  // hub
+  dot(0,0,sc*c.hub_radius,'#1c2028'); ctx.beginPath(); ctx.strokeStyle=S.power.substation?'#f2c14e':'#e2574d'; ctx.lineWidth=2; ctx.arc(X(0),Y(0),sc*c.hub_radius,0,Math.PI*2); ctx.stroke();
+  text(0,-30,'substation',S.power.substation?'#f2c14e':'#e2574d',11); text(0,-16,`UPS center ${S.power.ups_center_kwh} kWh`,'#9aa3b5',10);
+  text(0,0,S.net.comms?'comms node':'comms DOWN',S.net.comms&&S.net.uplink?'#4fd1c5':'#e2574d',11); text(0,16,'ops center, water pump','#9aa3b5',10);
+  text(0,32,`tank ${S.water.tank_m3} m3`,waterOn?'#5aa9ff':'#e2574d',10);
+  // reactor complex
+  const rc=modeColor[S.reactor.mode]||'#888';
+  box(c.reactor[0],-110,110,34,'#20242e','#7a6a2a','solar',`${S.power.solar_kw} kW`);
+  box(c.reactor[0],0,120,54,'#20242e',rc,`REACTOR ${S.reactor.mode}`,`${S.reactor.power_mw} MW  core ${S.reactor.core_temp} C`);
+  if(S.reactor.marines) text(c.reactor[0],-38,'MARINES IN THE SUBLEVELS','#e2574d',10);
+  box(c.reactor[0],100,110,34,'#20242e',S.water.plant?'#5aa9ff':'#e2574d','water plant',S.water.plant?'melting ice':'no heat');
+  box(c.reactor[0],200,110,34,'#20242e','#6a7a2a','waste storage',`+${S.finance.waste_station}`);
+  box(c.reactor[0],300,110,34,'#20242e',S.power.mine?'#a08a2a':'#5a5a5a','mine',S.power.mine?`${S.power.infra.mine} kW`:'stopped');
+  // tower
+  const [tx,ty]=[c.tower[0],c.tower[1]];
+  ctx.beginPath(); ctx.strokeStyle=S.net.uplink?'#4fd1c5':'#e2574d'; ctx.lineWidth=2; ctx.moveTo(X(tx)-10,Y(ty)+18); ctx.lineTo(X(tx),Y(ty)-18); ctx.lineTo(X(tx)+10,Y(ty)+18); ctx.stroke();
+  text(tx,ty+32,S.net.uplink?'uplink OK':'uplink LOST',S.net.uplink?'#4fd1c5':'#e2574d',10);
+  line(-c.hub_radius+8,-8,tx+6,ty+14,S.net.uplink?'#4fd1c5':'#4a3030',1.2);
+  if(S.net.uplink){ for(let k=0;k<3;k++){ ctx.beginPath(); ctx.strokeStyle=`rgba(79,209,197,${0.5-0.15*k})`; ctx.arc(X(tx),Y(ty)-14,8+6*k+((animT*2)%6),-2.2,-0.9); ctx.stroke(); } }
+  // poles and lamps
+  for(let i=0;i<G.poles.x.length;i++){ const x=G.poles.x[i],y=G.poles.y[i],st=S.poles.state[i];
+    if(S.poles.lamp[i]===1){ const g=ctx.createRadialGradient(X(x),Y(y),0,X(x),Y(y),sc*28); g.addColorStop(0,'rgba(255,230,140,.35)'); g.addColorStop(1,'rgba(255,230,140,0)'); ctx.fillStyle=g; ctx.beginPath(); ctx.arc(X(x),Y(y),sc*28,0,Math.PI*2); ctx.fill(); }
+    if(st===2){ text(x,y+4,'x','#e2574d',13); } else dot(x,y,3,st===1?'#e0b04a':'#c9cfdb'); }
+  // houses
+  const hs=S.houses; const sz=Math.max(4,sc*9);
+  for(let i=0;i<G.houses.x.length;i++){ const x=X(G.houses.x[i]),y=Y(G.houses.y[i]);
+    ctx.fillStyle=tempColor(hs.t[i]); ctx.fillRect(x-sz/2,y-sz/2,sz,sz);
+    if(!hs.power[i]){ ctx.strokeStyle='#e2574d'; ctx.lineWidth=1.5; ctx.strokeRect(x-sz/2,y-sz/2,sz,sz); }
+    else if(hs.ups[i]){ ctx.strokeStyle='#5aa9ff'; ctx.lineWidth=1.5; ctx.strokeRect(x-sz/2,y-sz/2,sz,sz); }
+    else if(hs.limit[i]>0){ ctx.strokeStyle='#e0b04a'; ctx.lineWidth=1; ctx.strokeRect(x-sz/2,y-sz/2,sz,sz); }
+    if(hs.heater[i]&&hs.power[i]){ ctx.fillStyle='#ff7a30'; ctx.fillRect(x-1.5,y-1.5,3,3); }
+    if(hs.burst[i]){ ctx.strokeStyle='#5aa9ff'; ctx.lineWidth=1.5; ctx.beginPath(); ctx.moveTo(x-sz/2,y-sz/2); ctx.lineTo(x+sz/2,y+sz/2); ctx.moveTo(x+sz/2,y-sz/2); ctx.lineTo(x-sz/2,y+sz/2); ctx.stroke(); }
+  }
+  // internet packets
+  const now=performance.now();
+  for(const p of S.net.packets){ const key=p.t+':'+p.from+':'+p.id; if(!packetsSeen.has(key)) packetsSeen.set(key, now); }
+  for(const [key,t0] of packetsSeen){ if(now-t0>1800){ packetsSeen.delete(key); continue; }
+    const [t,from,id]=key.split(':'); const pk=S.net.packets.find(q=>q.t+':'+q.from+':'+q.id===key); if(!pk) continue;
+    let path=[];
+    if(from==='house'){ const i=+id, p=G.houses.pole[i], s=G.houses.sector[i]; path.push([G.houses.x[i],G.houses.y[i]]);
+      for(let k=G.poles.k[p];k>=0;k--){ const j=s*PPS+k; path.push([G.poles.x[j],G.poles.y[j]]); } const [hx,hy]=polar(s*60+30,c.hub_radius+18); path.push([hx,hy]); path.push([0,0]); }
+    else { path.push([0,0]); }
+    if(pk.uplink) path.push([tx+6,ty+14]);
+    const u=(now-t0)/1800; let seg=Math.floor(u*(path.length-1)), f=u*(path.length-1)-seg; if(seg>=path.length-1){seg=path.length-2;f=1;}
+    const [ax,ay]=path[seg],[bx,by]=path[seg+1]; dot(ax+(bx-ax)*f,ay+(by-ay)*f,2.5,pk.uplink?(pk.kind==='reactor'?'#f2c14e':'#4fd1c5'):'#e2574d'); }
+  // waste bins and sludge stores at the ring
+  for(let s=0;s<ns;s++){ const [bx,by]=polar(s*60+30,R+22); const w=S.sectors[s].waste; ctx.fillStyle=w>=1?'#e2574d':(w>=0.9?'#e0b04a':'#3d4350'); ctx.fillRect(X(bx)-5,Y(by)-5,10,10); ctx.fillStyle='#8a93a6'; ctx.fillRect(X(bx)-4,Y(by)+4-8*Math.min(1,w),8,8*Math.min(1,w)); }
+  // rovers
+  const rc2={garbage:['G','#9bd36a'],sludge:['S','#b48ead'],repair:['E','#f2c14e'],plumber:['P','#5aa9ff']};
+  for(const r of S.rovers){ const [l,col]=rc2[r.name==='engineer-2'?'repair':(r.name==='engineer'?'repair':r.name)]||['?','#fff']; dot(r.x,r.y,7,col); text(r.x,r.y+4,l,'#111',10); text(r.x,r.y+16,r.state.toLowerCase().replace('_',' '),'#9aa3b5',9); }
+  // xenomorphs
+  for(const x of S.xenos){ ctx.save(); ctx.translate(X(x.x),Y(x.y)); ctx.rotate(Math.PI/4); ctx.fillStyle='#e2574d'; ctx.fillRect(-5,-5,10,10); ctx.restore(); }
+  // issues
+  for(const i of S.issues){ const col=i.sev==='critical'?'#e2574d':(i.sev==='warning'?'#e0b04a':'#8a93a6'); dot(i.x+8,i.y-8,6,col); text(i.x+8,i.y-4,'!','#111',10); }
+  // banner
+  const e=S.env; document.getElementById('banner').innerHTML = `<b>${S.time}</b> &nbsp; ${e.t_out} C, wind ${e.wind} m/s${e.storm?' <span class="bad">STORM</span>':''}${e.precip==='snow'?' snow':''}${e.night?' night':' day'}${S.paused?' <span class="warn">PAUSED</span>':''} &nbsp; ${S.speed} min/s`;
+  const fin=document.getElementById('finished'); if(S.finished){ fin.style.display='flex'; fin.textContent='SIMULATION OVER: '+S.finish_reason; }
+  requestAnimationFrame(draw);
+}
+
+function cls(ok, warn){ return ok?'ok':(warn?'warn':'bad'); }
+function renderSide(s){
+  document.getElementById('time').textContent = s.time;
+  document.getElementById('pause').textContent = s.paused?'Resume':'Pause';
+  document.querySelectorAll('button[data-s]').forEach(b=>b.classList.toggle('on', +b.dataset.s===s.speed));
+  const p=s.power, r=s.reactor, w=s.water, f=s.finance;
+  const kp=[
+    ['Colony budget', f.colony.toLocaleString()+' cr', f.colony>20000?'ok':(f.colony>0?'warn':'bad')],
+    ['Sector budgets', f.sectors.map(x=>Math.round(x/1000)+'k').join(' '), Math.min(...f.sectors)>2000?'ok':'warn'],
+    ['Power available', p.available_kw+' kW', p.available_kw>p.demand_kw?'ok':'bad'],
+    ['Power demand', p.demand_kw+' kW'+(p.shedding?` / shedding L${p.shedding}`:''), p.shedding?'warn':'ok'],
+    ['Water tank', w.tank_m3+' m3, '+w.houses_ok+'/300 houses', w.tank_m3>100&&w.houses_ok>280?'ok':'warn'],
+    ['Pipes', `${w.frozen} frozen, ${w.burst} burst`, w.burst===0?'ok':'bad'],
+    ['Internet', `${s.net.houses_online}/300 online, uplink ${s.net.uplink?'OK':'LOST'}`, s.net.uplink&&s.net.houses_online>280?'ok':'warn'],
+    ['Open issues', s.issues_total+(f.unpaid?` (unpaid ${f.unpaid} cr)`:''), s.issues_total<5?'ok':'warn'],
+    ['Month income (colony)', f.month_income.toLocaleString()+' cr', 'dim'],
+    ['Month expense (colony)', f.month_expense.toLocaleString()+' cr', 'dim'],
+  ];
+  document.getElementById('kpi').innerHTML = kp.map(([l,v,c])=>`<div class="card"><div class="v ${c}">${v}</div><div class="l">${l}</div></div>`).join('');
+  const inf=p.infra;
+  document.getElementById('reactor').innerHTML = `<div><b class="${r.mode==='ONLINE'?'ok':(r.mode==='RUNBACK'||r.mode==='STARTING'?'warn':'bad')}">${r.mode}</b> &nbsp; ${r.power_mw} MW gross, ${r.available_mw} MW to grid, core ${r.core_temp} C${r.decay_mw?`, decay ${r.decay_mw} MW`:''}</div>
+    <div class="dim">pumps A ${r.pump_a} B ${r.pump_b}, heat exchanger ${r.hx}, batteries ${r.battery_h} h, link ${r.link?'ok':'<span class="bad">lost</span>'}${r.faults.length?', faults: '+r.faults.join(', '):''}</div>
+    <div class="dim">solar ${p.solar_kw} kW; loads: mine ${inf.mine}, houses ${Math.round(p.demand_kw-Object.values(inf).reduce((a,b)=>a+b,0))}, water plant ${inf.water_plant}, road heating ${inf.road_heating}, lamps ${inf.lamps}, comms ${inf.comms}, ups charge ${inf.ups_charge} kW</div>
+    <div class="dim">trunk ${p.trunk?'ok':'<span class="bad">CUT</span>'}, substation ${p.substation?'ok':'<span class="bad">DOWN</span>'}, UPS center ${p.ups_center} ${p.ups_center_kwh} kWh</div>`;
+  document.querySelector('#sectors tbody').innerHTML = s.sectors.map(x=>`<tr><td>${x.id}${x.dark?' <span class="warn">dark</span>':''}</td><td>${x.budget}</td><td>${x.demand_kw}</td><td class="${x.avg_t>15?'ok':(x.avg_t>4?'warn':'bad')}">${x.avg_t}</td><td class="${x.min_t>4?'ok':'bad'}">${x.min_t}</td><td class="${cls(x.power_ok===50,x.power_ok>30)}">${x.power_ok}</td><td class="${cls(x.water_ok===50,x.water_ok>30)}">${x.water_ok}</td><td class="${cls(x.net_ok===50,x.net_ok>30)}">${x.net_ok}</td><td class="${x.ups==='DISCHARGING'?'warn':(x.ups==='DEPLETED'?'bad':'dim')}">${x.ups.slice(0,4)} ${x.ups_kwh}</td><td class="${x.waste>=1?'bad':(x.waste>=0.9?'warn':'dim')}">${Math.round(x.waste*100)}%</td><td class="${x.sanitary>70?'ok':'bad'}">${x.sanitary}</td><td class="${x.gate==='OPEN'?'ok':(x.gate==='LOCKDOWN'?'bad':'warn')}">${x.gate.slice(0,4)}</td><td class="${x.road>20?'dim':'bad'}">${x.road}%</td></tr>`).join('');
+  document.getElementById('nissues').textContent = `(${s.issues_total})`;
+  document.getElementById('issues').innerHTML = s.issues.slice().reverse().map(i=>`<div><span class="${i.sev==='critical'?'bad':(i.sev==='warning'?'warn':'dim')}">${i.kind}</span> ${i.target} ${i.sector>0?'S'+i.sector:''} ${i.cause}, ${i.cost} cr (${i.payer}) <span class="dim">${i.status}, ${Math.round(i.age/60)} h</span></div>`).join('') || '<div>none</div>';
+  document.getElementById('log').innerHTML = s.events.map(e=>`<div class="${e.level}">${String(e.t).padStart(6)} ${e.text}</div>`).join('');
+  const rp=s.report; if(rp){ document.getElementById('report').textContent =
+    `Month ${rp.month}: owners paid ${Math.round(rp.houses_total)} cr (energy ${Math.round(rp.energy_total)}, water ${Math.round(rp.water_total)}, repairs ${Math.round(rp.repairs_total)}), ${Math.round(rp.kwh_total)} kWh\n`+
+    `colony: income ${rp.colony_income}, expense ${rp.colony_expense}, budget ${rp.colony_budget}, unpaid ${rp.unpaid}\n`+
+    `sector income ${rp.sector_income.join(' | ')}\nsector expense ${rp.sector_expense.join(' | ')}\n`+
+    `expense by cause: ${Object.entries(rp.by_cause).map(([k,v])=>k+' '+v).join(', ')}\n`+
+    `top houses: ${rp.top_houses.map(h=>`#${h.house} (S${h.sector}) ${h.total}`).join(', ')}`; }
+}
+cv.addEventListener('mousemove', ev => {
+  const tip=document.getElementById('tip'); if(!G||!S){ tip.style.display='none'; return; }
+  const r=cv.getBoundingClientRect(), mx=ev.clientX-r.left, my=ev.clientY-r.top; let best=-1, bd=10;
+  for(let i=0;i<G.houses.x.length;i++){ const d=Math.hypot(X(G.houses.x[i])-mx, Y(G.houses.y[i])-my); if(d<bd){bd=d;best=i;} }
+  if(best<0){ tip.style.display='none'; return; }
+  const h=S.houses, i=best;
+  tip.innerHTML=`<b>House ${i+1}</b> (S${G.houses.sector[i]+1}, ${G.types[G.houses.type[i]]})<br>indoor ${h.t[i]} C, heater ${h.heater[i]?'on':'off'}<br>power ${h.power[i]?(h.ups[i]?'UPS':'grid'):'<span class="bad">none</span>'}${h.limit[i]?', limit '+h.limit[i]+' W':''}<br>water ${h.water[i]?'ok':'<span class="bad">no</span>'}${h.burst[i]?', <span class="bad">pipes burst</span>':''}<br>internet ${h.net[i]?'online':'offline'}, sludge ${Math.round(h.sludge[i]*100)}%`;
+  tip.style.display='block'; tip.style.left=(mx+14)+'px'; tip.style.top=(my+14)+'px';
+});
+loadGeom().then(()=>{ poll(); draw(); });
+window.addEventListener('resize', fit);
+</script></body></html>
+"""
+
+# ------------------------------------------------------------------------------------
+# 3D UI (served at /): the colony wrapped onto a small planet, three.js, orbit and zoom.
+# The flat 2D map stays at /flat. __THREE_BASE__ is replaced at startup (cdn or /vendor/).
+# ------------------------------------------------------------------------------------
+
+HTML3D = r"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Hadley's Hope</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#07090d; --panel:#12151c; --line:#262b36; --text:#d9dde6; --dim:#8a93a6; --ok:#5ec07a; --warn:#e0b04a; --bad:#e2574d; --blue:#5aa9ff; --cyan:#4fd1c5; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:13px/1.35 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; display:flex; height:100vh; overflow:hidden; }
+  #map { flex:1 1 auto; position:relative; min-width:0; }
+  canvas { display:block; }
+  #side { width:470px; flex:0 0 470px; background:var(--panel); border-left:1px solid var(--line); overflow-y:auto; padding:10px 12px; }
+  h1 { font-size:15px; margin:0 0 6px; } h2 { font-size:12px; color:var(--dim); text-transform:uppercase; letter-spacing:.06em; margin:14px 0 6px; }
+  .row { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+  button { background:#232835; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:4px 8px; cursor:pointer; font-size:12px; }
+  button:hover { background:#2d3444; } button.on { border-color:var(--blue); color:var(--blue); }
+  label.chk { display:inline-flex; align-items:center; gap:4px; background:#1c212c; border:1px solid var(--line); border-radius:6px; padding:3px 7px; font-size:11.5px; cursor:pointer; }
+  input[type=range] { width:200px; }
+  .kpi { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+  .card { background:#1a1f2a; border:1px solid var(--line); border-radius:8px; padding:6px 8px; }
+  .card .v { font-size:17px; font-weight:600; } .card .l { color:var(--dim); font-size:11px; }
+  table { width:100%; border-collapse:collapse; font-size:11.5px; } th,td { padding:2px 3px; text-align:right; border-bottom:1px solid var(--line); white-space:nowrap; } th { color:var(--dim); font-weight:500; } td:first-child, th:first-child { text-align:left; }
+  tr.sec { cursor:pointer; } tr.sec:hover { background:#1c212c; }
+  .ok { color:var(--ok); } .warn { color:var(--warn); } .bad { color:var(--bad); } .dim { color:var(--dim); }
+  #log { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11px; max-height:220px; overflow-y:auto; background:#0b0e13; border:1px solid var(--line); border-radius:6px; padding:6px; }
+  #log div { padding:1px 0; } .ALARM { color:var(--bad); } .WARN { color:var(--warn); } .INFO { color:var(--dim); }
+  #banner { position:absolute; left:10px; top:10px; background:rgba(18,21,28,.88); border:1px solid var(--line); border-radius:8px; padding:6px 10px; font-size:13px; pointer-events:none; }
+  #hint { position:absolute; left:10px; bottom:10px; background:rgba(18,21,28,.88); border:1px solid var(--line); border-radius:8px; padding:6px 10px; font-size:11px; color:var(--dim); pointer-events:none; }
+  #tip { position:absolute; display:none; background:rgba(18,21,28,.95); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font-size:11px; pointer-events:none; max-width:260px; }
+  #finished { position:absolute; inset:0; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,.6); font-size:28px; color:var(--bad); }
+  pre { white-space:pre-wrap; font-size:11px; background:#0b0e13; padding:6px; border-radius:6px; border:1px solid var(--line); }
+  @media (max-width: 900px) {
+    body { flex-direction:column; overflow:auto; height:auto; }
+    #map { flex:none; height:64vh; min-height:360px; }
+    #side { width:100%; flex:none; border-left:none; border-top:1px solid var(--line); }
+    #hint { display:none; }
+  }
+</style>
+<script type="importmap">{"imports":{"three":"__THREE_BASE__build/three.module.js","three/addons/":"__THREE_BASE__examples/jsm/"}}</script>
+</head>
+<body>
+<div id="map">
+  <div id="banner">connecting...</div>
+  <div id="hint">drag to rotate the planet, wheel to zoom, hover a house for details, click a sector row to fly there. Flat map: <b>/flat</b></div>
+  <div id="tip"></div>
+  <div id="finished"></div>
+</div>
+<div id="side">
+  <h1>Hadley's Hope, LV-426</h1>
+  <div class="row"><span id="time" style="font-weight:600;min-width:120px"></span><button id="pause">Pause</button>
+    <span class="dim">speed</span><input type="range" id="speed" min="0" max="100" value="45"><span id="speedv" class="dim" style="min-width:64px"></span></div>
+  <h2>Layers</h2>
+  <div class="row" id="layers">
+    <label class="chk"><input type="checkbox" data-l="issues" checked> issues</label>
+    <label class="chk"><input type="checkbox" data-l="nonet" checked> no internet</label>
+    <label class="chk"><input type="checkbox" data-l="ups" checked> ups charging</label>
+    <label class="chk"><input type="checkbox" data-l="heater"> heaters on</label>
+    <label class="chk"><input type="checkbox" data-l="power" checked> power flow</label>
+    <label class="chk"><input type="checkbox" data-l="water" checked> water flow</label>
+    <label class="chk"><input type="checkbox" data-l="packets" checked> packets</label>
+    <label class="chk"><input type="checkbox" data-l="people" checked> people</label>
+    <label class="chk"><input type="checkbox" data-l="threats" checked> xenomorphs, marines</label>
+    <label class="chk"><input type="checkbox" data-l="labels" checked> labels</label>
+  </div>
+  <h2>Fly to</h2>
+  <div class="row" id="fly"><button data-f="hub">hub</button><button data-f="reactor">reactor</button><button data-f="solar">solar</button><button data-f="tower">tower</button><button data-f="mine">mine</button><button data-f="planet">whole planet</button></div>
+  <h2>Inject</h2>
+  <div class="row">
+    <button data-i="span">break span</button><button data-i="pole">fell pole</button><button data-i="xeno">xenomorphs</button>
+    <button data-i="storm">storm</button><button data-i="trunk">cut trunk</button><button data-i="pump">pump trip</button>
+    <button data-i="marines">marines fire</button><button data-i="scram">SCRAM</button><button data-i="road">break road</button><button data-i="money">+50k cr</button>
+  </div>
+  <h2>Colony</h2>
+  <div class="kpi" id="kpi"></div>
+  <h2>Reactor and power</h2>
+  <div id="reactor" class="card"></div>
+  <h2>Sectors <span class="dim" style="font-weight:400;text-transform:none">(click a row to fly there)</span></h2>
+  <table id="sectors"><thead><tr><th>#</th><th>cr</th><th>kW</th><th>avg C</th><th>min C</th><th>pwr</th><th>water</th><th>net</th><th>UPS</th><th>waste</th><th>san</th><th>gate</th><th>road</th></tr></thead><tbody></tbody></table>
+  <h2>Open issues <span id="nissues" class="dim"></span></h2>
+  <div id="issues" class="dim" style="font-size:11px;max-height:120px;overflow-y:auto"></div>
+  <h2>Events</h2>
+  <div id="log"></div>
+  <h2>Last monthly report</h2>
+  <pre id="report">no month closed yet</pre>
+</div>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// ---------- state, polling, controls ----------
+const ADMIN = new URLSearchParams(location.search).get('admin') || '';
+let G = null, S = null;
+const post = async (o) => { const r = await fetch('/cmd', {method:'POST', body: JSON.stringify({...o, token: ADMIN})}); if(r.status===403 && !window.__ro){ window.__ro=true; alert('View only. Open the page as /?admin=TOKEN to control the colony.'); } };
+document.getElementById('pause').onclick = () => post({cmd:'pause'});
+document.querySelectorAll('button[data-i]').forEach(b => b.onclick = () => post({cmd:'inject', value:b.dataset.i}));
+const speedEl = document.getElementById('speed'), speedV = document.getElementById('speedv');
+const sliderToSpeed = v => Math.round(Math.exp(Math.log(600) * v / 100));   // 0..100 -> 1..600, log scale
+const speedToSlider = s => Math.round(Math.log(Math.max(1, s)) / Math.log(600) * 100);
+speedEl.oninput = () => { speedV.textContent = sliderToSpeed(+speedEl.value) + ' min/s'; };
+speedEl.onchange = () => post({cmd:'speed', value: sliderToSpeed(+speedEl.value)});
+const layers = {}; document.querySelectorAll('#layers input').forEach(c => { layers[c.dataset.l] = c.checked; c.onchange = () => { layers[c.dataset.l] = c.checked; applyLayers(); }; });
+
+async function loadGeom(){ G = await (await fetch('/geometry')).json(); }
+async function poll(){
+  try { const s = await (await fetch('/state')).json(); const first = !S; S = s; renderSide(s); onState(s, first); }
+  catch(e) { document.getElementById('banner').textContent = 'no connection'; }
+  setTimeout(poll, 300);
+}
+
+// ---------- planet geometry helpers ----------
+const RP = 1500;
+const UP = new THREE.Vector3(0,1,0);
+function sph(x, y, h=0){ const d=Math.hypot(x,y), th=d/RP, ph=Math.atan2(y,x), r=RP+h; return new THREE.Vector3(r*Math.sin(th)*Math.cos(ph), r*Math.cos(th), r*Math.sin(th)*Math.sin(ph)); }
+function quatAt(x, y, yaw=0){ const n=sph(x,y).normalize(); const q=new THREE.Quaternion().setFromUnitVectors(UP, n); if(yaw) q.multiply(new THREE.Quaternion().setFromAxisAngle(UP, yaw)); return q; }
+function polar(a, r){ const t=a*Math.PI/180; return [r*Math.cos(t), r*Math.sin(t)]; }
+function subdiv(pts, step=14){ const out=[]; for(let i=0;i<pts.length-1;i++){ const [x0,y0]=pts[i],[x1,y1]=pts[i+1]; const n=Math.max(1,Math.ceil(Math.hypot(x1-x0,y1-y0)/step)); for(let k=0;k<n;k++) out.push([x0+(x1-x0)*k/n, y0+(y1-y0)*k/n]); } out.push(pts[pts.length-1]); return out; }
+function arcPts(a0, a1, r, n=24){ const out=[]; for(let i=0;i<=n;i++){ out.push(polar(a0+(a1-a0)*i/n, r)); } return out; }
+
+// ribbon on the sphere for roads and streets
+function ribbon(flat, width, h, color){
+  const pts = subdiv(flat, 10); const pos=[], idx=[];
+  for(let i=0;i<pts.length;i++){ const p=pts[i], q=pts[Math.min(i+1,pts.length-1)], o=pts[Math.max(i-1,0)]; let dx=q[0]-o[0], dy=q[1]-o[1]; const L=Math.hypot(dx,dy)||1; dx/=L; dy/=L; const nx=-dy*width/2, ny=dx*width/2;
+    const a=sph(p[0]+nx,p[1]+ny,h), b=sph(p[0]-nx,p[1]-ny,h); pos.push(a.x,a.y,a.z,b.x,b.y,b.z); if(i<pts.length-1){ const k=i*2; idx.push(k,k+1,k+2, k+1,k+3,k+2); } }
+  const g=new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos,3)); g.setIndex(idx); g.computeVertexNormals();
+  return new THREE.Mesh(g, new THREE.MeshStandardMaterial({color, roughness:1, metalness:0, polygonOffset:true, polygonOffsetFactor:-1}));
+}
+
+// line layer: many polylines, colour per polyline, vertex colours
+class LineLayer {
+  constructor(polylines, h, baseColor, width=1){ // polylines: [[[x,y],...],...]
+    this.ranges=[]; const pos=[], col=[]; const c=new THREE.Color(baseColor);
+    for(const pl of polylines){ const pts=subdiv(pl, 16); const start=pos.length/3; for(let i=0;i<pts.length-1;i++){ const a=sph(pts[i][0],pts[i][1],h), b=sph(pts[i+1][0],pts[i+1][1],h); pos.push(a.x,a.y,a.z,b.x,b.y,b.z); col.push(c.r,c.g,c.b,c.r,c.g,c.b); } this.ranges.push([start, pos.length/3]); }
+    const g=new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos,3)); g.setAttribute('color', new THREE.Float32BufferAttribute(col,3));
+    this.mesh=new THREE.LineSegments(g, new THREE.LineBasicMaterial({vertexColors:true, linewidth:width})); this.polylines=polylines; }
+  setColor(i, color){ const c=new THREE.Color(color), a=this.mesh.geometry.attributes.color; const [s,e]=this.ranges[i]; for(let k=s;k<e;k++){ a.setXYZ(k,c.r,c.g,c.b);} a.needsUpdate=true; }
+}
+
+// flow dots moving along polylines
+class FlowLayer {
+  constructor(polylines, h, color, size, perLine=3, speed=0.35){ this.pls=polylines.map(pl=>{ const pts=subdiv(pl,8).map(p=>sph(p[0],p[1],h)); const cum=[0]; for(let i=1;i<pts.length;i++) cum.push(cum[i-1]+pts[i].distanceTo(pts[i-1])); return {pts,cum,len:cum[cum.length-1]}; });
+    this.active=new Array(polylines.length).fill(false); this.per=perLine; this.speed=speed; const n=polylines.length*perLine;
+    const g=new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(n*3),3));
+    this.mesh=new THREE.Points(g, new THREE.PointsMaterial({color, size, map:TEX.dot, transparent:true, depthWrite:false, sizeAttenuation:true})); this.mesh.frustumCulled=false; }
+  update(t){ const a=this.mesh.geometry.attributes.position; let k=0; for(let i=0;i<this.pls.length;i++){ const pl=this.pls[i]; for(let j=0;j<this.per;j++){ if(!this.active[i]||pl.len===0){ a.setXYZ(k++, 0,-99999,0); continue; } const u=((t*this.speed*100/pl.len)+j/this.per)%1; const p=sample(pl,u); a.setXYZ(k++, p.x,p.y,p.z); } } a.needsUpdate=true; }
+}
+function sample(pl, u){ const d=u*pl.len; let i=1; while(i<pl.cum.length-1 && pl.cum[i]<d) i++; const t=(d-pl.cum[i-1])/((pl.cum[i]-pl.cum[i-1])||1); return pl.pts[i-1].clone().lerp(pl.pts[i], t); }
+
+// sprite textures
+function tex(draw){ const c=document.createElement('canvas'); c.width=c.height=64; const x=c.getContext('2d'); draw(x); const t=new THREE.CanvasTexture(c); return t; }
+const TEX = {
+  dot: tex(x=>{ const g=x.createRadialGradient(32,32,2,32,32,30); g.addColorStop(0,'rgba(255,255,255,1)'); g.addColorStop(0.5,'rgba(255,255,255,.6)'); g.addColorStop(1,'rgba(255,255,255,0)'); x.fillStyle=g; x.fillRect(0,0,64,64); }),
+  glow: tex(x=>{ const g=x.createRadialGradient(32,32,0,32,32,32); g.addColorStop(0,'rgba(255,240,180,.9)'); g.addColorStop(0.3,'rgba(255,220,120,.35)'); g.addColorStop(1,'rgba(255,200,80,0)'); x.fillStyle=g; x.fillRect(0,0,64,64); }),
+  bang: tex(x=>{ x.fillStyle='#e2574d'; x.beginPath(); x.arc(32,32,26,0,7); x.fill(); x.fillStyle='#fff'; x.font='bold 40px sans-serif'; x.textAlign='center'; x.textBaseline='middle'; x.fillText('!',32,34); }),
+  diamond: tex(x=>{ x.fillStyle='#ff3b3b'; x.beginPath(); x.moveTo(32,4); x.lineTo(60,32); x.lineTo(32,60); x.lineTo(4,32); x.closePath(); x.fill(); x.fillStyle='#200'; x.beginPath(); x.arc(32,32,7,0,7); x.fill(); }),
+  bolt: tex(x=>{ x.fillStyle='#4fd1c5'; x.beginPath(); x.arc(32,32,28,0,7); x.fill(); x.fillStyle='#062'; x.beginPath(); x.moveTo(36,6); x.lineTo(18,36); x.lineTo(31,36); x.lineTo(27,58); x.lineTo(46,26); x.lineTo(33,26); x.closePath(); x.fill(); }),
+  nonet: tex(x=>{ x.fillStyle='#d857d8'; x.beginPath(); x.arc(32,32,26,0,7); x.fill(); x.strokeStyle='#fff'; x.lineWidth=6; x.beginPath(); x.moveTo(18,18); x.lineTo(46,46); x.moveTo(46,18); x.lineTo(18,46); x.stroke(); }),
+  person: tex(x=>{ x.fillStyle='#ffffff'; x.beginPath(); x.arc(32,18,9,0,7); x.fill(); x.beginPath(); x.roundRect(20,30,24,30,8); x.fill(); }),
+  marine: tex(x=>{ x.fillStyle='#8be05a'; x.beginPath(); x.arc(32,18,9,0,7); x.fill(); x.beginPath(); x.roundRect(20,30,24,30,8); x.fill(); x.fillStyle='#233'; x.fillRect(10,40,44,6); }),
+  flame: tex(x=>{ x.fillStyle='#ff7a30'; x.beginPath(); x.moveTo(32,6); x.bezierCurveTo(50,26,50,44,32,58); x.bezierCurveTo(14,44,14,26,32,6); x.fill(); }),
+  rad: tex(x=>{ x.fillStyle='#e8d34a'; x.beginPath(); x.arc(32,32,28,0,7); x.fill(); x.fillStyle='#222'; for(let k=0;k<3;k++){ x.beginPath(); x.moveTo(32,32); x.arc(32,32,24, k*2.094+0.35, k*2.094+1.4); x.closePath(); x.fill(); } x.beginPath(); x.arc(32,32,5,0,7); x.fill(); }),
+};
+function textSprite(text, color='#d9dde6', px=28){ const c=document.createElement('canvas'); const x=c.getContext('2d'); x.font=`600 ${px}px sans-serif`; const w=Math.ceil(x.measureText(text).width)+16; c.width=w; c.height=px+14; const x2=c.getContext('2d'); x2.font=`600 ${px}px sans-serif`; x2.fillStyle='rgba(10,12,18,.75)'; x2.beginPath(); x2.roundRect(0,0,w,px+14,8); x2.fill(); x2.fillStyle=color; x2.textBaseline='middle'; x2.fillText(text,8,(px+14)/2); const s=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(c), transparent:true, depthTest:false})); s.scale.set(w/px*4.2, 4.2*(px+14)/px, 1); return s; }
+
+// ---------- scene ----------
+const mapEl=document.getElementById('map');
+const renderer=new THREE.WebGLRenderer({antialias:true}); renderer.setPixelRatio(Math.min(devicePixelRatio,2)); mapEl.appendChild(renderer.domElement);
+const scene=new THREE.Scene(); scene.background=new THREE.Color(0x05070b);
+const camera=new THREE.PerspectiveCamera(50,1,1,60000); camera.position.set(250, RP+720, 820);
+const controls=new OrbitControls(camera, renderer.domElement); controls.target.set(0,RP,0); controls.minDistance=60; controls.maxDistance=RP*4; controls.enablePan=true; controls.panSpeed=0.6; controls.enableDamping=true; controls.dampingFactor=0.08; controls.zoomSpeed=1.2;
+scene.add(new THREE.AmbientLight(0xa8b0c4, 1.5)); scene.add(new THREE.HemisphereLight(0x778ab0, 0x2a2118, 0.8));
+const sun=new THREE.DirectionalLight(0xffe0b0, 1.3); scene.add(sun); const sunSprite=new THREE.Sprite(new THREE.SpriteMaterial({map:TEX.glow, transparent:true, depthTest:false})); sunSprite.scale.set(900,900,1); scene.add(sunSprite);
+// stars
+{ const n=2500, p=new Float32Array(n*3); for(let i=0;i<n;i++){ const v=new THREE.Vector3().randomDirection().multiplyScalar(30000); p.set([v.x,v.y,v.z], i*3); } const g=new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(p,3)); scene.add(new THREE.Points(g, new THREE.PointsMaterial({color:0xbfc8dc, size:2.2, sizeAttenuation:false}))); }
+// planet
+{ const c=document.createElement('canvas'); c.width=1024; c.height=512; const x=c.getContext('2d'); x.fillStyle='#2c2925'; x.fillRect(0,0,1024,512); for(let i=0;i<9000;i++){ const r=Math.random(); x.fillStyle=r<0.5?'#25221e':(r<0.8?'#36312c':'#413b35'); x.globalAlpha=0.6; x.beginPath(); x.arc(Math.random()*1024, Math.random()*512, Math.random()*9+1, 0, 7); x.fill(); } x.globalAlpha=1;
+  const t=new THREE.CanvasTexture(c); t.wrapS=THREE.RepeatWrapping; const planet=new THREE.Mesh(new THREE.SphereGeometry(RP,128,96), new THREE.MeshStandardMaterial({map:t, roughness:1, metalness:0})); scene.add(planet);
+  const atm=new THREE.Mesh(new THREE.SphereGeometry(RP*1.035,64,48), new THREE.MeshBasicMaterial({color:0x4a6a9a, transparent:true, opacity:0.10, side:THREE.BackSide, depthWrite:false})); scene.add(atm); }
+
+const world=new THREE.Group(); scene.add(world);
+const labelGroup=new THREE.Group(); world.add(labelGroup);
+const lod = { near: [], mid: [] };   // sprites shown by camera distance
+function addLabel(text, x, y, h, color, tier='mid'){ const s=textSprite(text,color); s.position.copy(sph(x,y,h)); labelGroup.add(s); lod[tier].push(s); return s; }
+let housesMesh, polesMesh, spans, feeders, trunkLine, towerLine, solarLine, waterMain, waterSectors, cableTrunk, cableTower, cableSectors, flowPower, flowWater, packetsPts, markers={}, gates=[], rovers={}, hub={}, complex={}, roadMeshes=[];
+const flatHouses=[];
+
+function build(){
+  const c=G.cfg, R=c.ring_road_radius, ns=c.sectors, PPS=c.poles_per_sector;
+  // roads
+  const ring=arcPts(0,360,R,120); roadMeshes.ring = []; for(let s=0;s<ns;s++){ const m=ribbon(arcPts(s*60,(s+1)*60,R,24), 12, 0.6, 0x6a7182); world.add(m); roadMeshes.ring.push(m); }
+  for(let s=0;s<ns;s++){ world.add(ribbon([polar(s*60,c.hub_radius+2), polar(s*60,R)], 6, 0.5, 0x3f4656)); world.add(ribbon([polar(s*60+30,c.hub_radius+2), polar(s*60+30,R)], 5, 0.5, 0x3a4150)); }
+  for(let k=0;k<5;k++){ const r=c.house_radius_min+k*c.house_ring_step; for(let s=0;s<ns;s++) world.add(ribbon(arcPts(s*60+3,s*60+57,r-10,20), 3, 0.4, 0x363c4a)); }
+  world.add(ribbon([[-R,0],[c.reactor[0]+30,0]], 12, 0.6, 0x6a7182));                       // trunk road
+  world.add(ribbon([c.tower_junction, c.tower], 6, 0.5, 0x3f4656));                            // tower road
+  world.add(ribbon([[c.reactor[0]+30,0],[c.reactor[0]+30,c.mine[1]+20]], 6, 0.5, 0x3f4656)); // service road along the complex
+  world.add(ribbon([[c.reactor[0]+30,-20],c.solar], 5, 0.5, 0x3f4656));
+  // hub plaza
+  world.add(new THREE.Mesh(new THREE.CircleGeometry(c.hub_radius,48), new THREE.MeshStandardMaterial({color:0x2b303c, roughness:1})).translateY(0)); { const m=world.children[world.children.length-1]; m.position.copy(sph(0,0,0.7)); m.quaternion.copy(quatAt(0,0)); m.rotateX(-Math.PI/2); }
+  // houses
+  const hg=new THREE.BoxGeometry(12,8,12); housesMesh=new THREE.InstancedMesh(hg, new THREE.MeshLambertMaterial({emissive:0x202020}), G.houses.x.length); const m4=new THREE.Matrix4();
+  for(let i=0;i<G.houses.x.length;i++){ const x=G.houses.x[i], y=G.houses.y[i]; flatHouses.push([x,y]); m4.compose(sph(x,y,4), quatAt(x,y,-Math.atan2(y,x)), new THREE.Vector3(1,G.houses.type[i]===3?1.6:1,1)); housesMesh.setMatrixAt(i,m4); housesMesh.setColorAt(i,new THREE.Color(0xffa040)); }
+  housesMesh.instanceMatrix.needsUpdate=true; world.add(housesMesh);
+  // poles and lamps
+  polesMesh=new THREE.InstancedMesh(new THREE.CylinderGeometry(1.1,1.4,18,6), new THREE.MeshStandardMaterial({color:0xb8b8b8}), G.poles.x.length);
+  for(let i=0;i<G.poles.x.length;i++){ m4.compose(sph(G.poles.x[i],G.poles.y[i],9), quatAt(G.poles.x[i],G.poles.y[i]), new THREE.Vector3(1,1,1)); polesMesh.setMatrixAt(i,m4); } world.add(polesMesh);
+  markers.lamps=pointsLayer(G.poles.x.length, TEX.glow, 0xffe08a, 40, true);
+  // power spans: rp -> pole0 -> ... per sector; feeders hub -> rp
+  const spanPl=[]; for(let i=0;i<G.poles.x.length;i++){ const k=G.poles.k[i], s=G.poles.sector[i]; const a= k===0? polar(s*60+30,c.hub_radius+18) : [G.poles.x[i-1],G.poles.y[i-1]]; spanPl.push([a,[G.poles.x[i],G.poles.y[i]]]); }
+  spans=new LineLayer(spanPl, 17, 0xf2c14e); world.add(spans.mesh);
+  const feederPl=[]; for(let s=0;s<ns;s++) feederPl.push([polar(s*60+30,c.hub_radius-30), polar(s*60+30,c.hub_radius+18)]); feeders=new LineLayer(feederPl, 17, 0xf2c14e); world.add(feeders.mesh);
+  const drops=[]; for(let i=0;i<G.houses.x.length;i++){ const p=G.houses.pole[i]; drops.push([[G.houses.x[i],G.houses.y[i]],[G.poles.x[p],G.poles.y[p]]]); } const dropLayer=new LineLayer(drops, 8, 0x5a4a2a); world.add(dropLayer.mesh);
+  trunkLine=new LineLayer([[[c.reactor[0]+22,6],[-R,6],[-c.hub_radius+6,6]]], 17, 0xf2c14e); world.add(trunkLine.mesh);
+  towerLine=new LineLayer([[[c.tower_junction[0]+6,6],[c.tower[0]+6,c.tower[1]+12]]], 17, 0xf2c14e); world.add(towerLine.mesh);
+  solarLine=new LineLayer([[[c.solar[0]+30,c.solar[1]+10],[c.reactor[0]+22,-8]]], 17, 0xf2c14e); world.add(solarLine.mesh);
+  // water: plant -> trunk road (offset -6) -> hub; hub -> sector mains along the radial street (offset +6)
+  waterMain=new LineLayer([[[c.water_plant[0]+20,c.water_plant[1]-20],[c.reactor[0]+40,-6],[-R,-6],[-c.hub_radius+6,-6]]], 2, 0x5aa9ff); world.add(waterMain.mesh);
+  const wsec=[]; for(let s=0;s<ns;s++){ const a=s*60+30, off=7; const pts=[]; for(const r of [c.hub_radius-20, R-20]){ const [x,y]=polar(a,r); pts.push([x-Math.sin(a*Math.PI/180)*off, y+Math.cos(a*Math.PI/180)*off]); } wsec.push(pts); } waterSectors=new LineLayer(wsec, 2, 0x5aa9ff); world.add(waterSectors.mesh);
+  // internet cable: tower -> junction -> trunk road (offset +12) -> hub; hub -> cabinets -> along poles (offset -7)
+  cableTower=new LineLayer([[[c.tower[0]-6,c.tower[1]+12],[c.tower_junction[0]-6,12],[-R,12],[-c.hub_radius+8,12]]], 15, 0x4fd1c5); world.add(cableTower.mesh);
+  const csec=[]; for(let i=0;i<G.poles.x.length;i++){ const k=G.poles.k[i], s=G.poles.sector[i], a=(s*60+30)*Math.PI/180, off=-7; const o=p=>[p[0]-Math.sin(a)*off, p[1]+Math.cos(a)*off]; const p0= k===0? polar(s*60+30,c.hub_radius-30):[G.poles.x[i-1],G.poles.y[i-1]]; csec.push([o(p0), o([G.poles.x[i],G.poles.y[i]])]); } cableSectors=new LineLayer(csec, 15, 0x4fd1c5); world.add(cableSectors.mesh);
+  // flow layers
+  flowPower=new FlowLayer([...spanPl, ...feederPl, trunkLine.polylines[0], towerLine.polylines[0], solarLine.polylines[0]], 18, 0xfff2b0, 6, 2, 0.5); world.add(flowPower.mesh);
+  flowWater=new FlowLayer([waterMain.polylines[0], ...wsec], 3, 0x9ad0ff, 5, 3, 0.3); world.add(flowWater.mesh);
+  packetsPts=pointsLayer(80, TEX.dot, 0x4fd1c5, 8, false); markers.packetsRed=pointsLayer(20, TEX.dot, 0xe2574d, 8, false);
+  // markers
+  markers.issues=pointsLayer(60, TEX.bang, 0xffffff, 18, false); markers.nonet=pointsLayer(300, TEX.nonet, 0xffffff, 10, false); markers.heater=pointsLayer(300, TEX.flame, 0xffffff, 7, false);
+  markers.people=pointsLayer(60, TEX.person, 0xffffff, 7, false); markers.xenos=pointsLayer(20, TEX.diamond, 0xffffff, 16, false); markers.marines=pointsLayer(8, TEX.marine, 0xffffff, 9, false); markers.ups=pointsLayer(7, TEX.bolt, 0xffffff, 16, false);
+  // gates
+  for(let s=0;s<ns;s++){ const [gx,gy]=polar(s*60,R); const g=new THREE.Group(); g.position.copy(sph(gx,gy,1)); g.quaternion.copy(quatAt(gx,gy,-s*60*Math.PI/180)); const post=new THREE.Mesh(new THREE.BoxGeometry(3,10,3), new THREE.MeshStandardMaterial({color:0x8a93a6})); post.position.set(0,5,8); g.add(post); const arm=new THREE.Mesh(new THREE.BoxGeometry(1.6,1.6,16), new THREE.MeshStandardMaterial({color:0x5ec07a})); arm.position.set(0,9,8); arm.geometry.translate(0,0,-8); g.add(arm); const lamp=new THREE.Mesh(new THREE.SphereGeometry(1.4,8,8), new THREE.MeshBasicMaterial({color:0x5ec07a})); lamp.position.set(0,11,8); g.add(lamp); world.add(g); gates.push({g, arm, lamp}); }
+  // hub buildings
+  hub.sub=box(0,-38,44,16,24,0x6a6d78,0xf2c14e); hub.ups=box(-46,8,26,12,18,0x3f6a6a,0x4fd1c5); hub.ops=box(0,40,40,14,20,0x666a78,0xc9cfdb); hub.tank=cyl(-14,-4,12,22,0x2a4a6a,0x5aa9ff);
+  hub.comms=cyl(46,8,2.2,46,0x9aa3b5,null); { const s=new THREE.Mesh(new THREE.SphereGeometry(4,10,10), new THREE.MeshBasicMaterial({color:0x4fd1c5})); s.position.copy(sph(46,8,50)); world.add(s); hub.commsBall=s; }
+  addLabel('substation',0,-38,22,'#f2c14e','near'); addLabel('UPS center',-46,8,20,'#4fd1c5','near'); addLabel('ops center',0,40,20,'#c9cfdb','near'); addLabel('water tank',-14,-4,30,'#5aa9ff','near'); addLabel('comms node',46,8,58,'#4fd1c5','near');
+  // reactor complex
+  const rx=c.reactor[0], ry=c.reactor[1];
+  complex.contain=cyl(rx,ry,24,26,0x555a66,null); complex.dome=new THREE.Mesh(new THREE.SphereGeometry(24,24,12,0,Math.PI*2,0,Math.PI/2), new THREE.MeshStandardMaterial({color:0x6a6f7a, roughness:.6})); complex.dome.position.copy(sph(rx,ry,26)); complex.dome.quaternion.copy(quatAt(rx,ry)); world.add(complex.dome);
+  complex.tw1=cyl(rx-44,ry-30,10,44,0x8a8f9a,null); complex.tw2=cyl(rx-44,ry+30,10,44,0x8a8f9a,null);
+  complex.core=new THREE.Mesh(new THREE.SphereGeometry(6,10,10), new THREE.MeshBasicMaterial({color:0x5ec07a})); complex.core.position.copy(sph(rx,ry,52)); world.add(complex.core);
+  addLabel('REACTOR', rx, ry, 70, '#5ec07a', 'mid');
+  // solar field
+  complex.panels=[]; for(let i=0;i<6;i++) for(let j=0;j<4;j++){ const px=c.solar[0]-30+i*12, py=c.solar[1]-18+j*12; const p=new THREE.Mesh(new THREE.BoxGeometry(10,0.8,7), new THREE.MeshStandardMaterial({color:0x1c2f5a, roughness:.3, metalness:.4, emissive:0x102040, emissiveIntensity:0.2})); p.position.copy(sph(px,py,3)); p.quaternion.copy(quatAt(px,py)); p.rotateX(-0.5); world.add(p); complex.panels.push(p); }
+  addLabel('solar field', c.solar[0], c.solar[1], 20, '#e0b04a', 'mid');
+  complex.water=box(c.water_plant[0],c.water_plant[1],36,16,26,0x2a4a6a,0x5aa9ff); complex.waterTank=cyl(c.water_plant[0]+28,c.water_plant[1],9,20,0x2a4a6a,0x5aa9ff); addLabel('water plant: melting ice', c.water_plant[0], c.water_plant[1], 24, '#5aa9ff', 'mid');
+  complex.rad=box(c.radwaste[0],c.radwaste[1],44,9,32,0x5a5a2a,0xe8d34a); addLabel('radioactive waste storage', c.radwaste[0], c.radwaste[1], 16, '#e8d34a', 'mid');
+  { const s=new THREE.Sprite(new THREE.SpriteMaterial({map:TEX.rad, transparent:true})); s.scale.set(12,12,1); s.position.copy(sph(c.radwaste[0],c.radwaste[1],14)); world.add(s); }
+  complex.mine=box(c.mine[0],c.mine[1],40,14,30,0x4a3a2a,0xa08a2a); complex.head=box(c.mine[0]+30,c.mine[1],6,40,6,0x6a5a3a,null); addLabel('mine', c.mine[0], c.mine[1], 24, '#a08a2a', 'mid');
+  complex.waste=box(c.waste_station[0],c.waste_station[1],26,10,20,0x3a4a2a,0x9bd36a); addLabel('waste processing', c.waste_station[0], c.waste_station[1], 16, '#9bd36a', 'near');
+  // tower
+  complex.tower=cyl(c.tower[0],c.tower[1],2.2,70,0x9aa3b5,null); complex.towerBall=new THREE.Mesh(new THREE.SphereGeometry(4,10,10), new THREE.MeshBasicMaterial({color:0x4fd1c5})); complex.towerBall.position.copy(sph(c.tower[0],c.tower[1],74)); world.add(complex.towerBall);
+  complex.rings=[]; for(let k=0;k<3;k++){ const r=new THREE.Mesh(new THREE.TorusGeometry(8+k*7,0.6,6,32), new THREE.MeshBasicMaterial({color:0x4fd1c5, transparent:true, opacity:0.5-0.12*k})); r.position.copy(sph(c.tower[0],c.tower[1],74)); r.quaternion.copy(quatAt(c.tower[0],c.tower[1])); r.rotateX(Math.PI/2); world.add(r); complex.rings.push(r); }
+  addLabel('radio tower: uplink', c.tower[0], c.tower[1], 92, '#4fd1c5', 'mid');
+  // rovers
+  const rc={garbage:[0x9bd36a,'G'], sludge:[0xb48ead,'S'], engineer:[0xf2c14e,'E'], 'engineer-2':[0xf2c14e,'E2'], plumber:[0x5aa9ff,'P']};
+  for(const [name,[col,l]] of Object.entries(rc)){ const g=new THREE.Group(); const body=new THREE.Mesh(new THREE.BoxGeometry(10,5,6), new THREE.MeshStandardMaterial({color:col})); body.position.y=3; g.add(body); const lab=textSprite(l,'#fff',26); lab.position.y=12; lab.scale.multiplyScalar(0.7); g.add(lab); world.add(g); rovers[name]={g,lab,target:null,state:''}; }
+  // sector labels
+  for(let s=0;s<ns;s++){ const [x,y]=polar(s*60+30,R+40); addLabel(`S${s+1}`,x,y,6,'#9aa3b5','mid'); }
+  applyLayers();
+}
+function box(x,y,w,h,d,color,edge){ const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d), new THREE.MeshStandardMaterial({color, roughness:.8})); m.position.copy(sph(x,y,h/2)); m.quaternion.copy(quatAt(x,y,Math.atan2(y,x))); world.add(m); if(edge){ const e=new THREE.LineSegments(new THREE.EdgesGeometry(m.geometry), new THREE.LineBasicMaterial({color:edge})); m.add(e); } return m; }
+function cyl(x,y,r,h,color){ const m=new THREE.Mesh(new THREE.CylinderGeometry(r,r,h,16), new THREE.MeshStandardMaterial({color, roughness:.7})); m.position.copy(sph(x,y,h/2)); m.quaternion.copy(quatAt(x,y)); world.add(m); return m; }
+function pointsLayer(n, map, color, size, additive){ const g=new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(n*3).fill(-99999),3)); const m=new THREE.Points(g, new THREE.PointsMaterial({map, color, size, transparent:true, depthWrite:false, blending: additive?THREE.AdditiveBlending:THREE.NormalBlending, sizeAttenuation:true})); m.frustumCulled=false; world.add(m); return m; }
+function setPoints(layer, flatPts, h){ const a=layer.geometry.attributes.position; const n=a.count; for(let i=0;i<n;i++){ if(i<flatPts.length){ const p=sph(flatPts[i][0],flatPts[i][1],h); a.setXYZ(i,p.x,p.y,p.z); } else a.setXYZ(i,0,-99999,0); } a.needsUpdate=true; }
+function applyLayers(){ if(!markers.issues) return; markers.issues.visible=layers.issues; markers.nonet.visible=layers.nonet; markers.ups.visible=layers.ups; markers.heater.visible=layers.heater; flowPower.mesh.visible=layers.power; flowWater.mesh.visible=layers.water; packetsPts.visible=layers.packets; markers.packetsRed.visible=layers.packets; markers.people.visible=layers.people; markers.xenos.visible=layers.threats; markers.marines.visible=layers.threats; labelGroup.visible=layers.labels; }
+
+// ---------- per state update ----------
+const tmpC=new THREE.Color();
+function tempColor(t){ const u=Math.max(0,Math.min(1,(t+40)/65)); if(u<0.6){ const k=u/0.6; return tmpC.setRGB((60+150*k)/255,(110+120*k)/255,(230-20*k)/255); } const k=(u-0.6)/0.4; return tmpC.setRGB((210+45*k)/255,(230-90*k)/255,(210-150*k)/255); }
+const packetsSeen=new Map();
+function onState(s, first){
+  if(!G) return; if(!housesMesh) build();
+  const c=G.cfg, R=c.ring_road_radius, ns=c.sectors, PPS=c.poles_per_sector, hs=s.houses;
+  // houses
+  for(let i=0;i<flatHouses.length;i++){ const col=tempColor(hs.t[i]).clone(); if(!hs.power[i]) col.multiplyScalar(0.35).lerp(new THREE.Color(0x203050),0.4); else if(hs.ups[i]) col.lerp(new THREE.Color(0x4fd1c5),0.45); else if(hs.limit[i]>0) col.lerp(new THREE.Color(0xe0b04a),0.3); housesMesh.setColorAt(i,col); }
+  housesMesh.instanceColor.needsUpdate=true;
+  // spans, feeders, trunk, cable colours
+  for(let i=0;i<spans.polylines.length;i++) spans.setColor(i, s.poles.span[i]?0xf2c14e:0x5a2a2a);
+  for(let i=0;i<ns;i++) feeders.setColor(i, s.power.feeder[i]&&s.sectors[i].online?0xf2c14e:0x5a2a2a);
+  trunkLine.setColor(0, s.power.trunk?0xf2c14e:0x5a2a2a); towerLine.setColor(0, s.power.tower_line?0xf2c14e:0x5a2a2a); solarLine.setColor(0, s.power.solar_kw>0?0xf2c14e:0x6a5a3a);
+  for(let i=0;i<cableSectors.polylines.length;i++) cableSectors.setColor(i, s.poles.net[i]?0x4fd1c5:0x5a2a2a); cableTower.setColor(0, s.net.uplink?0x4fd1c5:0x5a2a2a);
+  waterMain.setColor(0, s.water.plant?0x5aa9ff:0x2a3a5a); for(let i=0;i<ns;i++) waterSectors.setColor(i, s.sectors[i].water_ok>0?0x5aa9ff:0x2a3a5a);
+  // flows
+  const nsp=spans.polylines.length; const reactorUp=s.reactor.available_mw>0;
+  for(let i=0;i<nsp;i++) flowPower.active[i]=!!s.poles.span[i]; for(let i=0;i<ns;i++) flowPower.active[nsp+i]=s.power.feeder[i]&&s.sectors[i].online;
+  flowPower.active[nsp+ns]=s.power.trunk&&reactorUp; flowPower.active[nsp+ns+1]=s.power.tower_line&&s.power.trunk&&reactorUp; flowPower.active[nsp+ns+2]=s.power.solar_kw>0;
+  const waterOn=s.water.tank_m3>0&&s.water.pump; flowWater.active[0]=s.water.plant; for(let i=0;i<ns;i++) flowWater.active[1+i]=waterOn&&s.sectors[i].water_ok>0;
+  // lamps
+  setPoints(markers.lamps, G.poles.x.map((x,i)=>s.poles.lamp[i]?[x,G.poles.y[i]]:null).filter(Boolean), 20);
+  // poles: fallen ones lie down (scale)
+  const m4=new THREE.Matrix4(); for(let i=0;i<G.poles.x.length;i++){ const st=s.poles.state[i]; const q=quatAt(G.poles.x[i],G.poles.y[i]); if(st===2) q.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),1.4)); else if(st===1) q.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),0.35)); m4.compose(sph(G.poles.x[i],G.poles.y[i],st===2?2:9), q, new THREE.Vector3(1,1,1)); polesMesh.setMatrixAt(i,m4); } polesMesh.instanceMatrix.needsUpdate=true;
+  // markers
+  setPoints(markers.issues, s.issues.map(i=>[i.x,i.y]), 26);
+  setPoints(markers.nonet, flatHouses.filter((p,i)=>!hs.net[i]), 14);
+  setPoints(markers.heater, flatHouses.filter((p,i)=>hs.heater[i]&&hs.power[i]), 12);
+  setPoints(markers.people, s.people, 4);
+  setPoints(markers.xenos, s.xenos.map(x=>[x.x,x.y]), 8);
+  setPoints(markers.marines, s.marines, 5);
+  setPoints(markers.ups, s.sectors.map((x,i)=>x.ups==='DISCHARGING'||x.ups==='CHARGING'?polar(i*60+30,c.hub_radius+8):null).filter(Boolean).concat(s.power.ups_center==='DISCHARGING'||s.power.ups_center==='CHARGING'?[[-46,8]]:[]), 26);
+  // gates
+  for(let i=0;i<ns;i++){ const st=s.sectors[i].gate, g=gates[i]; g.arm.rotation.x = st==='OPEN'? -Math.PI/2 : 0; const col = st==='LOCKDOWN'?0xe2574d:(st==='OPEN'?0x5ec07a:0x8a93a6); g.arm.material.color.setHex(col); g.lamp.material.color.setHex(col); }
+  // hub and complex states
+  hub.sub.children[0].material.color.setHex(s.power.substation?0xf2c14e:0xe2574d); hub.commsBall.material.color.setHex(s.net.comms&&s.net.uplink?0x4fd1c5:0xe2574d);
+  for(let i=0;i<ns;i++){ const it=s.sectors[i].road; roadMeshes.ring[i].material.color.setHex(it<20?0x8a3a3a:(it<50?0x7a6a3a:0x6a7182)); }
+  const mc={ONLINE:0x5ec07a,RUNBACK:0xe0b04a,STARTING:0x5aa9ff}[s.reactor.mode]||0xe2574d; complex.core.material.color.setHex(mc); complex.core.scale.setScalar(s.reactor.mode==='ONLINE'?1:1.4);
+  const sol=Math.min(1, s.power.solar_kw/60); complex.panels.forEach(p=>{ p.material.emissiveIntensity=0.1+sol*1.2; p.material.emissive.setHex(0x2a5aff); });
+  complex.water.material.color.setHex(s.water.plant?0x2a4a6a:0x4a2a2a); complex.towerBall.material.color.setHex(s.net.uplink?0x4fd1c5:0xe2574d);
+  complex.mine.material.color.setHex(s.power.mine?0x4a3a2a:0x2a2a2a);
+  // rovers
+  for(const r of s.rovers){ const rv=rovers[r.name]; if(!rv) continue; rv.target=sph(r.x,r.y,3); rv.q=quatAt(r.x,r.y,Math.atan2(r.y,r.x)+Math.PI/2); if(first){ rv.g.position.copy(rv.target); } if(rv.state!==r.state){ rv.state=r.state; rv.g.remove(rv.lab); rv.lab=textSprite(`${r.name} ${r.state.toLowerCase().replace('_',' ')}`,'#fff',22); rv.lab.position.y=12; rv.lab.scale.multiplyScalar(0.55); rv.g.add(rv.lab); } }
+  // packets
+  const now=performance.now(); for(const p of s.net.packets){ const key=p.t+':'+p.from+':'+p.id; if(!packetsSeen.has(key)) packetsSeen.set(key,{t0:now,p}); }
+  // banner and sun
+  const e=s.env; document.getElementById('banner').innerHTML=`<b>${s.time}</b> &nbsp; ${e.t_out} C, wind ${e.wind} m/s${e.storm?' <span class="bad">STORM</span>':''}${e.precip==='snow'?' snow':''}${e.night?' night':' day'}${s.paused?' <span class="warn">PAUSED</span>':''} &nbsp; ${s.speed} min/s`;
+  const fin=document.getElementById('finished'); if(s.finished){ fin.style.display='flex'; fin.textContent='SIMULATION OVER: '+s.finish_reason; }
+  const m=s.time.match(/(\d\d):(\d\d)$/); const hour=m?(+m[1]+(+m[2])/60):12; const a=(hour-6)/24*Math.PI*2; sun.position.set(Math.cos(a)*6000, 1500, Math.sin(a)*6000); sunSprite.position.copy(sun.position).multiplyScalar(4); sun.intensity=0.6+0.9*(e.daylight/0.3);
+  if(first){ speedEl.value=speedToSlider(s.speed); speedV.textContent=s.speed+' min/s'; }
+}
+
+// ---------- packets and rover motion per frame ----------
+function packetPath(pk){ const c=G.cfg, R=c.ring_road_radius, PPS=c.poles_per_sector; const path=[];
+  if(pk.from==='house'){ const i=pk.id, p=G.houses.pole[i], s=G.houses.sector[i]; path.push([G.houses.x[i],G.houses.y[i]]); for(let k=G.poles.k[p];k>=0;k--){ const j=s*PPS+k; path.push([G.poles.x[j],G.poles.y[j]]); } path.push(polar(s*60+30,c.hub_radius-30)); path.push([0,0]); }
+  else path.push([0,0]);
+  if(pk.kind==='reactor'||pk.kind==='lost'){ path.push([-c.hub_radius+8,12]); path.push([-R,12]); path.push([c.reactor[0]+22,12]); }
+  else if(pk.uplink){ path.push([-c.hub_radius+8,12]); path.push([-R,12]); path.push([c.tower_junction[0]-6,12]); path.push([c.tower[0]-6,c.tower[1]+12]); }
+  return path.map(p=>sph(p[0],p[1],16)); }
+function updatePackets(){ const now=performance.now(); const good=[], bad=[]; for(const [key,v] of packetsSeen){ const u=(now-v.t0)/1800; if(u>=1){ packetsSeen.delete(key); continue; } if(!v.path) v.path=packetPath(v.p); const P=v.path; let seg=Math.floor(u*(P.length-1)); const f=u*(P.length-1)-seg; if(seg>=P.length-1){ seg=P.length-2; } const q=P[seg].clone().lerp(P[seg+1], f); (v.p.uplink||v.p.kind==='reactor'?good:bad).push(q); }
+  const put=(layer,arr)=>{ const a=layer.geometry.attributes.position; for(let i=0;i<a.count;i++){ if(i<arr.length) a.setXYZ(i,arr[i].x,arr[i].y,arr[i].z); else a.setXYZ(i,0,-99999,0);} a.needsUpdate=true; }; put(packetsPts, good); put(markers.packetsRed, bad); }
+
+// ---------- camera fly, tooltip ----------
+function flyTo(x,y,dist){ const p=sph(x,y), n=p.clone().normalize(); const side=new THREE.Vector3().crossVectors(n, new THREE.Vector3(0,0,1)).normalize(); if(side.lengthSq()<1e-6) side.set(1,0,0); const back=new THREE.Vector3().crossVectors(side,n).normalize(); const pos=p.clone().add(n.multiplyScalar(dist*0.85)).add(back.multiplyScalar(dist*0.55)); flyAnim={from:camera.position.clone(), to:pos, tfrom:controls.target.clone(), tto:p, t0:performance.now()}; }
+let flyAnim=null;
+document.querySelectorAll('#fly button').forEach(b=>b.onclick=()=>{ const c=G.cfg; const f=b.dataset.f; if(f==='hub') flyTo(0,0,320); else if(f==='reactor') flyTo(c.reactor[0],c.reactor[1],260); else if(f==='solar') flyTo(c.solar[0],c.solar[1],220); else if(f==='tower') flyTo(c.tower[0],c.tower[1],220); else if(f==='mine') flyTo(c.mine[0],c.mine[1],220); else flyAnim={from:camera.position.clone(), to:new THREE.Vector3(500,RP+2200,2000), tfrom:controls.target.clone(), tto:new THREE.Vector3(0,RP,0), t0:performance.now()}; });
+const ray=new THREE.Raycaster(); const mouse=new THREE.Vector2(); let hoverId=-1; ray.params.Points.threshold=6;
+renderer.domElement.addEventListener('mousemove', ev=>{ const r=renderer.domElement.getBoundingClientRect(); mouse.set(((ev.clientX-r.left)/r.width)*2-1, -((ev.clientY-r.top)/r.height)*2+1); showTip(ev.clientX-r.left, ev.clientY-r.top); });
+function showTip(mx,my){ const tip=document.getElementById('tip'); if(!housesMesh||!S){ tip.style.display='none'; return; } ray.setFromCamera(mouse,camera); const hit=ray.intersectObject(housesMesh,false)[0]; if(!hit){ tip.style.display='none'; hoverId=-1; return; } const i=hit.instanceId, h=S.houses; hoverId=i;
+  tip.innerHTML=`<b>House ${i+1}</b> (S${G.houses.sector[i]+1}, ${G.types[G.houses.type[i]]})<br>indoor ${h.t[i]} C, heater ${h.heater[i]?'on':'off'}<br>power ${h.power[i]?(h.ups[i]?'sector UPS':'grid'):'<span class="bad">none</span>'}${h.limit[i]?', limit '+h.limit[i]+' W':''}<br>water ${h.water[i]?'ok':'<span class="bad">no</span>'}${h.burst[i]?', <span class="bad">pipes burst</span>':''}<br>internet ${h.net[i]?'online':'<span class="warn">offline</span>'}, sludge ${Math.round(h.sludge[i]*100)}%`;
+  tip.style.display='block'; tip.style.left=(mx+14)+'px'; tip.style.top=(my+14)+'px'; }
+
+// ---------- render loop ----------
+function resize(){ const w=mapEl.clientWidth, h=mapEl.clientHeight; renderer.setSize(w,h,false); renderer.domElement.style.width=w+'px'; renderer.domElement.style.height=h+'px'; camera.aspect=w/h; camera.updateProjectionMatrix(); }
+window.addEventListener('resize', resize); resize();
+let t0=performance.now();
+function frame(){ const now=performance.now(); const t=(now-t0)/1000;
+  if(flyAnim){ const u=Math.min(1,(now-flyAnim.t0)/1200); const k=u*u*(3-2*u); camera.position.lerpVectors(flyAnim.from, flyAnim.to, k); controls.target.lerpVectors(flyAnim.tfrom, flyAnim.tto, k); if(u>=1) flyAnim=null; }
+  controls.update();
+  if(housesMesh){ flowPower.update(t); flowWater.update(t); updatePackets();
+    for(const rv of Object.values(rovers)){ if(rv.target){ rv.g.position.lerp(rv.target, 0.08); rv.g.quaternion.slerp(rv.q, 0.15); } }
+    const d=camera.position.distanceTo(controls.target); lod.near.forEach(s=>s.visible=layers.labels&&d<520); lod.mid.forEach(s=>s.visible=layers.labels&&d<2600);
+    complex.rings.forEach((r,k)=>{ const u=((t*0.8)+k/3)%1; r.scale.setScalar(0.5+u*1.5); r.material.opacity=0.6*(1-u); });
+    if(S) complex.rings.forEach(r=>r.visible=!!S.net.uplink); }
+  renderer.render(scene,camera); requestAnimationFrame(frame); }
+
+// ---------- side panel ----------
+function cls(ok, warn){ return ok?'ok':(warn?'warn':'bad'); }
+function renderSide(s){
+  document.getElementById('time').textContent=s.time; document.getElementById('pause').textContent=s.paused?'Resume':'Pause';
+  if(document.activeElement!==speedEl){ speedEl.value=speedToSlider(s.speed); speedV.textContent=s.speed+' min/s'; }
+  const p=s.power, r=s.reactor, w=s.water, f=s.finance;
+  const kp=[
+    ['Colony budget', f.colony.toLocaleString()+' cr', f.colony>20000?'ok':(f.colony>0?'warn':'bad')],
+    ['Sector budgets', f.sectors.map(x=>Math.round(x/1000)+'k').join(' '), Math.min(...f.sectors)>2000?'ok':'warn'],
+    ['Power available', p.available_kw+' kW', p.available_kw>p.demand_kw?'ok':'bad'],
+    ['Power demand', p.demand_kw+' kW'+(p.shedding?` / shedding L${p.shedding}`:''), p.shedding?'warn':'ok'],
+    ['Water tank', w.tank_m3+' m3, '+w.houses_ok+'/300 houses', w.tank_m3>100&&w.houses_ok>280?'ok':'warn'],
+    ['Pipes', `${w.frozen} frozen, ${w.burst} burst`, w.burst===0?'ok':'bad'],
+    ['Internet', `${s.net.houses_online}/300 online, uplink ${s.net.uplink?'OK':'LOST'}`, s.net.uplink&&s.net.houses_online>280?'ok':'warn'],
+    ['Open issues', s.issues_total+(f.unpaid?` (unpaid ${f.unpaid} cr)`:''), s.issues_total<5?'ok':'warn'],
+    ['Month income (colony)', f.month_income.toLocaleString()+' cr', 'dim'],
+    ['Month expense (colony)', f.month_expense.toLocaleString()+' cr', 'dim'],
+  ];
+  document.getElementById('kpi').innerHTML=kp.map(([l,v,c])=>`<div class="card"><div class="v ${c}">${v}</div><div class="l">${l}</div></div>`).join('');
+  const inf=p.infra;
+  document.getElementById('reactor').innerHTML=`<div><b class="${r.mode==='ONLINE'?'ok':(r.mode==='RUNBACK'||r.mode==='STARTING'?'warn':'bad')}">${r.mode}</b> &nbsp; ${r.power_mw} MW gross, ${r.available_mw} MW to grid, core ${r.core_temp} C${r.decay_mw?`, decay ${r.decay_mw} MW`:''}${r.marines?' <span class="bad">marines in the sublevels</span>':''}</div>
+    <div class="dim">pumps A ${r.pump_a} B ${r.pump_b}, heat exchanger ${r.hx}, batteries ${r.battery_h} h, link ${r.link?'ok':'<span class="bad">lost</span>'}${r.faults.length?', faults: '+r.faults.join(', '):''}</div>
+    <div class="dim">solar ${p.solar_kw} kW (dim sun, ${Math.round(s.env.daylight*100/0.3)} % of a clear day); loads: mine ${inf.mine}, houses ${Math.round(p.demand_kw-Object.values(inf).reduce((a,b)=>a+b,0))}, water plant ${inf.water_plant}, radioactive waste storage ${inf.waste_storage}, road heating ${inf.road_heating}, lamps ${inf.lamps}, comms ${inf.comms}, ups charge ${inf.ups_charge} kW</div>
+    <div class="dim">trunk ${p.trunk?'ok':'<span class="bad">CUT</span>'}, substation ${p.substation?'ok':'<span class="bad">DOWN</span>'}, UPS center ${p.ups_center} ${p.ups_center_kwh} kWh, garbage delivered to processing ${f.waste_station} loads</div>`;
+  document.querySelector('#sectors tbody').innerHTML=s.sectors.map((x,i)=>`<tr class="sec" data-s="${i}"><td>${x.id}${x.dark?' <span class="warn">dark</span>':''}</td><td>${x.budget}</td><td>${x.demand_kw}</td><td class="${x.avg_t>15?'ok':(x.avg_t>4?'warn':'bad')}">${x.avg_t}</td><td class="${x.min_t>4?'ok':'bad'}">${x.min_t}</td><td class="${cls(x.power_ok===50,x.power_ok>30)}">${x.power_ok}</td><td class="${cls(x.water_ok===50,x.water_ok>30)}">${x.water_ok}</td><td class="${cls(x.net_ok===50,x.net_ok>30)}">${x.net_ok}</td><td class="${x.ups==='DISCHARGING'?'warn':(x.ups==='DEPLETED'?'bad':'dim')}">${x.ups.slice(0,4)} ${x.ups_kwh}</td><td class="${x.waste>=1?'bad':(x.waste>=0.9?'warn':'dim')}">${Math.round(x.waste*100)}%</td><td class="${x.sanitary>70?'ok':'bad'}">${x.sanitary}</td><td class="${x.gate==='OPEN'?'ok':(x.gate==='LOCKDOWN'?'bad':'warn')}">${x.gate.slice(0,4)}</td><td class="${x.road>20?'dim':'bad'}">${x.road}%</td></tr>`).join('');
+  document.querySelectorAll('#sectors tr.sec').forEach(tr=>tr.onclick=()=>{ const [x,y]=polar(+tr.dataset.s*60+30, 230); flyTo(x,y,330); });
+  document.getElementById('nissues').textContent=`(${s.issues_total})`;
+  document.getElementById('issues').innerHTML=s.issues.slice().reverse().map(i=>`<div><span class="${i.sev==='critical'?'bad':(i.sev==='warning'?'warn':'dim')}">${i.kind}</span> ${i.target} ${i.sector>0?'S'+i.sector:''} ${i.cause}, ${i.cost} cr (${i.payer}) <span class="dim">${i.status}, ${Math.round(i.age/60)} h</span></div>`).join('')||'<div>none</div>';
+  document.getElementById('log').innerHTML=s.events.map(e=>`<div class="${e.level}">${String(e.t).padStart(6)} ${e.text}</div>`).join('');
+  const rp=s.report; if(rp){ document.getElementById('report').textContent=`Month ${rp.month}: owners paid ${Math.round(rp.houses_total)} cr (energy ${Math.round(rp.energy_total)}, water ${Math.round(rp.water_total)}, repairs ${Math.round(rp.repairs_total)}), ${Math.round(rp.kwh_total)} kWh\ncolony: income ${rp.colony_income}, expense ${rp.colony_expense}, budget ${rp.colony_budget}, unpaid ${rp.unpaid}\nsector income ${rp.sector_income.join(' | ')}\nsector expense ${rp.sector_expense.join(' | ')}\nexpense by cause: ${Object.entries(rp.by_cause).map(([k,v])=>k+' '+v).join(', ')}\ntop houses: ${rp.top_houses.map(h=>`#${h.house} (S${h.sector}) ${h.total}`).join(', ')}`; }
+}
+loadGeom().then(()=>{ poll(); frame(); });
+</script></body></html>
+"""
+
 # ------------------------------------------------------------------------------------
 # Internet
 # ------------------------------------------------------------------------------------
@@ -1091,6 +1761,75 @@ def _repair_rover(w: World, r: Rover):
             r.job = None
             r.state = "IDLE"
             r.target_radius = R
+
+
+# ------------------------------------------------------------------------------------
+# People: walkers between home and the hub, xenomorphs and marines on the map
+# ------------------------------------------------------------------------------------
+
+def walker_path_point(w: World, i, p):
+    """Position along the path house -> arc street to the sector radial -> radial street to the hub edge."""
+    h = w.w_home[i]
+    a0 = float(w.h_angle[h]); r0 = float(w.h_radius[h])
+    sa = float(w.h_sector[h]) * 60.0 + 30.0
+    arc = abs(sa - a0) * math.pi / 180.0 * r0
+    rad = r0 - 92.0
+    L = arc + rad
+    d = p * L
+    if d <= arc:
+        a = a0 + (sa - a0) * (d / arc if arc > 0 else 1.0)
+        rr = r0
+    else:
+        a = sa
+        rr = r0 - (d - arc)
+    return rr * math.cos(math.radians(a)), rr * math.sin(math.radians(a))
+
+
+def people_step(w: World):
+    c = w.cfg
+    W = len(w.w_home)
+    night = w.is_night()
+    storm = w.storm_ticks > 0
+    speed = 1.2 / 250.0     # fraction of a ~250 unit path per tick
+    for i in range(W):
+        st = w.w_state[i]
+        if st == 0:
+            w.w_timer[i] -= 1
+            if w.w_timer[i] <= 0 and not storm and not (night and w.rng.random() < 0.9) \
+                    and not w.lockdown_ticks[w.h_sector[w.w_home[i]]] and w.h_power_ok[w.w_home[i]]:
+                w.w_state[i] = 1
+                w.w_prog[i] = 0.0
+            else:
+                continue
+        if st == 1:
+            w.w_prog[i] = min(1.0, w.w_prog[i] + speed)
+            if w.w_prog[i] >= 1.0:
+                w.w_state[i] = 2
+                w.w_timer[i] = int(w.rng.integers(30, 240))
+        elif st == 2:
+            w.w_timer[i] -= 1
+            if w.w_timer[i] <= 0 or storm:
+                w.w_state[i] = 3
+        elif st == 3:
+            w.w_prog[i] = max(0.0, w.w_prog[i] - speed * 1.3)
+            if w.w_prog[i] <= 0.0:
+                w.w_state[i] = 0
+                w.w_timer[i] = int(w.rng.integers(120, 900))
+        x, y = walker_path_point(w, i, float(w.w_prog[i]))
+        w.w_x[i], w.w_y[i] = x, y
+    # xenomorphs creep toward a house of their sector
+    for m in w.xeno_markers:
+        if "tx" not in m:
+            hs = np.flatnonzero(w.h_sector == m["sector"])
+            j = int(w.rng.choice(hs))
+            m["tx"], m["ty"] = float(w.h_x[j]), float(w.h_y[j])
+        dx, dy = m["tx"] - m["x"], m["ty"] - m["y"]
+        d = math.hypot(dx, dy)
+        if d > 2:
+            m["x"] += dx / d * 0.8
+            m["y"] += dy / d * 0.8
+        else:
+            del m["tx"]
 
 
 # ------------------------------------------------------------------------------------
@@ -1469,6 +2208,7 @@ def world_tick(w: World):
     internet_step(w)
     incidents_step(w)
     roads_step(w)
+    people_step(w)
     if w.t % w.cfg["ticks_per_day"] == 0:
         finance_day_close(w)
     if w.t % (w.cfg["ticks_per_day"] * w.cfg["days_per_month"]) == 0:
@@ -1587,6 +2327,8 @@ def snapshot(w: World):
         "rovers": [{"name": r.name, "state": r.state, "x": round(rover_xy(w, r)[0]), "y": round(rover_xy(w, r)[1]),
                     "load": round(r.load, 2)} for r in w.rovers],
         "xenos": [{"x": round(m["x"]), "y": round(m["y"])} for m in w.xeno_markers],
+        "people": [[round(float(x)), round(float(y)), int(s)] for x, y, s in zip(w.w_x, w.w_y, w.w_state) if s != 0],
+        "marines": [[w.cfg["reactor_pos"][0] + 40 + 18 * k, w.cfg["reactor_pos"][1] - 30 + 14 * (k % 2)] for k in range(4)] if w.marines_active > 0 else [],
         "issues": issues, "issues_total": len(w.open_issues()),
         "events": list(w.events)[:40],
         "report": w.last_report,
@@ -1600,273 +2342,15 @@ def house_geometry(w: World):
         "poles": {"x": [round(float(x)) for x in w.p_x], "y": [round(float(y)) for y in w.p_y],
                   "sector": w.p_sector.tolist(), "k": w.p_k.tolist()},
         "cfg": {"hub_radius": w.cfg["hub_radius"], "ring_road_radius": w.cfg["ring_road_radius"],
-                "reactor": w.cfg["reactor_pos"], "tower": w.cfg["tower_pos"], "waste_station": w.cfg["waste_station_pos"],
+                "reactor": w.cfg["reactor_pos"], "tower": w.cfg["tower_pos"], "tower_junction": w.cfg["tower_junction"],
+                "solar": w.cfg["solar_pos"], "water_plant": w.cfg["water_plant_pos"], "radwaste": w.cfg["radwaste_pos"],
+                "mine": w.cfg["mine_pos"], "waste_station": w.cfg["waste_station_pos"],
+                "house_radius_min": w.cfg["house_radius_min"], "house_ring_step": w.cfg["house_ring_step"],
                 "sectors": w.S, "poles_per_sector": w.cfg["poles_per_sector"]},
         "types": TYPE_NAMES,
     }
 
 
-
-# ------------------------------------------------------------------------------------
-# Browser UI (served at /). Plain canvas, polls /state four times per second.
-# ------------------------------------------------------------------------------------
-
-HTML = r"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Hadley's Hope</title>
-<style>
-  :root { --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --text:#d9dde6; --dim:#8a93a6; --ok:#5ec07a; --warn:#e0b04a; --bad:#e2574d; --blue:#5aa9ff; --cyan:#4fd1c5; }
-  * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--text); font:13px/1.35 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; display:flex; height:100vh; overflow:hidden; }
-  #map { flex:1 1 auto; position:relative; }
-  canvas { display:block; width:100%; height:100%; }
-  #side { width:490px; flex:0 0 490px; background:var(--panel); border-left:1px solid var(--line); overflow-y:auto; padding:10px 12px; }
-  h1 { font-size:15px; margin:0 0 6px; } h2 { font-size:12px; color:var(--dim); text-transform:uppercase; letter-spacing:.06em; margin:14px 0 6px; }
-  .row { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
-  button { background:#232835; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:4px 8px; cursor:pointer; font-size:12px; }
-  button:hover { background:#2d3444; } button.on { border-color:var(--blue); color:var(--blue); }
-  .kpi { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
-  .card { background:#1f2430; border:1px solid var(--line); border-radius:8px; padding:6px 8px; }
-  .card .v { font-size:17px; font-weight:600; } .card .l { color:var(--dim); font-size:11px; }
-  table { width:100%; border-collapse:collapse; font-size:11.5px; } th,td { padding:2px 3px; text-align:right; border-bottom:1px solid var(--line); white-space:nowrap; } th { color:var(--dim); font-weight:500; } td:first-child, th:first-child { text-align:left; }
-  .ok { color:var(--ok); } .warn { color:var(--warn); } .bad { color:var(--bad); } .dim { color:var(--dim); }
-  #log { font-family: ui-monospace, Menlo, Consolas, monospace; font-size:11px; max-height:230px; overflow-y:auto; background:#0f1115; border:1px solid var(--line); border-radius:6px; padding:6px; }
-  #log div { padding:1px 0; } .ALARM { color:var(--bad); } .WARN { color:var(--warn); } .INFO { color:var(--dim); }
-  #legend { position:absolute; left:10px; bottom:10px; background:rgba(23,26,33,.9); border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:11px; color:var(--dim); line-height:1.5; }
-  #legend b { color:var(--text); }
-  #banner { position:absolute; left:10px; top:10px; background:rgba(23,26,33,.9); border:1px solid var(--line); border-radius:8px; padding:6px 10px; font-size:13px; }
-  #finished { position:absolute; inset:0; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,.6); font-size:28px; color:var(--bad); }
-  pre { white-space:pre-wrap; font-size:11px; background:#0f1115; padding:6px; border-radius:6px; border:1px solid var(--line); }
-</style></head>
-<body>
-<div id="map"><canvas id="c"></canvas>
-  <div id="banner">connecting...</div>
-  <div id="legend"><b>Map</b>: house colour = indoor temperature (blue cold, orange warm), red frame = no power, blue frame = on sector UPS, x = burst pipes.<br>
-  Yellow lines = power (moving dashes = energised), blue = water, cyan = internet cable, cyan dots = packets, red dot = packet with no uplink.<br>
-  Poles: dot; orange = tilted, red x = fallen; glow = street lamp on. Gates on the ring road: green open, grey closed, red lockdown.<br>
-  Rovers: G garbage, S sludge hauler, E engineers, P plumber. Red diamonds = xenomorphs. ! = open issue.</div>
-  <div id="finished"></div>
-  <div id="tip" style="position:absolute;display:none;background:rgba(23,26,33,.95);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:11px;pointer-events:none"></div>
-</div>
-<div id="side">
-  <h1>Hadley's Hope, LV-426</h1>
-  <div class="row"><span id="time" style="font-weight:600;min-width:120px"></span>
-    <button id="pause">Pause</button>
-    <span class="dim">speed</span><button data-s="1">1x</button><button data-s="20">20x</button><button data-s="120">120x</button><button data-s="600">600x</button></div>
-  <h2>Inject</h2>
-  <div class="row">
-    <button data-i="span">break span</button><button data-i="pole">fell pole</button><button data-i="xeno">xenomorphs</button>
-    <button data-i="storm">storm</button><button data-i="trunk">cut trunk</button><button data-i="pump">pump trip</button>
-    <button data-i="marines">marines fire</button><button data-i="scram">SCRAM</button><button data-i="road">break road</button><button data-i="money">+50k cr</button>
-  </div>
-  <h2>Colony</h2>
-  <div class="kpi" id="kpi"></div>
-  <h2>Reactor and power</h2>
-  <div id="reactor" class="card"></div>
-  <h2>Sectors</h2>
-  <table id="sectors"><thead><tr><th>#</th><th>cr</th><th>kW</th><th>avg C</th><th>min C</th><th>pwr</th><th>water</th><th>net</th><th>UPS</th><th>waste</th><th>san</th><th>gate</th><th>road</th></tr></thead><tbody></tbody></table>
-  <h2>Open issues <span id="nissues" class="dim"></span></h2>
-  <div id="issues" class="dim" style="font-size:11px;max-height:120px;overflow-y:auto"></div>
-  <h2>Events</h2>
-  <div id="log"></div>
-  <h2>Last monthly report</h2>
-  <pre id="report">no month closed yet</pre>
-</div>
-<script>
-const cv = document.getElementById('c'), ctx = cv.getContext('2d');
-let G = null, S = null, packetsSeen = new Map(), lastFetch = 0, animT = 0;
-const ADMIN = new URLSearchParams(location.search).get('admin') || '';
-const post = async (o) => { const r = await fetch('/cmd', {method:'POST', body: JSON.stringify({...o, token: ADMIN})}); if(r.status===403 && !window.__ro){ window.__ro=true; alert('View only. Open the page as /?admin=TOKEN to control the colony.'); } };
-document.getElementById('pause').onclick = () => post({cmd:'pause'});
-document.querySelectorAll('button[data-s]').forEach(b => b.onclick = () => post({cmd:'speed', value:+b.dataset.s}));
-document.querySelectorAll('button[data-i]').forEach(b => b.onclick = () => post({cmd:'inject', value:b.dataset.i}));
-
-async function loadGeom(){ G = await (await fetch('/geometry')).json(); }
-async function poll(){
-  try { const s = await (await fetch('/state')).json(); S = s; lastFetch = performance.now(); renderSide(s); }
-  catch(e) { document.getElementById('banner').textContent = 'no connection'; }
-  setTimeout(poll, 250);
-}
-
-// ---------- coordinate transform ----------
-let sc = 1, ox = 0, oy = 0;
-function fit(){
-  const W = cv.clientWidth, H = cv.clientHeight; cv.width = W * devicePixelRatio; cv.height = H * devicePixelRatio;
-  const x0=-780, x1=440, y0=-440, y1=440;
-  sc = Math.min(W/(x1-x0), H/(y1-y0)); ox = W/2 - sc*(x0+x1)/2; oy = H/2 - sc*(y0+y1)/2;
-}
-const X = x => ox + sc*x, Y = y => oy + sc*y;
-function polar(a, r){ const t = a*Math.PI/180; return [r*Math.cos(t), r*Math.sin(t)]; }
-
-// ---------- colours ----------
-function tempColor(t){ // -60..25 -> blue..white..orange
-  const u = Math.max(0, Math.min(1, (t + 40) / 65));
-  if (u < 0.6) { const k = u/0.6; return `rgb(${Math.round(60+150*k)},${Math.round(110+120*k)},${Math.round(230-20*k)})`; }
-  const k = (u-0.6)/0.4; return `rgb(${Math.round(210+45*k)},${Math.round(230-90*k)},${Math.round(210-150*k)})`;
-}
-const modeColor = {ONLINE:'#5ec07a', RUNBACK:'#e0b04a', SCRAM:'#e2574d', COOLING:'#e2574d', EMERGENCY:'#ff2a2a', CORE_DAMAGE:'#ff0000', STARTING:'#5aa9ff'};
-
-// ---------- drawing helpers ----------
-function line(x0,y0,x1,y1,color,w,dash,off){ ctx.beginPath(); ctx.strokeStyle=color; ctx.lineWidth=w; ctx.setLineDash(dash||[]); ctx.lineDashOffset=off||0; ctx.moveTo(X(x0),Y(y0)); ctx.lineTo(X(x1),Y(y1)); ctx.stroke(); ctx.setLineDash([]); }
-function flow(x0,y0,x1,y1,color,w,on,speed){ line(x0,y0,x1,y1,on?color:'#3a3f4a',w); if(on) line(x0,y0,x1,y1,'#ffffff',Math.max(1,w-1),[3,9],-animT*speed); }
-function dot(x,y,r,color){ ctx.beginPath(); ctx.fillStyle=color; ctx.arc(X(x),Y(y),r,0,Math.PI*2); ctx.fill(); }
-function text(x,y,s,color,size,align){ ctx.fillStyle=color||'#d9dde6'; ctx.font=`${size||11}px sans-serif`; ctx.textAlign=align||'center'; ctx.fillText(s,X(x),Y(y)); }
-function box(x,y,w,h,fill,stroke,label,sub){ ctx.fillStyle=fill; ctx.strokeStyle=stroke; ctx.lineWidth=1.2; ctx.beginPath(); if(ctx.roundRect) ctx.roundRect(X(x)-w/2,Y(y)-h/2,w,h,6); else ctx.rect(X(x)-w/2,Y(y)-h/2,w,h); ctx.fill(); ctx.stroke(); if(label) text(x,y-3,label,'#e8ecf3',11); if(sub) text(x,y+10,sub,'#9aa3b5',10); }
-
-function draw(){
-  fit(); ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
-  ctx.clearRect(0,0,cv.clientWidth,cv.clientHeight);
-  animT = performance.now()/40;
-  if(!G || !S) { requestAnimationFrame(draw); return; }
-  const c = G.cfg, R = c.ring_road_radius, ns = c.sectors;
-  const night = S.env.night;
-  // sectors
-  for(let s=0;s<ns;s++){
-    const a0=(s*60)*Math.PI/180, a1=((s+1)*60)*Math.PI/180;
-    ctx.beginPath(); ctx.arc(X(0),Y(0),sc*(R+40),a0,a1); ctx.arc(X(0),Y(0),sc*(c.hub_radius+10),a1,a0,true); ctx.closePath();
-    const sec=S.sectors[s];
-    ctx.fillStyle = sec.gate==='LOCKDOWN' ? 'rgba(226,87,77,.10)' : (!sec.online ? 'rgba(226,87,77,.05)' : (sec.dark ? 'rgba(0,0,0,.35)' : 'rgba(255,255,255,.025)'));
-    ctx.fill(); ctx.strokeStyle='#262b36'; ctx.lineWidth=1; ctx.stroke();
-    const [lx,ly]=polar(s*60+30, R+58); text(lx,ly,`S${s+1}`,'#6d7689',12);
-  }
-  // roads: ring segments and spokes
-  for(let s=0;s<ns;s++){
-    const integ=S.sectors[s].road; const col = integ<20?'#e2574d':(integ<50?'#8a6a2a':'#3d4350');
-    ctx.beginPath(); ctx.strokeStyle=col; ctx.lineWidth=S.power.road_heating?5:4; ctx.arc(X(0),Y(0),sc*R,(s*60)*Math.PI/180,((s+1)*60)*Math.PI/180); ctx.stroke();
-    const [sx,sy]=polar(s*60,c.hub_radius), [ex,ey]=polar(s*60,R); line(sx,sy,ex,ey,'#2e3440',2);
-  }
-  line(-R,0,c.reactor[0]+60,0,'#3d4350',4); // spoke to the reactor complex (under the trunk)
-  // gates
-  for(let s=0;s<ns;s++){ const [gx,gy]=polar(s*60,R); const st=S.sectors[s].gate; const col = st==='LOCKDOWN'?'#e2574d':(st==='OPEN'?'#5ec07a':'#8a93a6');
-    ctx.save(); ctx.translate(X(gx),Y(gy)); ctx.rotate(s*60*Math.PI/180); ctx.fillStyle=col; ctx.fillRect(-3,-9,6,18); ctx.restore(); if(!S.sectors[s].gate_ok) text(gx,gy-12,'!','#e2574d',12); }
-  // water pipes: plant -> hub, hub -> sector mains
-  const waterOn = S.water.tank_m3>0 && S.water.pump;
-  flow(c.reactor[0], 100, -c.hub_radius-4, 8, '#5aa9ff', 2, S.water.plant, 1.2);
-  for(let s=0;s<ns;s++){ const [x0,y0]=polar(s*60+36,c.hub_radius), [x1,y1]=polar(s*60+36,R-30); flow(x0,y0,x1,y1,'#5aa9ff',1.5, waterOn && S.sectors[s].water_ok>0, 1.0); }
-  // power: trunk, feeders, spans
-  const reactorUp = S.reactor.available_mw>0;
-  flow(c.reactor[0]+40, -4, -c.hub_radius, -4, '#f2c14e', 3, S.power.trunk && reactorUp, 2.5);
-  flow(c.reactor[0]+40, -60, c.tower[0]+20, c.tower[1]+30, '#f2c14e', 1.2, S.power.tower_line && S.power.trunk && reactorUp, 2);
-  for(let s=0;s<ns;s++){ const [x1,y1]=polar(s*60+30,c.hub_radius+18); const [x0,y0]=polar(s*60+30,c.hub_radius-30); flow(x0,y0,x1,y1,'#f2c14e',2,S.power.feeder[s]&&S.sectors[s].online,2); }
-  const PPS=c.poles_per_sector;
-  for(let i=0;i<G.poles.x.length;i++){
-    const k=G.poles.k[i], s=G.poles.sector[i];
-    let px0,py0; if(k===0){ [px0,py0]=polar(s*60+30,c.hub_radius+18); } else { px0=G.poles.x[i-1]; py0=G.poles.y[i-1]; }
-    const px1=G.poles.x[i], py1=G.poles.y[i];
-    flow(px0,py0,px1,py1,'#f2c14e',1.6,S.poles.span[i]===1,2);
-    // internet cable, offset perpendicular
-    const dx=px1-px0, dy=py1-py0, L=Math.hypot(dx,dy)||1, nx=-dy/L*6, ny=dx/L*6;
-    line(px0+nx,py0+ny,px1+nx,py1+ny,S.poles.net[i]===1?'#4fd1c5':'#4a3030',1);
-  }
-  // house drops to poles (faint)
-  for(let i=0;i<G.houses.x.length;i++){ const p=G.houses.pole[i]; line(G.houses.x[i],G.houses.y[i],G.poles.x[p],G.poles.y[p],'rgba(242,193,78,.12)',1); }
-  // hub
-  dot(0,0,sc*c.hub_radius,'#1c2028'); ctx.beginPath(); ctx.strokeStyle=S.power.substation?'#f2c14e':'#e2574d'; ctx.lineWidth=2; ctx.arc(X(0),Y(0),sc*c.hub_radius,0,Math.PI*2); ctx.stroke();
-  text(0,-30,'substation',S.power.substation?'#f2c14e':'#e2574d',11); text(0,-16,`UPS center ${S.power.ups_center_kwh} kWh`,'#9aa3b5',10);
-  text(0,0,S.net.comms?'comms node':'comms DOWN',S.net.comms&&S.net.uplink?'#4fd1c5':'#e2574d',11); text(0,16,'ops center, water pump','#9aa3b5',10);
-  text(0,32,`tank ${S.water.tank_m3} m3`,waterOn?'#5aa9ff':'#e2574d',10);
-  // reactor complex
-  const rc=modeColor[S.reactor.mode]||'#888';
-  box(c.reactor[0],-110,110,34,'#20242e','#7a6a2a','solar',`${S.power.solar_kw} kW`);
-  box(c.reactor[0],0,120,54,'#20242e',rc,`REACTOR ${S.reactor.mode}`,`${S.reactor.power_mw} MW  core ${S.reactor.core_temp} C`);
-  if(S.reactor.marines) text(c.reactor[0],-38,'MARINES IN THE SUBLEVELS','#e2574d',10);
-  box(c.reactor[0],100,110,34,'#20242e',S.water.plant?'#5aa9ff':'#e2574d','water plant',S.water.plant?'melting ice':'no heat');
-  box(c.reactor[0],200,110,34,'#20242e','#6a7a2a','waste storage',`+${S.finance.waste_station}`);
-  box(c.reactor[0],300,110,34,'#20242e',S.power.mine?'#a08a2a':'#5a5a5a','mine',S.power.mine?`${S.power.infra.mine} kW`:'stopped');
-  // tower
-  const [tx,ty]=[c.tower[0],c.tower[1]];
-  ctx.beginPath(); ctx.strokeStyle=S.net.uplink?'#4fd1c5':'#e2574d'; ctx.lineWidth=2; ctx.moveTo(X(tx)-10,Y(ty)+18); ctx.lineTo(X(tx),Y(ty)-18); ctx.lineTo(X(tx)+10,Y(ty)+18); ctx.stroke();
-  text(tx,ty+32,S.net.uplink?'uplink OK':'uplink LOST',S.net.uplink?'#4fd1c5':'#e2574d',10);
-  line(-c.hub_radius+8,-8,tx+6,ty+14,S.net.uplink?'#4fd1c5':'#4a3030',1.2);
-  if(S.net.uplink){ for(let k=0;k<3;k++){ ctx.beginPath(); ctx.strokeStyle=`rgba(79,209,197,${0.5-0.15*k})`; ctx.arc(X(tx),Y(ty)-14,8+6*k+((animT*2)%6),-2.2,-0.9); ctx.stroke(); } }
-  // poles and lamps
-  for(let i=0;i<G.poles.x.length;i++){ const x=G.poles.x[i],y=G.poles.y[i],st=S.poles.state[i];
-    if(S.poles.lamp[i]===1){ const g=ctx.createRadialGradient(X(x),Y(y),0,X(x),Y(y),sc*28); g.addColorStop(0,'rgba(255,230,140,.35)'); g.addColorStop(1,'rgba(255,230,140,0)'); ctx.fillStyle=g; ctx.beginPath(); ctx.arc(X(x),Y(y),sc*28,0,Math.PI*2); ctx.fill(); }
-    if(st===2){ text(x,y+4,'x','#e2574d',13); } else dot(x,y,3,st===1?'#e0b04a':'#c9cfdb'); }
-  // houses
-  const hs=S.houses; const sz=Math.max(4,sc*9);
-  for(let i=0;i<G.houses.x.length;i++){ const x=X(G.houses.x[i]),y=Y(G.houses.y[i]);
-    ctx.fillStyle=tempColor(hs.t[i]); ctx.fillRect(x-sz/2,y-sz/2,sz,sz);
-    if(!hs.power[i]){ ctx.strokeStyle='#e2574d'; ctx.lineWidth=1.5; ctx.strokeRect(x-sz/2,y-sz/2,sz,sz); }
-    else if(hs.ups[i]){ ctx.strokeStyle='#5aa9ff'; ctx.lineWidth=1.5; ctx.strokeRect(x-sz/2,y-sz/2,sz,sz); }
-    else if(hs.limit[i]>0){ ctx.strokeStyle='#e0b04a'; ctx.lineWidth=1; ctx.strokeRect(x-sz/2,y-sz/2,sz,sz); }
-    if(hs.heater[i]&&hs.power[i]){ ctx.fillStyle='#ff7a30'; ctx.fillRect(x-1.5,y-1.5,3,3); }
-    if(hs.burst[i]){ ctx.strokeStyle='#5aa9ff'; ctx.lineWidth=1.5; ctx.beginPath(); ctx.moveTo(x-sz/2,y-sz/2); ctx.lineTo(x+sz/2,y+sz/2); ctx.moveTo(x+sz/2,y-sz/2); ctx.lineTo(x-sz/2,y+sz/2); ctx.stroke(); }
-  }
-  // internet packets
-  const now=performance.now();
-  for(const p of S.net.packets){ const key=p.t+':'+p.from+':'+p.id; if(!packetsSeen.has(key)) packetsSeen.set(key, now); }
-  for(const [key,t0] of packetsSeen){ if(now-t0>1800){ packetsSeen.delete(key); continue; }
-    const [t,from,id]=key.split(':'); const pk=S.net.packets.find(q=>q.t+':'+q.from+':'+q.id===key); if(!pk) continue;
-    let path=[];
-    if(from==='house'){ const i=+id, p=G.houses.pole[i], s=G.houses.sector[i]; path.push([G.houses.x[i],G.houses.y[i]]);
-      for(let k=G.poles.k[p];k>=0;k--){ const j=s*PPS+k; path.push([G.poles.x[j],G.poles.y[j]]); } const [hx,hy]=polar(s*60+30,c.hub_radius+18); path.push([hx,hy]); path.push([0,0]); }
-    else { path.push([0,0]); }
-    if(pk.uplink) path.push([tx+6,ty+14]);
-    const u=(now-t0)/1800; let seg=Math.floor(u*(path.length-1)), f=u*(path.length-1)-seg; if(seg>=path.length-1){seg=path.length-2;f=1;}
-    const [ax,ay]=path[seg],[bx,by]=path[seg+1]; dot(ax+(bx-ax)*f,ay+(by-ay)*f,2.5,pk.uplink?(pk.kind==='reactor'?'#f2c14e':'#4fd1c5'):'#e2574d'); }
-  // waste bins and sludge stores at the ring
-  for(let s=0;s<ns;s++){ const [bx,by]=polar(s*60+30,R+22); const w=S.sectors[s].waste; ctx.fillStyle=w>=1?'#e2574d':(w>=0.9?'#e0b04a':'#3d4350'); ctx.fillRect(X(bx)-5,Y(by)-5,10,10); ctx.fillStyle='#8a93a6'; ctx.fillRect(X(bx)-4,Y(by)+4-8*Math.min(1,w),8,8*Math.min(1,w)); }
-  // rovers
-  const rc2={garbage:['G','#9bd36a'],sludge:['S','#b48ead'],repair:['E','#f2c14e'],plumber:['P','#5aa9ff']};
-  for(const r of S.rovers){ const [l,col]=rc2[r.name==='engineer-2'?'repair':(r.name==='engineer'?'repair':r.name)]||['?','#fff']; dot(r.x,r.y,7,col); text(r.x,r.y+4,l,'#111',10); text(r.x,r.y+16,r.state.toLowerCase().replace('_',' '),'#9aa3b5',9); }
-  // xenomorphs
-  for(const x of S.xenos){ ctx.save(); ctx.translate(X(x.x),Y(x.y)); ctx.rotate(Math.PI/4); ctx.fillStyle='#e2574d'; ctx.fillRect(-5,-5,10,10); ctx.restore(); }
-  // issues
-  for(const i of S.issues){ const col=i.sev==='critical'?'#e2574d':(i.sev==='warning'?'#e0b04a':'#8a93a6'); dot(i.x+8,i.y-8,6,col); text(i.x+8,i.y-4,'!','#111',10); }
-  // banner
-  const e=S.env; document.getElementById('banner').innerHTML = `<b>${S.time}</b> &nbsp; ${e.t_out} C, wind ${e.wind} m/s${e.storm?' <span class="bad">STORM</span>':''}${e.precip==='snow'?' snow':''}${e.night?' night':' day'}${S.paused?' <span class="warn">PAUSED</span>':''} &nbsp; ${S.speed} min/s`;
-  const fin=document.getElementById('finished'); if(S.finished){ fin.style.display='flex'; fin.textContent='SIMULATION OVER: '+S.finish_reason; }
-  requestAnimationFrame(draw);
-}
-
-function cls(ok, warn){ return ok?'ok':(warn?'warn':'bad'); }
-function renderSide(s){
-  document.getElementById('time').textContent = s.time;
-  document.getElementById('pause').textContent = s.paused?'Resume':'Pause';
-  document.querySelectorAll('button[data-s]').forEach(b=>b.classList.toggle('on', +b.dataset.s===s.speed));
-  const p=s.power, r=s.reactor, w=s.water, f=s.finance;
-  const kp=[
-    ['Colony budget', f.colony.toLocaleString()+' cr', f.colony>20000?'ok':(f.colony>0?'warn':'bad')],
-    ['Sector budgets', f.sectors.map(x=>Math.round(x/1000)+'k').join(' '), Math.min(...f.sectors)>2000?'ok':'warn'],
-    ['Power available', p.available_kw+' kW', p.available_kw>p.demand_kw?'ok':'bad'],
-    ['Power demand', p.demand_kw+' kW'+(p.shedding?` / shedding L${p.shedding}`:''), p.shedding?'warn':'ok'],
-    ['Water tank', w.tank_m3+' m3, '+w.houses_ok+'/300 houses', w.tank_m3>100&&w.houses_ok>280?'ok':'warn'],
-    ['Pipes', `${w.frozen} frozen, ${w.burst} burst`, w.burst===0?'ok':'bad'],
-    ['Internet', `${s.net.houses_online}/300 online, uplink ${s.net.uplink?'OK':'LOST'}`, s.net.uplink&&s.net.houses_online>280?'ok':'warn'],
-    ['Open issues', s.issues_total+(f.unpaid?` (unpaid ${f.unpaid} cr)`:''), s.issues_total<5?'ok':'warn'],
-    ['Month income (colony)', f.month_income.toLocaleString()+' cr', 'dim'],
-    ['Month expense (colony)', f.month_expense.toLocaleString()+' cr', 'dim'],
-  ];
-  document.getElementById('kpi').innerHTML = kp.map(([l,v,c])=>`<div class="card"><div class="v ${c}">${v}</div><div class="l">${l}</div></div>`).join('');
-  const inf=p.infra;
-  document.getElementById('reactor').innerHTML = `<div><b class="${r.mode==='ONLINE'?'ok':(r.mode==='RUNBACK'||r.mode==='STARTING'?'warn':'bad')}">${r.mode}</b> &nbsp; ${r.power_mw} MW gross, ${r.available_mw} MW to grid, core ${r.core_temp} C${r.decay_mw?`, decay ${r.decay_mw} MW`:''}</div>
-    <div class="dim">pumps A ${r.pump_a} B ${r.pump_b}, heat exchanger ${r.hx}, batteries ${r.battery_h} h, link ${r.link?'ok':'<span class="bad">lost</span>'}${r.faults.length?', faults: '+r.faults.join(', '):''}</div>
-    <div class="dim">solar ${p.solar_kw} kW; loads: mine ${inf.mine}, houses ${Math.round(p.demand_kw-Object.values(inf).reduce((a,b)=>a+b,0))}, water plant ${inf.water_plant}, road heating ${inf.road_heating}, lamps ${inf.lamps}, comms ${inf.comms}, ups charge ${inf.ups_charge} kW</div>
-    <div class="dim">trunk ${p.trunk?'ok':'<span class="bad">CUT</span>'}, substation ${p.substation?'ok':'<span class="bad">DOWN</span>'}, UPS center ${p.ups_center} ${p.ups_center_kwh} kWh</div>`;
-  document.querySelector('#sectors tbody').innerHTML = s.sectors.map(x=>`<tr><td>${x.id}${x.dark?' <span class="warn">dark</span>':''}</td><td>${x.budget}</td><td>${x.demand_kw}</td><td class="${x.avg_t>15?'ok':(x.avg_t>4?'warn':'bad')}">${x.avg_t}</td><td class="${x.min_t>4?'ok':'bad'}">${x.min_t}</td><td class="${cls(x.power_ok===50,x.power_ok>30)}">${x.power_ok}</td><td class="${cls(x.water_ok===50,x.water_ok>30)}">${x.water_ok}</td><td class="${cls(x.net_ok===50,x.net_ok>30)}">${x.net_ok}</td><td class="${x.ups==='DISCHARGING'?'warn':(x.ups==='DEPLETED'?'bad':'dim')}">${x.ups.slice(0,4)} ${x.ups_kwh}</td><td class="${x.waste>=1?'bad':(x.waste>=0.9?'warn':'dim')}">${Math.round(x.waste*100)}%</td><td class="${x.sanitary>70?'ok':'bad'}">${x.sanitary}</td><td class="${x.gate==='OPEN'?'ok':(x.gate==='LOCKDOWN'?'bad':'warn')}">${x.gate.slice(0,4)}</td><td class="${x.road>20?'dim':'bad'}">${x.road}%</td></tr>`).join('');
-  document.getElementById('nissues').textContent = `(${s.issues_total})`;
-  document.getElementById('issues').innerHTML = s.issues.slice().reverse().map(i=>`<div><span class="${i.sev==='critical'?'bad':(i.sev==='warning'?'warn':'dim')}">${i.kind}</span> ${i.target} ${i.sector>0?'S'+i.sector:''} ${i.cause}, ${i.cost} cr (${i.payer}) <span class="dim">${i.status}, ${Math.round(i.age/60)} h</span></div>`).join('') || '<div>none</div>';
-  document.getElementById('log').innerHTML = s.events.map(e=>`<div class="${e.level}">${String(e.t).padStart(6)} ${e.text}</div>`).join('');
-  const rp=s.report; if(rp){ document.getElementById('report').textContent =
-    `Month ${rp.month}: owners paid ${Math.round(rp.houses_total)} cr (energy ${Math.round(rp.energy_total)}, water ${Math.round(rp.water_total)}, repairs ${Math.round(rp.repairs_total)}), ${Math.round(rp.kwh_total)} kWh\n`+
-    `colony: income ${rp.colony_income}, expense ${rp.colony_expense}, budget ${rp.colony_budget}, unpaid ${rp.unpaid}\n`+
-    `sector income ${rp.sector_income.join(' | ')}\nsector expense ${rp.sector_expense.join(' | ')}\n`+
-    `expense by cause: ${Object.entries(rp.by_cause).map(([k,v])=>k+' '+v).join(', ')}\n`+
-    `top houses: ${rp.top_houses.map(h=>`#${h.house} (S${h.sector}) ${h.total}`).join(', ')}`; }
-}
-cv.addEventListener('mousemove', ev => {
-  const tip=document.getElementById('tip'); if(!G||!S){ tip.style.display='none'; return; }
-  const r=cv.getBoundingClientRect(), mx=ev.clientX-r.left, my=ev.clientY-r.top; let best=-1, bd=10;
-  for(let i=0;i<G.houses.x.length;i++){ const d=Math.hypot(X(G.houses.x[i])-mx, Y(G.houses.y[i])-my); if(d<bd){bd=d;best=i;} }
-  if(best<0){ tip.style.display='none'; return; }
-  const h=S.houses, i=best;
-  tip.innerHTML=`<b>House ${i+1}</b> (S${G.houses.sector[i]+1}, ${G.types[G.houses.type[i]]})<br>indoor ${h.t[i]} C, heater ${h.heater[i]?'on':'off'}<br>power ${h.power[i]?(h.ups[i]?'UPS':'grid'):'<span class="bad">none</span>'}${h.limit[i]?', limit '+h.limit[i]+' W':''}<br>water ${h.water[i]?'ok':'<span class="bad">no</span>'}${h.burst[i]?', <span class="bad">pipes burst</span>':''}<br>internet ${h.net[i]?'online':'offline'}, sludge ${Math.round(h.sludge[i]*100)}%`;
-  tip.style.display='block'; tip.style.left=(mx+14)+'px'; tip.style.top=(my+14)+'px';
-});
-loadGeom().then(()=>{ poll(); draw(); });
-window.addEventListener('resize', fit);
-</script></body></html>
-"""
 # ------------------------------------------------------------------------------------
 # Persistence: pickle of the world for resume, sqlite for history
 # ------------------------------------------------------------------------------------
@@ -1974,7 +2458,8 @@ def sim_loop(w_holder: dict, store: Optional[Store]):
             last_save = time.time()
 
 
-def make_handler(w_holder: dict, html: str, geom_json: str, store: Optional[Store], admin_token: str):
+def make_handler(w_holder: dict, html: str, geom_json: str, store: Optional[Store], admin_token: str,
+                 html3d: str = "", vendor_dir: str = ""):
     from http.server import BaseHTTPRequestHandler
 
     class Handler(BaseHTTPRequestHandler):
@@ -1990,8 +2475,18 @@ def make_handler(w_holder: dict, html: str, geom_json: str, store: Optional[Stor
             self.wfile.write(body)
 
         def do_GET(self):
-            if self.path == "/" or self.path.startswith("/index"):
+            if self.path == "/" or self.path.startswith("/index") or self.path.startswith("/?"):
+                self._send(200, "text/html; charset=utf-8", (html3d or html).encode("utf-8"))
+            elif self.path.startswith("/flat"):
                 self._send(200, "text/html; charset=utf-8", html.encode("utf-8"))
+            elif self.path.startswith("/vendor/") and vendor_dir:
+                rel = os.path.normpath(self.path.split("?")[0][len("/vendor/"):])
+                fp = os.path.join(vendor_dir, rel)
+                if rel.startswith("..") or not os.path.isfile(fp):
+                    self._send(404, "text/plain", b"not found")
+                    return
+                with open(fp, "rb") as f:
+                    self._send(200, "text/javascript" if fp.endswith(".js") else "application/octet-stream", f.read())
             elif self.path.startswith("/geometry"):
                 self._send(200, "application/json", geom_json.encode("utf-8"))
             elif self.path.startswith("/state"):
@@ -2028,6 +2523,10 @@ def make_handler(w_holder: dict, html: str, geom_json: str, store: Optional[Stor
                     w.paused = not w.paused
                 elif cmd == "speed":
                     w.speed = int(clamp(int(req.get("value", 20)), 0, 600))
+                    if w.speed == 0:
+                        w.paused = True
+                    elif w.paused:
+                        w.paused = False
                 elif cmd == "inject":
                     inject(w, req.get("value", ""))
                 elif cmd == "reactor":
@@ -2074,7 +2573,15 @@ def main():
         return
     holder = {"w": w}
     threading.Thread(target=sim_loop, args=(holder, store), daemon=True).start()
-    handler = make_handler(holder, HTML, json.dumps(house_geometry(w)), store, admin_token)
+    # three.js is loaded from jsdelivr unless a local copy exists next to the script or in the data dir
+    vendor_dir = ""
+    for cand in (os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor"), os.path.join(args.data or ".", "vendor")):
+        if os.path.isfile(os.path.join(cand, "three", "build", "three.module.js")):
+            vendor_dir = cand
+            break
+    three_base = "/vendor/three/" if vendor_dir else "https://cdn.jsdelivr.net/npm/three@0.160.0/"
+    html3d = HTML3D.replace("__THREE_BASE__", three_base)
+    handler = make_handler(holder, HTML, json.dumps(house_geometry(w)), store, admin_token, html3d, vendor_dir)
     srv = ThreadingHTTPServer(("0.0.0.0", args.port), handler)
     print(f"Hadley's Hope simulation: open http://localhost:{args.port}  (speed {w.speed} min/s, seed {args.seed})")
     print(f"persistence: {args.data or 'off'}; admin token: {'set' if admin_token else 'not set, everyone can inject'}")
