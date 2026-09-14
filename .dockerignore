@@ -1,0 +1,4 @@
+data/
+*.pkl
+*.db
+__pycache__/
