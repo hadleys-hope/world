@@ -27,6 +27,27 @@ python3 hadleys_hope.py --headless 43200       # one simulated month without UI,
 `PORT`, `DATA_DIR` (same as `--data`), `ADMIN_TOKEN` (when set, inject and speed controls
 require opening the page as `/?admin=TOKEN`; everyone else is view only).
 
+## House controllers over MQTT
+
+The world only simulates physics. Each house's decisions (heater, target temperature, valve,
+appliances) come from a controller process over an MQTT bus, exactly where the future runtime with
+`libhopevm` and `.hbc` programs will sit. Until the toolchain exists, `houses_runtime.py` plays that
+role with five small Python programs (comfort, eco, night-setback, storm-ready, dumb), assigned by
+house id or by a JSON manifest.
+
+```
+mosquitto                                  # any broker on localhost:1883
+python3 hadleys_hope.py --mqtt localhost:1883
+python3 houses_runtime.py --mqtt localhost:1883
+```
+
+Topics: `hh/tick`, `hh/env/weather`, `hh/env/power`, `hh/house/{id}/sensors` (retained, published on
+change and at least every 10 minutes of simulated time), `hh/house/{id}/actuators` (from the
+controller). A house whose controller has been silent for 15 simulated minutes falls back to the
+built-in thermostat. A house that lost its simulated network link stops receiving the colony feeds
+(its controller keeps the last copy), the way a real wall controller would. The UI shows the bus
+status, the program and the last decision per house.
+
 ## Persistence
 
 With `--data` or `DATA_DIR` the world is pickled every five minutes and on SIGTERM / Ctrl+C

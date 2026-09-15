@@ -49,6 +49,10 @@ CFG = {
     "waste_station_pos": (-1000, 140),
     "tower_junction": (-1000, 0),
     "tower_pos": (-1000, -540),
+    "landing_pad_pos": (960, 0),
+    "garage": (75.0, 210.0),          # polar: angle, radius; vehicle bay in sector 1
+    "medlab": (195.0, 210.0),
+    "school": (315.0, 210.0),
     "walkers": 60,
     # environment (LV-426: minus 40..60, permanent dusk, storms)
     "t_mean": -45.0,
@@ -227,7 +231,16 @@ class World:
         self.h_sludge = self.rng.uniform(0.0, 0.6, N)
         self.h_net_online = np.ones(N, dtype=bool)
         self.h_valve_open = np.ones(N, dtype=bool)
+        self.h_appliances_on = np.ones(N, dtype=bool)
         self.h_repairs_month = np.zeros(N)
+        # external house controllers (runtime over MQTT); fallback thermostat when stale
+        self.h_ctrl_t = np.full(N, -10_000)
+        self.h_ctrl_heater = np.zeros(N, dtype=bool)
+        self.h_ctrl_target = np.full(N, cfg["comfort_c"])
+        self.h_ctrl_valve = np.ones(N, dtype=bool)
+        self.h_ctrl_appl = np.ones(N, dtype=bool)
+        self.h_program = [""] * N
+        self.h_reason = [""] * N
 
         # ---- poles: a tree per sector. Spine along the boundary street (angle s*60),
         #      branches along each row street; every pole carries a lamp, a power span
@@ -237,9 +250,9 @@ class World:
         px, py, ps, pk, parent, kind, prad, pang = [], [], [], [], [], [], [], []
         self.spine_index = {}       # (sector, radius) -> pole index
         for s in range(S):
-            base_angle = s * 60.0 + 1.6
             first = len(px)
             for j, r in enumerate(spine_r):
+                base_angle = s * 60.0 + math.degrees(9.0 / r)      # 9 units beside the boundary road
                 x, y = polar(base_angle, r)
                 px.append(x); py.append(y); ps.append(s); pk.append(j); parent.append(first + j - 1 if j > 0 else -1)
                 kind.append(0); prad.append(r); pang.append(base_angle)
@@ -405,6 +418,7 @@ class World:
     def __getstate__(self):
         d = self.__dict__.copy()
         d.pop("lock", None)
+        d.pop("bridge", None)
         return d
 
     def __setstate__(self, d):
@@ -616,17 +630,29 @@ def grid_rebuild(w: World):
 
 
 def houses_decide(w: World):
-    """House programs: thermostat with modes chosen from the power situation. This is where libhopevm plugs in."""
+    """House brains. Houses with a fresh external controller (runtime over MQTT) use its decisions;
+    the rest run the built-in thermostat. This is where libhopevm plugs in."""
     c = w.cfg
+    ext = (w.t - w.h_ctrl_t) < 15
     target = np.full(w.N, c["comfort_c"])
     target[w.h_on_ups | (w.h_limit_w > 0)] = c["eco_c"]
     target[(w.h_limit_w > 0) & (w.h_limit_w <= c["limit_level5_w"])] = c["antifreeze_c"]
-    w.h_target = target
     on = w.h_heater_on.copy()
     on[w.h_t_in < target - 0.5] = True
     on[w.h_t_in > target + 0.5] = False
+    valve = ~w.h_burst
+    appl = np.ones(w.N, dtype=bool)
+    # external decisions override
+    target = np.where(ext, w.h_ctrl_target, target)
+    on = np.where(ext, w.h_ctrl_heater, on)
+    valve = np.where(ext, w.h_ctrl_valve & ~w.h_burst, valve)
+    appl = np.where(ext, w.h_ctrl_appl, appl)
+    # hard limits the grid enforces regardless of the program: heater cannot exceed the limit budget
+    w.h_target = target
     w.h_heater_on = on
-    w.h_valve_open = ~w.h_burst
+    w.h_valve_open = valve
+    w.h_appliances_on = appl
+    w.h_ext = ext
 
 
 def houses_demand(w: World):
@@ -634,6 +660,7 @@ def houses_demand(w: World):
     night = w.is_night()
     base = w.h_base_w * (0.6 if night else 1.0) + w.rng.uniform(-50, 50, w.N)
     base = np.maximum(base, 80.0)
+    base = np.where(w.h_appliances_on, base, 100.0)          # program switched appliances off: fridge only
     heater = np.where(w.h_heater_on, w.h_heater_w, 0.0)
     aeration = np.where(w.h_aeration_ok, c["aeration_w"], 0.0)
     want = base + heater + aeration
@@ -1058,7 +1085,7 @@ function draw(){
   for(const i of S.issues){ const col=i.sev==='critical'?'#e2574d':(i.sev==='warning'?'#e0b04a':'#8a93a6'); dot(i.x+8,i.y-8,6,col); text(i.x+8,i.y-4,'!','#111',10); }
   // banner
   const e=S.env; document.getElementById('banner').innerHTML = `<b>${S.time}</b> &nbsp; ${e.t_out} C, wind ${e.wind} m/s${e.storm?' <span class="bad">STORM</span>':''}${e.precip==='snow'?' snow':''}${e.night?' night':' day'}${S.paused?' <span class="warn">PAUSED</span>':''} &nbsp; ${S.speed} min/s`;
-  const fin=document.getElementById('finished'); if(S.finished){ fin.style.display='flex'; fin.textContent='SIMULATION OVER: '+S.finish_reason; }
+  const fin=document.getElementById('finished'); if(S.finished){ fin.style.display='flex'; fin.textContent='COLONY LOST: '+S.finish_reason+'. A new colony is founded in two minutes.'; } else fin.style.display='none';
   requestAnimationFrame(draw);
 }
 
@@ -1176,7 +1203,11 @@ HTML3D = r"""<!doctype html>
     <label class="chk"><input type="checkbox" data-l="people" checked> people</label>
     <label class="chk"><input type="checkbox" data-l="threats" checked> xenomorphs, marines</label>
     <label class="chk"><input type="checkbox" data-l="labels" checked> labels</label>
+    <label class="chk"><input type="checkbox" data-l="ctrl" checked> house programs</label>
+    <label class="chk"><input type="checkbox" data-l="bloom" checked> bloom</label>
+    <label class="chk"><input type="checkbox" data-l="shadows" checked> shadows</label>
   </div>
+  <div id="ctrl" class="dim" style="font-size:11px;margin-top:4px"></div>
   <h2>Fly to</h2>
   <div class="row" id="fly"><button data-f="hub">hub</button><button data-f="gate">west gate</button><button data-f="reactor">reactor</button><button data-f="solar">solar</button><button data-f="tower">tower</button><button data-f="mine">mine</button><button data-f="city">city</button><button data-f="planet">planet</button></div>
   <h2>Inject</h2>
@@ -1184,6 +1215,7 @@ HTML3D = r"""<!doctype html>
     <button data-i="span">break span</button><button data-i="pole">fell pole</button><button data-i="xeno">xenomorphs</button>
     <button data-i="storm">storm</button><button data-i="trunk">cut trunk</button><button data-i="pump">pump trip</button>
     <button data-i="marines">marines fire</button><button data-i="scram">SCRAM</button><button data-i="road">break road</button><button data-i="money">+50k cr</button>
+    <button id="reset" style="border-color:#e2574d">new colony</button>
   </div>
   <h2>Colony</h2>
   <div class="kpi" id="kpi"></div>
@@ -1201,6 +1233,9 @@ HTML3D = r"""<!doctype html>
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 
 // ---------- state, polling, controls ----------
 let ADMIN = new URLSearchParams(location.search).get('admin') || localStorage.getItem('hh_admin') || '';
@@ -1214,6 +1249,7 @@ checkToken();
 const post = async (o) => { const r = await fetch('/cmd', {method:'POST', body: JSON.stringify({...o, token: ADMIN})}); if(r.status===403){ tokenState.textContent='view only: paste the admin token above'; tokenState.className='bad'; } };
 document.getElementById('pause').onclick = () => post({cmd:'pause'});
 document.querySelectorAll('button[data-i]').forEach(b => b.onclick = () => post({cmd:'inject', value:b.dataset.i}));
+document.getElementById('reset').onclick = () => { if(confirm('Abandon this colony and found a new one? History is kept.')) { post({cmd:'reset'}); selected=null; } };
 const speedEl = document.getElementById('speed'), speedV = document.getElementById('speedv');
 const sliderToSpeed = v => v===0?0:Math.round(Math.exp(Math.log(600) * v / 100));
 const speedToSlider = s => s<=0?0:Math.round(Math.log(Math.max(1, s)) / Math.log(600) * 100);
@@ -1224,7 +1260,7 @@ const layers = {}; document.querySelectorAll('#layers input').forEach(c => { lay
 async function loadGeom(){ G = await (await fetch('/geometry')).json(); }
 async function poll(){
   try { const s = await (await fetch('/state')).json(); const first = !S; prevS = S; S = s; const now=performance.now(); pollGap = lastPoll ? Math.min(1200, now-lastPoll) : 300; lastPoll = now; renderSide(s); onState(s, first); renderInfo(); }
-  catch(e) { document.getElementById('banner').textContent = 'no connection'; }
+  catch(e) { console.error('poll failed', e); document.getElementById('banner').textContent = 'update failed: '+(e&&e.message||e); }
   setTimeout(poll, 300);
 }
 
@@ -1246,9 +1282,15 @@ function ribbon(flat, width, h, color, opts={}){
   const m=new THREE.Mesh(g, new THREE.MeshStandardMaterial({color, roughness:1, metalness:0, polygonOffset:true, polygonOffsetFactor:-1, ...opts})); world.add(m); return m;
 }
 function tube(pts3, radius, color, opts={}){ const g=new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts3), Math.max(8, pts3.length*3), radius, 6, false); const m=new THREE.Mesh(g, new THREE.MeshStandardMaterial({color, roughness:.5, metalness:.3, ...opts})); world.add(m); return m; }
-function cap(radius, h, color, rings=24, segs=96){ const pos=[], idx=[]; for(let r=0;r<=rings;r++){ const rr=radius*r/rings; for(let s=0;s<segs;s++){ const [x,y]=polar(s*360/segs, rr); const p=sph(x,y,h); pos.push(p.x,p.y,p.z); } }
+function cap(radius, h, color, rings=24, segs=96, bump=0){ const pos=[], idx=[]; for(let r=0;r<=rings;r++){ const rr=radius*r/rings; for(let s=0;s<segs;s++){ const [x,y]=polar(s*360/segs, rr); const b=bump*(Math.sin(x*0.07)*Math.cos(y*0.05)+0.6*Math.sin(x*0.19+y*0.13)); const p=sph(x,y,h+b); pos.push(p.x,p.y,p.z); } }
   for(let r=0;r<rings;r++) for(let s=0;s<segs;s++){ const a=r*segs+s, b=r*segs+(s+1)%segs, c2=(r+1)*segs+s, d=(r+1)*segs+(s+1)%segs; idx.push(a,c2,b, b,c2,d); }
-  const g=new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos,3)); g.setIndex(idx); g.computeVertexNormals(); const m=new THREE.Mesh(g, new THREE.MeshStandardMaterial({color, roughness:1, side:THREE.DoubleSide})); world.add(m); return m; }
+  const g=new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos,3)); g.setIndex(idx); g.computeVertexNormals(); const m=new THREE.Mesh(g, new THREE.MeshStandardMaterial({color, roughness:1, side:THREE.DoubleSide})); m.receiveShadow=true; world.add(m); return m; }
+function road(flat, width, h, color){ const m=ribbon(flat,width,h,color); m.receiveShadow=true; const pts=subdiv(flat,10); const off=[],offb=[]; for(let i=0;i<pts.length;i++){ const p=pts[i], q=pts[Math.min(i+1,pts.length-1)], o=pts[Math.max(i-1,0)]; let dx=q[0]-o[0], dy=q[1]-o[1]; const L=Math.hypot(dx,dy)||1; dx/=L; dy/=L; const nx=-dy*(width/2+0.8), ny=dx*(width/2+0.8); off.push([p[0]+nx,p[1]+ny]); offb.push([p[0]-nx,p[1]-ny]); }
+  ribbon(off,1.4,h+0.5,0x9a9fa8); ribbon(offb,1.4,h+0.5,0x9a9fa8); return m; }
+const pipeTex=(()=>{ const c=document.createElement('canvas'); c.width=64; c.height=8; const x=c.getContext('2d'); x.fillStyle='#3a78c8'; x.fillRect(0,0,64,8); x.fillStyle='#bfe0ff'; x.fillRect(0,0,14,8); x.fillStyle='#7ab8ff'; x.fillRect(14,0,10,8); const t=new THREE.CanvasTexture(c); t.wrapS=THREE.RepeatWrapping; t.wrapT=THREE.ClampToEdgeWrapping; return t; })();
+const pipeMats=[];
+function flowTube(pts3, radius, len){ const t=pipeTex.clone(); t.needsUpdate=true; t.repeat.set(Math.max(1,len/40),1); const mat=new THREE.MeshStandardMaterial({map:t, roughness:.4, metalness:.3}); mat.userData={rate:0, tex:t}; pipeMats.push(mat); const g=new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts3), Math.max(8, pts3.length*3), radius, 8, false); const m=new THREE.Mesh(g, mat); m.castShadow=true; world.add(m); return m; }
+function polyLen(pts3){ let L=0; for(let i=1;i<pts3.length;i++) L+=pts3[i].distanceTo(pts3[i-1]); return L; }
 function flat3(flat, h){ return subdiv(flat, 20).map(p=>sph(p[0],p[1],h)); }
 function catenary(a3, b3, sag){ const out=[]; const mid=a3.clone().add(b3).multiplyScalar(0.5); const n=mid.clone().normalize(); for(let i=0;i<=8;i++){ const t=i/8; const p=a3.clone().lerp(b3,t); p.addScaledVector(n, -sag*4*t*(1-t)); out.push(p); } return out; }
 
@@ -1291,15 +1333,17 @@ function retext(sprite, text, color){ const key=text+'|'+color+'|'+sprite.userDa
 
 // ---------- scene ----------
 const mapEl=document.getElementById('map');
-const renderer=new THREE.WebGLRenderer({antialias:true}); renderer.setPixelRatio(Math.min(devicePixelRatio,2)); mapEl.appendChild(renderer.domElement);
+const renderer=new THREE.WebGLRenderer({antialias:true}); renderer.setPixelRatio(Math.min(devicePixelRatio,2)); renderer.shadowMap.enabled=true; renderer.shadowMap.type=THREE.PCFSoftShadowMap; renderer.toneMapping=THREE.ACESFilmicToneMapping; renderer.toneMappingExposure=1.3; mapEl.appendChild(renderer.domElement);
 const scene=new THREE.Scene(); scene.background=new THREE.Color(0x05070b);
 const camera=new THREE.PerspectiveCamera(50,1,1,80000); camera.position.set(500, RP+1500, 1700);
 const controls=new OrbitControls(camera, renderer.domElement); controls.target.set(0,RP,0); controls.minDistance=40; controls.maxDistance=RP*4; controls.enablePan=true; controls.screenSpacePanning=false; controls.panSpeed=2.2; controls.zoomSpeed=3.0; controls.enableDamping=true; controls.dampingFactor=0.1; controls.keyPanSpeed=40; controls.listenToKeyEvents(window);
 controls.mouseButtons={LEFT:THREE.MOUSE.ROTATE, MIDDLE:THREE.MOUSE.DOLLY, RIGHT:THREE.MOUSE.PAN};
+const composer=new EffectComposer(renderer); composer.addPass(new RenderPass(scene,camera)); const bloomPass=new UnrealBloomPass(new THREE.Vector2(800,600), 0.45, 0.5, 0.86); composer.addPass(bloomPass);
 window.addEventListener('keydown', e=>{ if(e.shiftKey) controls.mouseButtons.LEFT=THREE.MOUSE.PAN; if(['w','a','s','d'].includes(e.key)){ const d=camera.position.distanceTo(controls.target)*0.06; const f=new THREE.Vector3().subVectors(controls.target,camera.position); const n=controls.target.clone().normalize(); f.projectOnPlane(n).normalize(); const r=new THREE.Vector3().crossVectors(f,n).normalize(); const m=e.key==='w'?f:e.key==='s'?f.clone().negate():e.key==='d'?r.clone().negate():r; m.multiplyScalar(d); controls.target.add(m); camera.position.add(m); } });
 window.addEventListener('keyup', e=>{ if(!e.shiftKey) controls.mouseButtons.LEFT=THREE.MOUSE.ROTATE; });
-scene.add(new THREE.AmbientLight(0xa8b0c4, 1.5)); scene.add(new THREE.HemisphereLight(0x778ab0, 0x2a2118, 0.8));
-const sun=new THREE.DirectionalLight(0xffe0b0, 1.3); scene.add(sun); const sunSprite=new THREE.Sprite(new THREE.SpriteMaterial({map:TEX.glow, transparent:true, depthTest:false})); sunSprite.scale.set(1800,1800,1); scene.add(sunSprite);
+scene.add(new THREE.AmbientLight(0xa8b0c4, 2.8)); scene.add(new THREE.HemisphereLight(0x778ab0, 0x2a2118, 1.2));
+const sun=new THREE.DirectionalLight(0xffe0b0, 1.3); scene.add(sun); sun.castShadow=true; sun.shadow.mapSize.set(2048,2048); sun.shadow.camera.near=100; sun.shadow.camera.far=30000; sun.shadow.bias=-0.0008; sun.shadow.normalBias=1.5;
+const sunTarget=new THREE.Object3D(); scene.add(sunTarget); sun.target=sunTarget; const sunSprite=new THREE.Sprite(new THREE.SpriteMaterial({map:TEX.glow, transparent:true, depthTest:false})); sunSprite.scale.set(1800,1800,1); scene.add(sunSprite);
 { const n=3000, p=new Float32Array(n*3); for(let i=0;i<n;i++){ const v=new THREE.Vector3().randomDirection().multiplyScalar(60000); p.set([v.x,v.y,v.z], i*3); } const g=new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(p,3)); scene.add(new THREE.Points(g, new THREE.PointsMaterial({color:0xbfc8dc, size:2.2, sizeAttenuation:false}))); }
 // planet: procedural terrain baked once on the CPU (value noise, ridges, craters; flat under the colony),
 // shaded in a fragment shader: rock, snow by height and cold, colony glow on the night side, rim light.
@@ -1351,7 +1395,7 @@ function addLabel(text, x, y, h, color, tier='mid', live=false){ const s=textSpr
 const liveLabels=[];
 const clickables=[];   // {obj, id, kind, extra}
 function clickable(obj, id, kind, extra){ obj.traverse(o=>{ o.userData.click={id,kind,extra}; }); obj.userData.click={id,kind,extra}; clickables.push(obj); return obj; }
-let housesMesh, polesMesh, armsMesh, lampsMesh, wallMesh, benchMesh, spanLines, netLines, flowPower, flowWater, packetsPts, markers={}, gates=[], rovers={}, hub={}, complex={}, roadMeshes={ring:[]}, pipes={}, rpBoxes=[], cabBoxes=[];
+let housesMesh, windowsMesh, windowSlots=[], polesMesh, armsMesh, lampsMesh, wallMesh, benchMesh, spanLines, netLines, flowPower, flowWater, packetsPts, markers={}, gates=[], rovers={}, hub={}, complex={}, roadMeshes={ring:[]}, pipes={}, rpBoxes=[], cabBoxes=[];
 const flatHouses=[]; let spanCurves=[], trunkCurves=[], towerCurves=[], solarCurves=[], feederCurves=[], waterMainPts=[], waterSectorPts=[], cableTowerCurves=[];
 
 function box(x,y,w,h,d,color,edge,yaw){ const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d), new THREE.MeshStandardMaterial({color, roughness:.8})); m.position.copy(sph(x,y,h/2)); m.quaternion.copy(quatAt(x,y,yaw===undefined?-Math.atan2(y,x):yaw)); world.add(m); if(edge){ m.add(new THREE.LineSegments(new THREE.EdgesGeometry(m.geometry), new THREE.LineBasicMaterial({color:edge}))); } return m; }
@@ -1363,32 +1407,55 @@ function setPoints(layer, flatPts, h){ const a=layer.geometry.attributes.positio
 function build(){
   const c=G.cfg, R=c.ring_road_radius, WR=c.wall_radius, ns=c.sectors, HR=c.hub_radius, rx=c.reactor_pos[0], ry=c.reactor_pos[1];
   // ground plate of the city, lighter than the terrain
-  cap(WR+6, 0.25, 0x33302c);
+  cap(WR+6, 0.25, 0x5a544c, 40, 128, 0.7);
   // ---- roads ----
-  for(let s=0;s<ns;s++){ roadMeshes.ring.push(ribbon(arcPts(s*60,(s+1)*60,R,30), 14, 0.7, 0x7c8496)); ribbon(arcPts(s*60,(s+1)*60,R,30), 0.8, 0.9, 0xb9c0cc); }
-  for(let s=0;s<ns;s++){ ribbon([polar(s*60,HR-4), polar(s*60,WR+70)], 10, 0.6, 0x717889); }   // boundary streets through the gate and out
-  for(let s=0;s<ns;s++) for(let k=0;k<=c.house_rows;k++){ const r=c.house_radius_min-30+k*c.house_ring_step; ribbon(arcPts(s*60+2.5,s*60+57.5,r,20), 8, 0.6, 0x5c6374); }
-  ribbon([[-WR-70,0],[rx+70,0]], 14, 0.7, 0x7c8496); ribbon([[-WR-70,0],[rx+70,0]], 0.8, 0.9, 0xb9c0cc);   // trunk road
+  for(let s=0;s<ns;s++){ roadMeshes.ring.push(road(arcPts(s*60,(s+1)*60,R,30), 14, 1.0, 0x7c8496)); ribbon(arcPts(s*60,(s+1)*60,R,30), 0.8, 1.3, 0xb9c0cc); }
+  for(let s=0;s<ns;s++){ road([polar(s*60,HR-4), polar(s*60,WR+70)], 10, 1.0, 0x717889); }   // boundary streets through the gate and out
+  road([[WR+70,0],[c.landing_pad_pos[0]-100,0]], 10, 1.0, 0x717889);                              // east road to the landing pad
+  for(const [k,v] of [['garage',c.garage],['medlab',c.medlab],['school',c.school]]){ const s=Math.floor(v[0]/60); ribbon(arcPts(s*60,v[0]+12,v[1],10), 6, 0.9, 0x5c6374); }   // service lanes off the boundary streets
+  for(let s=0;s<ns;s++) for(let k=0;k<=c.house_rows;k++){ const r=c.house_radius_min-30+k*c.house_ring_step; ribbon(arcPts(s*60+2.5,s*60+57.5,r,20), 8, 0.9, 0x747b8c); }
+  for(let i=0;i<G.houses.x.length;i++){ const a=G.houses.angle[i], r=G.houses.radius[i]; ribbon([polar(a,r-8), polar(a,r-27)], 2.4, 0.95, 0x6d6a62); }   // footpath from every house to its street
+  road([[-WR-70,0],[rx+70,0]], 14, 1.0, 0x7c8496); ribbon([[-WR-70,0],[rx+70,0]], 0.8, 1.3, 0xb9c0cc);   // trunk road
   ribbon([[rx+70,-40],[rx+70,c.mine_pos[1]+40]], 10, 0.6, 0x717889);      // service road along the complex
   ribbon([[rx+70,-40],[c.solar_pos[0]+60,c.solar_pos[1]+40]], 8, 0.6, 0x717889);
   ribbon([c.tower_junction,[c.tower_pos[0],c.tower_pos[1]+40]], 8, 0.6, 0x717889);
   ribbon([[c.waste_station_pos[0]+40,0],[c.waste_station_pos[0]+40,c.waste_station_pos[1]-20]], 8, 0.6, 0x717889);
   // hub plaza
-  cap(HR, 0.9, 0x3a3f4b, 8, 64);
-  // ---- wall and gates ----
-  { const segs=[]; for(let s=0;s<ns;s++){ const a0=s*60+3.2, a1=(s+1)*60-3.2, n=24; for(let i=0;i<n;i++){ const a=a0+(a1-a0)*(i+0.5)/n; segs.push(a); } }
-    wallMesh=new THREE.InstancedMesh(new THREE.BoxGeometry(WR*2*Math.PI*54/360/24+1.5, 14, 5), new THREE.MeshStandardMaterial({color:0x6f6a62, roughness:.9}), segs.length); const m4=new THREE.Matrix4();
-    segs.forEach((a,i)=>{ const [x,y]=polar(a,WR); m4.compose(sph(x,y,7), quatAt(x,y,-a*Math.PI/180-Math.PI/2), new THREE.Vector3(1,1,1)); wallMesh.setMatrixAt(i,m4); }); world.add(wallMesh);
-    for(let g=0;g<ns;g++){ const a=g*60; const [gx,gy]=polar(a,WR); const grp=localGroup(gx,gy,0,-a*Math.PI/180); const tw=new THREE.MeshStandardMaterial({color:0x7c766e});
-      const t1=new THREE.Mesh(new THREE.BoxGeometry(8,22,8), tw); t1.position.set(0,11,-12); grp.add(t1); const t2=new THREE.Mesh(new THREE.BoxGeometry(8,22,8), tw); t2.position.set(0,11,12); grp.add(t2);
-      const arm=new THREE.Mesh(new THREE.BoxGeometry(1.8,1.8,20), new THREE.MeshStandardMaterial({color:0x5ec07a})); arm.geometry.translate(0,0,10); arm.position.set(0,7,-10); grp.add(arm);
-      const lamp=new THREE.Mesh(new THREE.SphereGeometry(1.6,8,8), new THREE.MeshBasicMaterial({color:0x5ec07a})); lamp.position.set(0,23,-12); grp.add(lamp);
-      clickable(grp, 'gate'+g, 'gate', g); gates.push({g:grp, arm, lamp}); addLabel(`gate ${g+1}`, gx, gy, 32, '#c9cfdb', 'near'); }
+  cap(HR, 0.9, 0x555a66, 8, 64);
+  // ---- wall: panels between posts, top rail, footing; gates: towers, floodlights, striped arm, booth ----
+  { const segs=[]; for(let s=0;s<ns;s++){ const a0=s*60+3.4, a1=(s+1)*60-3.4, n=22; for(let i=0;i<n;i++){ segs.push([a0+(a1-a0)*(i+0.5)/n, a0+(a1-a0)*i/n]); } }
+    const segLen=WR*2*Math.PI*53.2/360/22; const m4=new THREE.Matrix4();
+    const panels=new THREE.InstancedMesh(new THREE.BoxGeometry(segLen+0.6, 13, 2.2), new THREE.MeshStandardMaterial({color:0x8d877b, roughness:.85}), segs.length);
+    const posts=new THREE.InstancedMesh(new THREE.BoxGeometry(3.6,16,3.6), new THREE.MeshStandardMaterial({color:0x5f5a52, roughness:.8}), segs.length+ns);
+    const rails=new THREE.InstancedMesh(new THREE.BoxGeometry(segLen+0.6, 0.9, 3.6), new THREE.MeshStandardMaterial({color:0x6a655c}), segs.length);
+    const foot=new THREE.InstancedMesh(new THREE.BoxGeometry(segLen+0.6, 1.4, 5), new THREE.MeshStandardMaterial({color:0x4d4942}), segs.length);
+    segs.forEach(([a,ap],i)=>{ const [x,y]=polar(a,WR); const q=quatAt(x,y,-a*Math.PI/180-Math.PI/2); m4.compose(sph(x,y,6.5), q, new THREE.Vector3(1,1,1)); panels.setMatrixAt(i,m4); m4.compose(sph(x,y,13.4), q, new THREE.Vector3(1,1,1)); rails.setMatrixAt(i,m4); m4.compose(sph(x,y,0.7), q, new THREE.Vector3(1,1,1)); foot.setMatrixAt(i,m4);
+      const [px,py]=polar(ap,WR); m4.compose(sph(px,py,8), quatAt(px,py,-ap*Math.PI/180-Math.PI/2), new THREE.Vector3(1,1,1)); posts.setMatrixAt(i,m4); });
+    for(let s=0;s<ns;s++){ const ap=(s+1)*60-3.4; const [px,py]=polar(ap,WR); m4.compose(sph(px,py,8), quatAt(px,py,-ap*Math.PI/180-Math.PI/2), new THREE.Vector3(1,1,1)); posts.setMatrixAt(segs.length+s,m4); }
+    for(const m of [panels,posts,rails,foot]){ m.castShadow=true; m.receiveShadow=true; world.add(m); } wallMesh=panels;
+    for(let g=0;g<ns;g++){ const a=g*60; const [gx,gy]=polar(a,WR); const grp=localGroup(gx,gy,0,-a*Math.PI/180); const tw=new THREE.MeshStandardMaterial({color:0x7c766e, roughness:.8}); const win=new THREE.MeshBasicMaterial({color:0xffd27a});
+      for(const z of [-16,16]){ const t=new THREE.Mesh(new THREE.BoxGeometry(11,28,11), tw); t.position.set(0,14,z); t.castShadow=true; grp.add(t); const w1=new THREE.Mesh(new THREE.BoxGeometry(6,3,0.6), win); w1.position.set(0,22,z+(z<0?5.6:-5.6)); grp.add(w1); const cap2=new THREE.Mesh(new THREE.BoxGeometry(13,1.2,13), new THREE.MeshStandardMaterial({color:0x4d4942})); cap2.position.set(0,28.6,z); grp.add(cap2);
+        const fl=new THREE.Sprite(new THREE.SpriteMaterial({map:TEX.glow, transparent:true, depthWrite:false, blending:THREE.AdditiveBlending})); fl.scale.set(40,40,1); fl.position.set(-6,27,z*0.55); grp.add(fl); }
+      const booth=new THREE.Mesh(new THREE.BoxGeometry(7,8,7), new THREE.MeshStandardMaterial({color:0x8a8478})); booth.position.set(9,4,-10); booth.castShadow=true; grp.add(booth); const bw=new THREE.Mesh(new THREE.BoxGeometry(0.4,3,5), win); bw.position.set(5.4,5,-10); grp.add(bw);
+      const armG=new THREE.Group(); armG.position.set(0,7,-10); for(let k=0;k<6;k++){ const seg=new THREE.Mesh(new THREE.BoxGeometry(1.8,1.8,3.4), new THREE.MeshStandardMaterial({color:k%2?0xffffff:0xe2574d})); seg.position.set(0,0,1.7+k*3.4); armG.add(seg); } grp.add(armG);
+      const lamp=new THREE.Mesh(new THREE.SphereGeometry(1.4,8,8), new THREE.MeshBasicMaterial({color:0x5ec07a})); lamp.position.set(0,10,-10); grp.add(lamp);
+      clickable(grp, 'gate'+g, 'gate', g); gates.push({g:grp, arm:armG, lamp});
+      addLabel(g===3?"HADLEY'S HOPE  pop. 158  Weyland-Yutani": `gate ${g+1}`, gx, gy, 40, g===3?'#f2c14e':'#c9cfdb', g===3?'mid':'near'); }
   }
-  // ---- houses ----
-  const hg=new THREE.BoxGeometry(20,11,20); housesMesh=new THREE.InstancedMesh(hg, new THREE.MeshLambertMaterial({emissive:0x1a1a1a}), G.houses.x.length); const m4=new THREE.Matrix4();
-  for(let i=0;i<G.houses.x.length;i++){ const x=G.houses.x[i], y=G.houses.y[i]; flatHouses.push([x,y]); m4.compose(sph(x,y,5.5), quatAt(x,y,-Math.atan2(y,x)), new THREE.Vector3(1,G.houses.type[i]===3?1.7:1,1)); housesMesh.setMatrixAt(i,m4); housesMesh.setColorAt(i,new THREE.Color(0xffa040)); }
-  housesMesh.instanceMatrix.needsUpdate=true; world.add(housesMesh);
+  // ---- houses: bodies sized by type, parapet roofs, windows lit from the state ----
+  const HSIZE=[[26,8,16],[18,14,18],[18,12,18],[20,22,20]];
+  housesMesh=new THREE.InstancedMesh(new THREE.BoxGeometry(1,1,1), new THREE.MeshStandardMaterial({roughness:.75}), G.houses.x.length); housesMesh.castShadow=true; housesMesh.receiveShadow=true;
+  const roofs=new THREE.InstancedMesh(new THREE.BoxGeometry(1,1,1), new THREE.MeshStandardMaterial({color:0x3f3b36, roughness:.9}), G.houses.x.length);
+  const m4=new THREE.Matrix4(); windowSlots=[]; const winPos=[];
+  for(let i=0;i<G.houses.x.length;i++){ const x=G.houses.x[i], y=G.houses.y[i]; flatHouses.push([x,y]); const [w,h,d]=HSIZE[G.houses.type[i]]; const yaw=-G.houses.angle[i]*Math.PI/180;
+    m4.compose(sph(x,y,h/2+0.6), quatAt(x,y,yaw), new THREE.Vector3(w,h,d)); housesMesh.setMatrixAt(i,m4); housesMesh.setColorAt(i,new THREE.Color(0xc9a27a));
+    m4.compose(sph(x,y,h+1.0), quatAt(x,y,yaw), new THREE.Vector3(w+1.6,1.2,d+1.6)); roofs.setMatrixAt(i,m4);
+    const floors=Math.max(1,Math.round(h/7)); const q=quatAt(x,y,yaw); const base=sph(x,y,0.6);
+    for(let f=0;f<floors;f++) for(let side=0;side<4;side++) for(let k=0;k<2;k++){ const local=new THREE.Vector3(); const along=(k-0.5)*(side%2?d:w)*0.45; const yy=3.2+f*7; if(side===0) local.set(along,yy,d/2+0.15); else if(side===1) local.set(w/2+0.15,yy,along); else if(side===2) local.set(along,yy,-d/2-0.15); else local.set(-w/2-0.15,yy,along);
+      const pos=base.clone().add(local.applyQuaternion(q)); const rot=q.clone().multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0), side*Math.PI/2)); winPos.push({pos,rot}); windowSlots.push(i); } }
+  housesMesh.instanceMatrix.needsUpdate=true; world.add(housesMesh); roofs.instanceMatrix.needsUpdate=true; world.add(roofs);
+  windowsMesh=new THREE.InstancedMesh(new THREE.PlaneGeometry(2.6,2.2), new THREE.MeshBasicMaterial({color:0xffffff, side:THREE.DoubleSide}), winPos.length);
+  winPos.forEach((wp,i)=>{ m4.compose(wp.pos, wp.rot, new THREE.Vector3(1,1,1)); windowsMesh.setMatrixAt(i,m4); windowsMesh.setColorAt(i,new THREE.Color(0x333844)); }); world.add(windowsMesh);
   // benches along the row streets
   { const list=[]; for(let s=0;s<ns;s++) for(let k=0;k<=c.house_rows;k++){ const r=c.house_radius_min-30+k*c.house_ring_step+6; for(let m=0;m<4;m++){ const a=s*60+9+m*13; list.push([a,r]); } }
     benchMesh=new THREE.InstancedMesh(new THREE.BoxGeometry(6,1.6,2), new THREE.MeshStandardMaterial({color:0x8a6a3a}), list.length);
@@ -1422,8 +1489,8 @@ function build(){
     const npts=tpts.map(p=>p.clone().addScaledVector(p.clone().normalize(),-3)); cableTowerCurves=[]; for(let i=0;i<npts.length-1;i++) cableTowerCurves.push(catenary(npts[i],npts[i+1],6)); cableTowerCurves.push(...trunkPts.map(p=>p.clone().addScaledVector(p.clone().normalize(),-3)).map((p,i,arr)=> i<arr.length-1? catenary(p,arr[i+1],6):null).filter(Boolean)); cableTowerCurves.push(flat3([[-WR-40,8],[-HR+10,8]],21)); hub.cableTowerLayer=new LineLayer(cableTowerCurves,0x4fd1c5);
     solarCurves=[flat3([[c.solar_pos[0]+70,c.solar_pos[1]+30],[rx+40,-60]],1.2)]; hub.solarLayer=new LineLayer(solarCurves,0xf2c14e); }
   // ---- water: main pipe on the ground from the plant along the trunk road to the pump station, sector mains along boundary streets, branches along row streets ----
-  waterMainPts=flat3([[c.water_plant_pos[0]-10,c.water_plant_pos[1]-40],[rx+40,-10],[-WR-40,-10],[-HR+30,-10],[-60,-40]],1.6); pipes.main=tube(waterMainPts,2.2,0x3a78c8);
-  waterSectorPts=[]; pipes.sectors=[]; for(let s=0;s<ns;s++){ const a=s*60-1.4; const pts=flat3([polar(a,HR-30), polar(a,R-20)],1.2); waterSectorPts.push(pts); pipes.sectors.push(tube(pts,1.6,0x3a78c8)); for(let k=0;k<=c.house_rows;k++){ const r=c.house_radius_min-30+k*c.house_ring_step-3; tube(flat3(arcPts(a,s*60+57,r,16),0.9),0.7,0x2f5f9e); } }
+  waterMainPts=flat3([[c.water_plant_pos[0]-10,c.water_plant_pos[1]-40],[rx+40,-10],[-WR-40,-10],[-HR+30,-10],[-60,-40]],1.6); pipes.main=flowTube(waterMainPts,2.6,polyLen(waterMainPts));
+  waterSectorPts=[]; pipes.sectors=[]; for(let s=0;s<ns;s++){ const a=s*60-1.4; const pts=flat3([polar(a,HR-30), polar(a,R-20)],1.2); waterSectorPts.push(pts); pipes.sectors.push(flowTube(pts,1.9,polyLen(pts))); for(let k=0;k<=c.house_rows;k++){ const r=c.house_radius_min-30+k*c.house_ring_step-3; tube(flat3(arcPts(a,s*60+57,r,16),0.9),0.7,0x2f5f9e); } }
   // ---- hub: substation with transformers and a fenced yard, ups, comms, ops, pump station and tank ----
   { const yard=localGroup(0,-70,0,0); const fence=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(70,6,44)), new THREE.LineBasicMaterial({color:0x9aa3b5})); fence.position.y=3; yard.add(fence);
     for(let i=0;i<3;i++){ const tr=new THREE.Mesh(new THREE.BoxGeometry(12,10,9), new THREE.MeshStandardMaterial({color:0x6a6d78})); tr.position.set(-22+i*22,5,0); yard.add(tr); for(let j=0;j<3;j++){ const b=new THREE.Mesh(new THREE.CylinderGeometry(0.6,0.6,6,6), new THREE.MeshStandardMaterial({color:0xdddddd})); b.position.set(-22+i*22-3+j*3,13,0); yard.add(b); } }
@@ -1432,7 +1499,7 @@ function build(){
     hub.comms=clickable(box(88,10,22,14,18,0x4a4f5c,0x4fd1c5),'comms','comms'); const mast=cyl(88,10,1.2,44,0x9aa3b5); const dish=new THREE.Mesh(new THREE.ConeGeometry(4,3,12,1,true), new THREE.MeshStandardMaterial({color:0xdddddd, side:THREE.DoubleSide})); dish.position.copy(sph(88,10,40)); dish.quaternion.copy(quatAt(88,10)); dish.rotateX(-1.2); world.add(dish); addLabel('comms node', 88, 10, 52, '#4fd1c5', 'near', true).userData.role='comms';
     hub.ops=clickable(box(0,80,44,16,26,0x666a78,0xc9cfdb),'ops','ops'); addLabel('operations center', 0, 80, 26, '#c9cfdb', 'near');
     hub.pump=clickable(box(-40,-40,18,9,14,0x2a4a6a,0x5aa9ff),'pump','pump'); hub.tank=clickable(cyl(-70,-45,16,26,0x2a4a6a),'tank','tank'); addLabel('pump station', -40, -40, 20, '#5aa9ff', 'near', true).userData.role='pump'; addLabel('water tank', -70, -45, 38, '#5aa9ff', 'near', true).userData.role='tank';
-    pipes.hub=tube(flat3([[-60,-40],[-40,-40],[-70,-45]],2),2,0x3a78c8); for(let s=0;s<ns;s++){ const a=s*60-1.4; tube(flat3([[-70,-45],polar(a,HR-30)],1.4),1.4,0x3a78c8); }
+    pipes.hub=flowTube(flat3([[-60,-40],[-40,-40],[-70,-45]],2),2.2,40); pipes.manifold=[]; for(let s=0;s<ns;s++){ const a=s*60-1.4; const pts=flat3([[-70,-45],polar(a,HR-30)],1.4); pipes.manifold.push(flowTube(pts,1.6,polyLen(pts))); }
     // water level inside the tank
     hub.tankLevel=new THREE.Mesh(new THREE.CylinderGeometry(16.5,16.5,1,18), new THREE.MeshBasicMaterial({color:0x5aa9ff, transparent:true, opacity:.8})); hub.tankLevel.quaternion.copy(quatAt(-70,-45)); world.add(hub.tankLevel); }
   // ---- reactor complex ----
@@ -1469,9 +1536,27 @@ function build(){
   for(const [name,[col,l]] of Object.entries(rc)){ const g=new THREE.Group(); const body=new THREE.Mesh(new THREE.BoxGeometry(14,5,8), new THREE.MeshStandardMaterial({color:col})); body.position.y=3.5; g.add(body); const cab=new THREE.Mesh(new THREE.BoxGeometry(5,4,7), new THREE.MeshStandardMaterial({color:0x2a2f3a})); cab.position.set(5,8,0); g.add(cab); for(const [wx,wz] of [[-4,4],[4,4],[-4,-4],[4,-4]]){ const wh=new THREE.Mesh(new THREE.CylinderGeometry(2,2,1.5,10), new THREE.MeshStandardMaterial({color:0x222})); wh.rotation.x=Math.PI/2; wh.position.set(wx,2,wz); g.add(wh); }
     const lab=textSprite(l,'#fff',22); lab.position.y=16; lab.scale.multiplyScalar(0.5); g.add(lab); world.add(g); clickable(g,'rover:'+name,'rover',name); rovers[name]={g,lab,from:null,to:null,q:null,t0:0}; }
   for(let s=0;s<ns;s++){ const [x,y]=polar(s*60+30,R+70); addLabel(`Sector ${s+1}`,x,y,8,'#9aa3b5','mid'); }
+  // ---- inner ring props: vehicle bay, med lab, school, containers, greenhouses, tanks ----
+  { const [ga,gr]=c.garage; const [gx,gy]=polar(ga,gr); complex.garage=clickable(box(gx,gy,44,14,30,0x5c6070,0xf2c14e,-ga*Math.PI/180),'garage','garage'); addLabel('vehicle bay', gx, gy, 24, '#f2c14e','near');
+    const [ma,mr]=c.medlab; const [mx,my]=polar(ma,mr); clickable(box(mx,my,36,12,26,0x6a7078,0xe2574d,-ma*Math.PI/180),'medlab','medlab'); addLabel('med lab', mx, my, 22, '#e2574d','near');
+    const [sa,sr]=c.school; const [sx,sy]=polar(sa,sr); clickable(box(sx,sy,40,10,26,0x6a7078,0x5aa9ff,-sa*Math.PI/180),'school','school'); addLabel('school', sx, sy, 20, '#5aa9ff','near');
+    const cont=new THREE.InstancedMesh(new THREE.BoxGeometry(12,5,5), new THREE.MeshStandardMaterial({color:0x9a5a3a, roughness:.7}), 24); let ci=0; for(let k=0;k<12;k++){ const a=128+k*3.2, r=200+(k%2)*8; const [x,y]=polar(a,r); m4.compose(sph(x,y,2.6), quatAt(x,y,-a*Math.PI/180), new THREE.Vector3(1,1,1)); cont.setMatrixAt(ci++,m4); if(k%3===0){ m4.compose(sph(x,y,7.8), quatAt(x,y,-a*Math.PI/180), new THREE.Vector3(1,1,1)); cont.setMatrixAt(ci++,m4); } } cont.count=ci; cont.castShadow=true; world.add(cont); addLabel('storage containers', ...polar(146,205), 16, '#9a5a3a','near');
+    for(let k=0;k<3;k++){ const a=246+k*10; const [x,y]=polar(a,205); const dome=new THREE.Mesh(new THREE.SphereGeometry(11,20,10,0,Math.PI*2,0,Math.PI/2), new THREE.MeshPhysicalMaterial({color:0x9ad0ff, transparent:true, opacity:.35, roughness:.1, metalness:0})); dome.position.copy(sph(x,y,0.8)); dome.quaternion.copy(quatAt(x,y)); world.add(dome); } addLabel('hydroponics', ...polar(256,205), 18, '#9bd36a','near');
+    for(let k=0;k<4;k++){ const a=8+k*9; const [x,y]=polar(a,205); const tk=cyl(x,y,6,16,0xb8bcc4); tk.castShadow=true; } addLabel('oxygen and fuel tanks', ...polar(22,205), 24, '#c9cfdb','near');
+    for(let k=0;k<2;k++){ const [x,y]=polar(ga-4+k*5, gr-18); const v=box(x,y,12,5,7,k?0x9bd36a:0x5aa9ff,null,-ga*Math.PI/180); v.castShadow=true; } }
+  // ---- landing pad east of the city ----
+  { const [lx,ly]=c.landing_pad_pos; cap(90,0.9,0x4a4f5a,6,48); const ring=new THREE.Mesh(new THREE.TorusGeometry(88,1.2,6,64), new THREE.MeshBasicMaterial({color:0xf2c14e})); ring.position.copy(sph(lx,ly,1.6)); ring.quaternion.copy(quatAt(lx,ly)); ring.rotateX(Math.PI/2); world.add(ring);
+    complex.padLights=pointsLayer(12, TEX.glow, 0xffb060, 30, true); setPoints(complex.padLights, Array.from({length:12},(_,k)=>{ const [px,py]=polar(k*30,86); return [lx+px, ly+py]; }), 2);
+    const beacon=cyl(lx+95,ly-95,1.5,50,0xc9cfdb); complex.beacon=new THREE.Sprite(new THREE.SpriteMaterial({map:TEX.red, transparent:true, depthTest:false})); complex.beacon.scale.set(16,16,1); complex.beacon.position.copy(sph(lx+95,ly-95,52)); world.add(complex.beacon);
+    clickable(cap(90,1.0,0x4a4f5a,6,48),'pad','pad'); addLabel('landing field', lx, ly, 30, '#f2c14e','mid'); }
+  // ---- rocks and drifts outside the wall ----
+  { const rocks=new THREE.InstancedMesh(new THREE.DodecahedronGeometry(1,0), new THREE.MeshStandardMaterial({color:0x5a544c, roughness:1}), 500); let seed=7; const rnd=()=>{ seed=(seed*16807)%2147483647; return seed/2147483647; };
+    for(let i=0;i<500;i++){ const a=rnd()*360, r=WR+40+rnd()*900; const [x,y]=polar(a,r); if(Math.abs(y)<40 && x<-WR) { continue; } const s=2+rnd()*9; m4.compose(sph(x,y,s*0.4), quatAt(x,y,rnd()*6.3), new THREE.Vector3(s,s*0.6,s)); rocks.setMatrixAt(i,m4); } rocks.instanceMatrix.needsUpdate=true; rocks.castShadow=true; world.add(rocks);
+    const drifts=new THREE.InstancedMesh(new THREE.SphereGeometry(1,10,6), new THREE.MeshStandardMaterial({color:0xdde3ec, roughness:1}), 80); for(let i=0;i<80;i++){ const a=rnd()*360, r=WR+8+rnd()*30; const [x,y]=polar(a,r); const s=6+rnd()*14; m4.compose(sph(x,y,0.5), quatAt(x,y,-a*Math.PI/180), new THREE.Vector3(s,2.2,s*0.5)); drifts.setMatrixAt(i,m4); } drifts.instanceMatrix.needsUpdate=true; world.add(drifts); }
+  markers.ctrl=(()=>{ const n=300; const g=new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(n*3).fill(-99999),3)); g.setAttribute('color', new THREE.Float32BufferAttribute(new Float32Array(n*3),3)); const m=new THREE.Points(g, new THREE.PointsMaterial({map:TEX.dot, vertexColors:true, size:9, transparent:true, depthWrite:false, sizeAttenuation:true})); m.frustumCulled=false; world.add(m); return m; })();
   applyLayers();
 }
-function applyLayers(){ if(!markers.issues) return; markers.issues.visible=layers.issues; markers.nonet.visible=layers.nonet; markers.ups.visible=layers.ups; markers.heater.visible=layers.heater; flowPower.mesh.visible=layers.power; flowWater.mesh.visible=layers.water; packetsPts.visible=layers.packets; markers.packetsRed.visible=layers.packets; markers.people.visible=layers.people; markers.xenos.visible=layers.threats; markers.marines.visible=layers.threats; labelGroup.visible=layers.labels; }
+function applyLayers(){ if(!markers.issues) return; markers.issues.visible=layers.issues; markers.nonet.visible=layers.nonet; markers.ups.visible=layers.ups; markers.heater.visible=layers.heater; flowPower.mesh.visible=layers.power; flowWater.mesh.visible=layers.water; packetsPts.visible=layers.packets; markers.packetsRed.visible=layers.packets; markers.people.visible=layers.people; markers.xenos.visible=layers.threats; markers.marines.visible=layers.threats; labelGroup.visible=layers.labels; if(markers.ctrl) markers.ctrl.visible=layers.ctrl; renderer.shadowMap.enabled=layers.shadows; sun.castShadow=layers.shadows; }
 
 // ---------- per state update ----------
 const tmpC=new THREE.Color();
@@ -1480,8 +1565,12 @@ const packetsSeen=new Map();
 function onState(s, first){
   if(!G) return; if(!housesMesh) build();
   const c=G.cfg, ns=c.sectors, hs=s.houses, P=G.poles.x.length, m4=new THREE.Matrix4();
-  for(let i=0;i<flatHouses.length;i++){ const col=tempColor(hs.t[i]).clone(); if(!hs.power[i]) col.multiplyScalar(0.35).lerp(new THREE.Color(0x203050),0.4); else if(hs.ups[i]) col.lerp(new THREE.Color(0x4fd1c5),0.45); else if(hs.limit[i]>0) col.lerp(new THREE.Color(0xe0b04a),0.3); housesMesh.setColorAt(i,col); }
+  for(let i=0;i<flatHouses.length;i++){ const col=tempColor(hs.t[i]).clone().lerp(new THREE.Color(0xc9a27a),0.55); if(!hs.power[i]) col.multiplyScalar(0.5).lerp(new THREE.Color(0x203050),0.3); else if(hs.ups[i]) col.lerp(new THREE.Color(0x4fd1c5),0.35); else if(hs.limit[i]>0) col.lerp(new THREE.Color(0xe0b04a),0.25); housesMesh.setColorAt(i,col); }
   housesMesh.instanceColor.needsUpdate=true;
+  { const lit=s.env.night||s.env.storm||s.env.daylight<0.08; for(let k=0;k<windowSlots.length;k++){ const i=windowSlots[k]; let col; if(!hs.power[i]) col=0x141821; else if(!lit) col=0x5a6a80; else if(hs.heater[i]) col=0xffc978; else col=0xd8c9a0; if(hs.power[i]&&lit&&((k*7+i)%5===0)) col=0x3a3f4a; windowsMesh.setColorAt(k,new THREE.Color(col)); } windowsMesh.instanceColor.needsUpdate=true; }
+  { const pal=['#f2c14e','#5ec07a','#5aa9ff','#b48ead','#e2574d','#4fd1c5']; const names=[...new Set(s.control.programs.filter(Boolean))]; const a=markers.ctrl.geometry.attributes.position, cc=markers.ctrl.geometry.attributes.color; const counts={};
+    for(let i=0;i<300;i++){ const p=s.control.programs[i]; if(p&&s.control.ext[i]){ const pt=sph(flatHouses[i][0],flatHouses[i][1],HSIZE_H(G.houses.type[i])+6); a.setXYZ(i,pt.x,pt.y,pt.z); const col=new THREE.Color(pal[names.indexOf(p)%pal.length]); cc.setXYZ(i,col.r,col.g,col.b); counts[p]=(counts[p]||0)+1; } else a.setXYZ(i,0,-99999,0); } a.needsUpdate=true; cc.needsUpdate=true;
+    const mq=s.control.mqtt; document.getElementById('ctrl').innerHTML = mq.enabled ? `bus ${mq.connected?'<span class="ok">connected</span>':'<span class="bad">disconnected</span>'} ${mq.broker}, ${mq.controlled}/300 houses under external programs, ${mq.sent} sensor msgs, ${mq.received} actuator msgs<br>`+names.map((n,k)=>`<span style="color:${pal[k%pal.length]}">&#9679;</span> ${n} ${counts[n]||0}`).join(' &nbsp; ') : 'bus off: every house runs the built-in thermostat (start with --mqtt host:port and houses_runtime.py)'; }
   for(let i=0;i<P;i++){ spanLines.setColor(i, s.poles.span[i]?0xf2c14e:0x5a2a2a); netLines.setColor(i, s.poles.net[i]?0x4fd1c5:0x5a2a2a); flowPower.active[i]=!!s.poles.span[i]; }
   for(let i=0;i<ns;i++){ hub.feederLayer.setColor(i, s.power.feeder[i]&&s.sectors[i].online?0xf2c14e:0x5a2a2a); flowPower.active[P+i]=s.power.feeder[i]&&s.sectors[i].online; }
   const reactorUp=s.reactor.available_mw>0; const nT=trunkCurves.length, nTw=towerCurves.length;
@@ -1489,7 +1578,9 @@ function onState(s, first){
   for(let i=0;i<nTw;i++){ hub.towerLayer.setColor(i, s.power.tower_line?0xf2c14e:0x5a2a2a); flowPower.active[P+ns+nT+i]=s.power.tower_line&&s.power.trunk&&reactorUp; }
   hub.solarLayer.setColor(0, s.power.solar_kw>0?0xf2c14e:0x6a5a3a); flowPower.active[P+ns+nT+nTw]=s.power.solar_kw>0;
   for(let i=0;i<cableTowerCurves.length;i++) hub.cableTowerLayer.setColor(i, s.net.uplink?0x4fd1c5:0x5a2a2a);
-  const waterOn=s.water.tank_m3>0&&s.water.pump; flowWater.active[0]=s.water.plant; pipes.main.material.color.setHex(s.water.plant?0x3a78c8:0x3a4050); for(let i=0;i<ns;i++){ flowWater.active[1+i]=waterOn&&s.sectors[i].water_ok>0; pipes.sectors[i].material.color.setHex(waterOn&&s.sectors[i].water_ok>0?0x3a78c8:0x3a4050); }
+  const waterOn=s.water.tank_m3>0&&s.water.pump; flowWater.active[0]=s.water.plant; pipes.main.material.userData.rate=s.water.plant?0.25+s.water.plant_m3_h/12:0; pipes.hub.material.userData.rate=waterOn?0.5+s.water.flow_m3_h/6:0;
+  for(let i=0;i<ns;i++){ const on=waterOn&&s.sectors[i].water_ok>0; flowWater.active[1+i]=on; pipes.sectors[i].material.userData.rate=on?0.4+s.water.sector_m3_h[i]:0; pipes.manifold[i].material.userData.rate=on?0.4+s.water.sector_m3_h[i]:0; }
+  for(const m of pipeMats){ m.color.setHex(m.userData.rate>0?0xffffff:0x556070); }
   // lamps and poles
   setPoints(markers.lampGlow, G.poles.x.map((x,i)=>s.poles.lamp[i]?[x,G.poles.y[i]]:null).filter(Boolean), 21);
   for(let i=0;i<P;i++){ const st=s.poles.state[i]; if(st===prevPole[i]) continue; prevPole[i]=st; const x=G.poles.x[i], y=G.poles.y[i]; const yaw=G.poles.kind[i]===0? -G.poles.angle[i]*Math.PI/180+Math.PI/2 : -G.poles.angle[i]*Math.PI/180; const q=quatAt(x,y,yaw); if(st===2) q.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),1.45)); else if(st===1) q.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),0.3));
@@ -1504,7 +1595,7 @@ function onState(s, first){
   setPoints(markers.marines, s.marines, 6);
   setPoints(markers.ups, s.sectors.map((x,i)=>x.ups==='DISCHARGING'||x.ups==='CHARGING'?polar(i*60+8.5,c.hub_radius+22):null).filter(Boolean).concat(s.power.ups_center==='DISCHARGING'||s.power.ups_center==='CHARGING'?[[-88,10]]:[]), 30);
   // gates: arm rotates with gate_open
-  for(let i=0;i<ns;i++){ const st=s.sectors[i].gate, g=gates[i]; g.armTarget=-Math.PI/2*s.sectors[i].gate_open; const col=st==='LOCKDOWN'?0xe2574d:(st==='OPEN'?0x5ec07a:0x8a93a6); g.arm.material.color.setHex(col); g.lamp.material.color.setHex(col); }
+  for(let i=0;i<ns;i++){ const st=s.sectors[i].gate, g=gates[i]; g.armTarget=-Math.PI/2*s.sectors[i].gate_open; const col=st==='LOCKDOWN'?0xe2574d:(st==='OPEN'?0x5ec07a:0x8a93a6); g.lamp.material.color.setHex(col); }
   // hub and complex live state
   hub.yard.children[0].material.color.setHex(s.power.substation?0x9aa3b5:0xe2574d);
   hub.tankLevel.scale.set(1, Math.max(0.05, 26*s.water.tank_m3/s.water.tank_cap), 1); hub.tankLevel.position.copy(sph(-70,-45, 0.5+13*s.water.tank_m3/s.water.tank_cap));
@@ -1527,13 +1618,14 @@ function onState(s, first){
   for(const r of s.rovers){ const rv=rovers[r.name]; if(!rv) continue; rv.from=rv.to||sph(r.x,r.y,1); rv.to=sph(r.x,r.y,1); rv.q=quatAt(r.x,r.y,-r.heading); rv.t0=now; rv.state=r.state; if(first) rv.g.position.copy(rv.to); retext(rv.lab, `${r.name} ${r.state.toLowerCase().replace(/_/g,' ')}`, '#fff'); }
   for(const p of s.net.packets){ const key=p.t+':'+p.from+':'+p.id; if(!packetsSeen.has(key)) packetsSeen.set(key,{t0:now,p}); }
   const e=s.env; document.getElementById('banner').innerHTML=`<b>${s.time}</b> &nbsp; ${e.t_out} C, wind ${e.wind} m/s${e.storm?' <span class="bad">STORM</span>':''}${e.precip==='snow'?' snow':''}${e.night?' night':' day'}${s.paused?' <span class="warn">PAUSED</span>':''} &nbsp; ${s.speed} min/s`;
-  const fin=document.getElementById('finished'); if(s.finished){ fin.style.display='flex'; fin.textContent='SIMULATION OVER: '+s.finish_reason; }
+  const fin=document.getElementById('finished'); if(s.finished){ fin.style.display='flex'; fin.textContent='COLONY LOST: '+s.finish_reason+'. A new colony is founded in two minutes.'; } else fin.style.display='none';
   const m=s.time.match(/(\d\d):(\d\d)$/); clock.hour=m?(+m[1]+(+m[2])/60):12; clock.speed=s.paused?0:s.speed; clock.at=now; clock.daylight=e.daylight; weather.wind=e.wind; weather.precip=e.precip; weather.storm=e.storm; weather.tornadoOn=e.storm&&e.wind>30;
   planetMat.uniforms.uCold.value=Math.min(1,Math.max(0,(-e.t_out-30)/35)); planetMat.uniforms.uStorm.value=e.storm?1:(e.precip==='snow'?0.4:0);
   if(first){ speedEl.value=speedToSlider(s.speed); speedV.textContent=s.speed+' min/s'; }
 }
 const prevPole=new Array(1000).fill(-1);
-const clock={hour:12, speed:20, at:0, night:false, daylight:0.1};
+const HSIZE_H=t=>[8,14,12,22][t];
+const clock={hour:12, speed:20, at:0, night:false, daylight:0.1}; const sunDir=new THREE.Vector3(1,0.3,0);
 
 // ---------- packets ----------
 function packetPath(pk){ const c=G.cfg, HR=c.hub_radius, WR=c.wall_radius; const path=[];
@@ -1563,7 +1655,7 @@ function pick(ev, click){ const [mx,my]=setMouse(ev); const tip=document.getElem
   const pp=ray.intersectObject(markers.people,false)[0]; if(pp){ const i=pp.index; const per=S.people[i]; if(per){ if(click){ selected={kind:'person', id:i}; renderInfo(); } tipHtml(tip,mx,my,personInfo(per)); return; } }
   tip.style.display='none'; }
 function tipHtml(tip,mx,my,html){ tip.innerHTML=html; tip.style.display='block'; tip.style.left=(mx+14)+'px'; tip.style.top=(my+14)+'px'; }
-function houseInfo(i, short){ const h=S.houses; return `<b>House ${i+1}</b> (Sector ${G.houses.sector[i]+1}, ${G.types[G.houses.type[i]]}, ${G.houses.residents[i]} residents)<br>indoor ${h.t[i]} C, heater ${h.heater[i]?'on':'off'}, draw ${h.draw[i]} W${h.limit[i]?' (limit '+h.limit[i]+' W)':''}<br>power ${h.power[i]?(h.ups[i]?'sector UPS':'grid'):'<span class="bad">none</span>'}, water ${h.water[i]?'ok':'<span class="bad">no</span>'}${h.burst[i]?', <span class="bad">pipes burst</span>':''}<br>internet ${h.net[i]?'online':'<span class="warn">offline</span>'}, aeration sludge ${Math.round(h.sludge[i]*100)}%`+(short?'':`<br>pole ${G.houses.pole[i]}`); }
+function houseInfo(i, short){ const h=S.houses, ctl=S.control; const prog=ctl.ext[i]?`${ctl.programs[i]}: ${ctl.reasons[i]} (target ${ctl.targets[i]} C)`:`built-in thermostat, target ${ctl.targets[i]} C`; return `<b>House ${i+1}</b> (Sector ${G.houses.sector[i]+1}, ${G.types[G.houses.type[i]]}, ${G.houses.residents[i]} residents)<br>indoor ${h.t[i]} C, heater ${h.heater[i]?'on':'off'}, draw ${h.draw[i]} W${h.limit[i]?' (limit '+h.limit[i]+' W)':''}<br>power ${h.power[i]?(h.ups[i]?'sector UPS':'grid'):'<span class="bad">none</span>'}, water ${h.water[i]?'ok':'<span class="bad">no</span>'}${h.burst[i]?', <span class="bad">pipes burst</span>':''}<br>internet ${h.net[i]?'online':'<span class="warn">offline</span>'}, aeration sludge ${Math.round(h.sludge[i]*100)}%<br><span class="dim">program:</span> ${prog}`+(short?'':`<br>pole ${G.houses.pole[i]}`); }
 function personInfo(per){ const st=['at home','walking to the hub','at the hub','walking home'][per[2]]; return `<b>Colonist</b> from house ${per[3]+1}, ${st}`; }
 function rows(pairs){ return '<table>'+pairs.map(([k,v])=>`<tr><td class="dim">${k}</td><td><b>${v}</b></td></tr>`).join('')+'</table>'; }
 function renderInfo(){ const box=document.getElementById('info'); if(!selected||!S){ box.style.display='none'; return; } const s=S, c=G.cfg; let title='', body='';
@@ -1585,6 +1677,10 @@ function renderInfo(){ const box=document.getElementById('info'); if(!selected||
   else if(k==='mine'){ title='Mine'; body=rows([['load',s.power.infra.mine+' kW'],['state',s.power.mine?(s.power.mine_frac<1?'curtailed to '+Math.round(s.power.mine_frac*100)+'%':'working'):'stopped'],['income','3 cr/min to the colony while powered']]); }
   else if(k==='wproc'){ title='Waste processing'; body=rows([['loads received',s.finance.waste_station],['sector bins',s.sectors.map(x=>Math.round(x.waste*100)+'%').join(' ')]]); }
   else if(k==='tower'){ title='Radio tower'; body=rows([['uplink',s.net.uplink?'OK':'LOST'],['line power',s.power.tower_line?'ok':'cut'],['comms node',s.net.comms?'ok':'down'],['traffic',s.net.packets_per_min+' packets/min']]); }
+  else if(k==='garage'){ title='Vehicle bay'; body=rows(s.rovers.map(r=>[r.name, r.state.toLowerCase().replace(/_/g,' ')+(r.job?' ('+r.job+')':'')])); }
+  else if(k==='medlab'){ title='Med lab'; body=rows([['load','part of ops center'],['cold houses',s.sectors.reduce((a,x)=>a+(x.min_t<10?1:0),0)+' sectors with houses below 10 C']]); }
+  else if(k==='school'){ title='School'; body=rows([['residents walking now',s.people.length],['storm',s.env.storm?'closed':'open']]); }
+  else if(k==='pad'){ title='Landing field'; body=rows([['next dropship','end of month'],['uplink',s.net.uplink?'OK':'LOST']]); }
   else if(k==='gate'){ const sec=s.sectors[x]; title=`Gate ${x+1}`; body=rows([['state',sec.gate],['open',Math.round(sec.gate_open*100)+'%'],['hardware',sec.gate_ok?'ok':'DAMAGED'],['lockdown left',sec.lockdown?sec.lockdown+' min':'none']]); }
   else if(k==='rover'){ const r=s.rovers.find(r=>r.name===x); title=x; body=r?rows([['state',r.state.toLowerCase().replace(/_/g,' ')],['load',Math.round(r.load*100)+'%'],['job',r.job||'none'],['position',r.x+', '+r.y]]):''; }
   document.getElementById('infotitle').textContent=title; document.getElementById('infobody').innerHTML=body; box.style.display='block'; }
@@ -1592,14 +1688,14 @@ document.getElementById('infoclose').onclick=()=>{ selected=null; renderInfo(); 
 window.addEventListener('keydown', e=>{ if(e.key==='Escape'){ selected=null; renderInfo(); } });
 
 // ---------- render loop ----------
-function resize(){ const w=mapEl.clientWidth, h=mapEl.clientHeight; renderer.setSize(w,h,false); renderer.domElement.style.width=w+'px'; renderer.domElement.style.height=h+'px'; camera.aspect=w/h; camera.updateProjectionMatrix(); }
+function resize(){ const w=mapEl.clientWidth, h=mapEl.clientHeight; renderer.setSize(w,h,false); composer.setSize(w,h); renderer.domElement.style.width=w+'px'; renderer.domElement.style.height=h+'px'; camera.aspect=w/h; camera.updateProjectionMatrix(); }
 window.addEventListener('resize', resize); resize();
 let t0=performance.now();
 function frame(){ const now=performance.now(); const t=(now-t0)/1000;
   if(flyAnim){ const u=Math.min(1,(now-flyAnim.t0)/1200); const k=u*u*(3-2*u); camera.position.lerpVectors(flyAnim.from, flyAnim.to, k); controls.target.lerpVectors(flyAnim.tfrom, flyAnim.tto, k); if(u>=1) flyAnim=null; }
   controls.update();
-  { const hour=(clock.hour + clock.speed*(now-clock.at)/1000/60)%24; const a=(hour-6)/24*Math.PI*2; sun.position.set(Math.cos(a)*12000, 3200, Math.sin(a)*12000); sunSprite.position.copy(sun.position).multiplyScalar(4);
-    const dl=Math.max(0, Math.sin(Math.PI*(hour-6)/12))*(weather.storm?0.2:1); sun.intensity=0.5+1.0*dl; sun.color.setHSL(0.08, 0.6, 0.55+0.25*dl); planetMat.uniforms.uSun.value.copy(sun.position).normalize(); planetMat.uniforms.uTime.value=t;
+  { const hour=(clock.hour + clock.speed*(now-clock.at)/1000/60)%24; const a=(hour-6)/24*Math.PI*2; sunDir.set(Math.cos(a)*12000, 3200, Math.sin(a)*12000).normalize(); sun.position.copy(sunDir).multiplyScalar(12000); sunSprite.position.copy(sunDir).multiplyScalar(48000);
+    const dl=Math.max(0, Math.sin(Math.PI*(hour-6)/12))*(weather.storm?0.2:1); sun.intensity=0.8+1.6*dl; sun.color.setHSL(0.08, 0.6, 0.55+0.25*dl); planetMat.uniforms.uSun.value.copy(sun.position).normalize(); planetMat.uniforms.uTime.value=t;
     const wantFog = weather.storm ? 0.00055 : (weather.precip==='snow' ? 0.00018 : 0.0); scene.fog.density += (wantFog-scene.fog.density)*0.05; scene.fog.color.setHex(weather.storm?0x3a3e48:0x2a2e38);
     const snowOn = weather.precip==='snow' || weather.storm; const mat=weather.snow.material; mat.opacity += ((snowOn?(weather.storm?0.9:0.6):0)-mat.opacity)*0.05;
     if(mat.opacity>0.02){ const p=weather.snow.geometry.attributes.position; const c=controls.target; const n=c.clone().normalize(); const side=new THREE.Vector3().crossVectors(n,new THREE.Vector3(0,0,1)).normalize(); const fwd=new THREE.Vector3().crossVectors(side,n); const w=weather.wind*(weather.storm?0.9:0.3); const dt=1/60;
@@ -1613,7 +1709,9 @@ function frame(){ const now=performance.now(); const t=(now-t0)/1000;
     complex.rings.forEach((r,k)=>{ const u=((t*0.8)+k/3)%1; r.scale.setScalar(0.5+u*1.5); r.material.opacity=0.6*(1-u); });
     complex.towerLight.material.opacity=0.5+0.5*Math.sin(t*4); if(complex.wheel) complex.wheel.rotation.z+= (S&&S.power.mine)?0.05:0;
     if(complex.steamOn!==undefined){ const c=G.cfg; const pts=[]; for(let k=0;k<12;k++){ const u=((t*0.25)+k/12)%1; for(const [tx,ty] of [[c.reactor_pos[0]-90,c.reactor_pos[1]-60],[c.reactor_pos[0]-90,c.reactor_pos[1]+60]]) pts.push(sph(tx+Math.sin(k*3+t)*6*u, ty+Math.cos(k*2)*6*u, 95+u*60)); } const a=complex.steam.geometry.attributes.position; for(let i=0;i<a.count;i++){ if(complex.steamOn&&i<pts.length) a.setXYZ(i,pts[i].x,pts[i].y,pts[i].z); else a.setXYZ(i,0,-99999,0);} a.needsUpdate=true; } }
-  renderer.render(scene,camera); requestAnimationFrame(frame); }
+  if(housesMesh){ for(const m of pipeMats){ if(m.userData.rate>0) m.userData.tex.offset.x-=m.userData.rate*0.02; } if(complex.beacon) complex.beacon.material.opacity=0.4+0.6*Math.abs(Math.sin(t*2)); }
+  sunTarget.position.copy(controls.target); const sd=camera.position.distanceTo(controls.target); const ext=Math.min(2600, Math.max(400, sd*1.2)); sun.shadow.camera.left=-ext; sun.shadow.camera.right=ext; sun.shadow.camera.top=ext; sun.shadow.camera.bottom=-ext; sun.shadow.camera.updateProjectionMatrix(); sun.position.copy(controls.target).add(sunDir.clone().multiplyScalar(8000));
+  if(layers.bloom) composer.render(); else renderer.render(scene,camera); requestAnimationFrame(frame); }
 
 // ---------- side panel ----------
 function cls(ok, warn){ return ok?'ok':(warn?'warn':'bad'); }
@@ -1644,6 +1742,7 @@ function renderSide(s){
   document.getElementById('nissues').textContent=`(${s.issues_total})`;
   document.getElementById('issues').innerHTML=s.issues.slice().reverse().map(i=>`<div><span class="${i.sev==='critical'?'bad':(i.sev==='warning'?'warn':'dim')}">${i.kind}</span> ${i.target} ${i.sector>0?'S'+i.sector:''} ${i.cause}, ${i.cost} cr (${i.payer}) <span class="dim">${i.status}, ${Math.round(i.age/60)} h</span></div>`).join('')||'<div>none</div>';
   document.getElementById('log').innerHTML=s.events.map(e=>`<div class="${e.level}">${String(e.t).padStart(6)} ${e.text}</div>`).join('');
+  const mp=s.month_progress; if(mp && !s.report){ document.getElementById('report').textContent=`month ${s.finance.month} in progress, day ${mp.day} of ${mp.days} (the report closes on day ${mp.days})\nso far: ${mp.kwh} kWh, ${mp.water_m3} m3 water, repairs billed to owners ${mp.repairs} cr\nsector income ${mp.sector_income.join(' | ')}\nsector expense ${mp.sector_expense.join(' | ')}\ncolony income ${mp.colony_income}, expense ${mp.colony_expense}`; }
   const rp=s.report; if(rp){ document.getElementById('report').textContent=`Month ${rp.month}: owners paid ${Math.round(rp.houses_total)} cr (energy ${Math.round(rp.energy_total)}, water ${Math.round(rp.water_total)}, repairs ${Math.round(rp.repairs_total)}), ${Math.round(rp.kwh_total)} kWh\ncolony: income ${rp.colony_income}, expense ${rp.colony_expense}, budget ${rp.colony_budget}, unpaid ${rp.unpaid}\nsector income ${rp.sector_income.join(' | ')}\nsector expense ${rp.sector_expense.join(' | ')}\nexpense by cause: ${Object.entries(rp.by_cause).map(([k,v])=>k+' '+v).join(', ')}\ntop houses: ${rp.top_houses.map(h=>`#${h.house} (S${h.sector}) ${h.total}`).join(', ')}`; }
 }
 loadGeom().then(()=>{ poll(); frame(); });
@@ -1693,8 +1792,8 @@ def walker_path_point(w: World, i, p):
     """House -> along its row street to the boundary street of the sector -> down the boundary street to the hub."""
     c = w.cfg
     h = w.w_home[i]
-    a0 = float(w.h_angle[h]); r_street = float(w.h_radius[h]) - 30.0
-    ba = float(w.h_sector[h]) * 60.0 + 3.0
+    a0 = float(w.h_angle[h]); r_street = float(w.h_radius[h]) - 30.0 + 5.0      # sidewalk side of the row street
+    ba = float(w.h_sector[h]) * 60.0 + math.degrees(6.0 / r_street)
     arc = abs(a0 - ba) * math.pi / 180.0 * r_street
     rad = r_street - (c["hub_radius"] + 10)
     L = arc + rad
@@ -1813,7 +1912,7 @@ def plan_route(w: World, r: Rover, target):
         a = 180.0
     elif rr < R - 10:                     # inside: along the row street to the boundary street, then out
         s = int(a // 60.0)
-        ba = s * 60.0 + 3.0
+        ba = s * 60.0
         street_r = c["house_radius_min"] - 30 + round((rr - (c["house_radius_min"] - 30)) / c["house_ring_step"]) * c["house_ring_step"]
         street_r = clamp(street_r, c["hub_radius"] + 20, R)
         if abs(rr - street_r) > 5 or rr < c["hub_radius"] + 30:
@@ -1835,18 +1934,25 @@ def plan_route(w: World, r: Rover, target):
     elif kind == "house":
         i = target["i"]
         s = int(w.h_sector[i])
-        ba = s * 60.0 + 3.0
+        ba = s * 60.0
         arc = ring_route(w, a, ba, r)
         if arc is None:
             return False
         street_r = float(w.h_radius[i]) - 30.0
         route += arc + [polar(ba, street_r)] + arc_waypoints(ba, float(w.h_angle[i]), street_r, 4.0)
     elif kind == "hub":
-        ba = target["s"] * 60.0 + 3.0
+        ba = target["s"] * 60.0
         arc = ring_route(w, a, ba, r)
         if arc is None:
             return False
         route += arc + [polar(ba, c["hub_radius"] + 30)]
+    elif kind == "garage":
+        ga, gr = c["garage"]
+        ba = 60.0
+        arc = ring_route(w, a, ba, r)
+        if arc is None:
+            return False
+        route += arc + [polar(ba, gr)] + arc_waypoints(ba, ga, gr, 4.0)
     elif kind == "outside":
         arc = ring_route(w, a, 180.0, r)
         if arc is None:
@@ -1921,10 +2027,27 @@ def roads_step(w: World):
         _repair_rover(w, r)
 
 
+def _go_home(w: World, r: Rover):
+    """Idle rovers park at the vehicle bay instead of standing in the street."""
+    ga, gr = w.cfg["garage"]
+    gx, gy = polar(ga, gr)
+    if math.hypot(r.x - gx, r.y - gy) > 40 and r.wait <= 0:
+        if plan_route(w, r, {"kind": "garage"}):
+            r.state = "TO_GARAGE"
+        else:
+            r.wait = 30
+
+
 def _garbage_rover(w: World, r: Rover):
     c = w.cfg
+    if r.state == "TO_GARAGE":
+        if rover_move(w, r):
+            r.state = "IDLE"
+        return
     if r.state == "IDLE":
         need = np.flatnonzero(w.waste_level >= 0.9)
+        if not len(need):
+            _go_home(w, r)
         if len(need):
             s = int(need[np.argmax(w.waste_level[need])])
             if plan_route(w, r, {"kind": "bin", "s": s}):
@@ -1980,8 +2103,14 @@ def _garbage_rover(w: World, r: Rover):
 
 def _sludge_rover(w: World, r: Rover):
     c = w.cfg
+    if r.state == "TO_GARAGE":
+        if rover_move(w, r):
+            r.state = "IDLE"
+        return
     if r.state == "IDLE":
         full = np.flatnonzero(w.h_sludge >= 0.95)
+        if not len(full) and r.load <= 0.5:
+            _go_home(w, r)
         if len(full) and r.load < 0.99:
             i = int(full[0])
             if plan_route(w, r, {"kind": "house", "i": i}):
@@ -2049,9 +2178,15 @@ def issue_target_spec(w: World, iss: Issue):
 
 
 def _repair_rover(w: World, r: Rover):
+    if r.state == "TO_GARAGE":
+        if rover_move(w, r):
+            r.state = "IDLE"
+        return
     if r.state == "IDLE":
         cands = [i for i in w.issues if i.status == "funded"
                  and ((i.target.split(":")[0] in HOUSE_TARGETS) == (r.kind == "plumber"))]
+        if not cands:
+            _go_home(w, r)
         if cands:
             cands.sort(key=lambda i: (REPAIR_PRIORITY.get(i.target.split(":")[0], 9), i.severity != "critical", i.opened_t))
             iss = cands[0]
@@ -2420,6 +2555,9 @@ def world_tick(w: World):
     if w.finished:
         return
     w.t += 1
+    bridge = getattr(w, "bridge", None)
+    if bridge:
+        bridge.apply()
     env_step(w)
     reactor_step(w)
     power_step(w)
@@ -2433,6 +2571,8 @@ def world_tick(w: World):
         finance_day_close(w)
     if w.t % (w.cfg["ticks_per_day"] * w.cfg["days_per_month"]) == 0:
         finance_month_close(w)
+    if bridge:
+        bridge.publish()
 
 
 def inject(w: World, cmd: str):
@@ -2563,6 +2703,14 @@ def snapshot(w: World):
         "issues": issues, "issues_total": len(w.open_issues()),
         "events": list(w.events)[:40],
         "report": w.last_report,
+        "month_progress": {"day": w.t // c["ticks_per_day"] % c["days_per_month"] + 1, "days": c["days_per_month"],
+                           "sector_income": [round(float(x)) for x in w.month_income], "sector_expense": [round(float(x)) for x in w.month_expense],
+                           "colony_income": round(w.colony_month_income), "colony_expense": round(w.colony_month_expense),
+                           "kwh": round(float(w.h_meter_month.sum())), "water_m3": round(float(w.h_water_month.sum()), 1),
+                           "repairs": round(float(w.h_repairs_month.sum()))},
+        "control": {"programs": w.h_program, "reasons": w.h_reason, "ext": getattr(w, "h_ext", np.zeros(w.N, dtype=bool)).astype(int).tolist(),
+                    "targets": [round(float(x), 1) for x in w.h_target],
+                    "mqtt": (w.bridge.status() if getattr(w, "bridge", None) else {"enabled": False})},
     }
 
 
@@ -2580,9 +2728,109 @@ def house_geometry(w: World):
         "cfg": {k: c[k] for k in ("hub_radius", "house_radius_min", "house_ring_step", "house_rows", "ring_road_radius",
                                   "wall_radius", "spine_radii", "reactor_pos", "solar_pos", "water_plant_pos",
                                   "radwaste_pos", "mine_pos", "waste_station_pos", "tower_junction", "tower_pos",
-                                  "sectors", "water_tank_m3")},
+                                  "landing_pad_pos", "garage", "medlab", "school", "sectors", "water_tank_m3")},
         "types": TYPE_NAMES,
     }
+
+
+# ------------------------------------------------------------------------------------
+# MQTT bridge: the world publishes sensors, the runtime answers with actuators.
+# Topics (prefix hh/): tick, env/weather, env/power, house/{id}/sensors (retained),
+# house/{id}/actuators (from the runtime). The bridge is optional: without --mqtt the
+# built-in thermostat runs every house.
+# ------------------------------------------------------------------------------------
+
+class MqttBridge:
+    def __init__(self, w: World, url: str):
+        import paho.mqtt.client as mqtt
+        host, _, port = url.partition(":")
+        self.w = w
+        self.host, self.port = host or "localhost", int(port or 1883)
+        self.cli = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="hh-world", clean_session=True)
+        self.cli.on_connect = self._on_connect
+        self.cli.on_disconnect = lambda *a: setattr(self, "connected", False)
+        self.cli.on_message = self._on_message
+        self.connected = False
+        self.inbox = deque()
+        self.last_t_in = np.full(w.N, -999.0)
+        self.last_flags = np.full((w.N, 6), -1, dtype=int)
+        self.last_pub_t = np.full(w.N, -999)
+        self.sent = 0
+        self.received = 0
+        self.last_try = 0.0
+        self.cli.connect_async(self.host, self.port, keepalive=30)
+        self.cli.loop_start()
+
+    def _watchdog(self):
+        """paho does not retry a connection that never succeeded; try again every few seconds."""
+        if self.connected or time.time() - self.last_try < 5.0:
+            return
+        self.last_try = time.time()
+        try:
+            self.cli.reconnect()
+        except Exception:
+            pass
+
+    def _on_connect(self, client, userdata, flags, reason, properties=None):
+        self.connected = True
+        client.subscribe("hh/house/+/actuators")
+        self.last_pub_t[:] = -999      # resend everything after a reconnect
+
+    def _on_message(self, client, userdata, msg):
+        try:
+            hid = int(msg.topic.split("/")[2])
+            self.inbox.append((hid, json.loads(msg.payload.decode("utf-8"))))
+        except Exception:
+            pass
+
+    def apply(self):
+        """Called at the start of a tick under the world lock: move received actuators into the arrays."""
+        w = self.w
+        while self.inbox:
+            hid, a = self.inbox.popleft()
+            if not (0 <= hid < w.N):
+                continue
+            self.received += 1
+            w.h_ctrl_t[hid] = w.t
+            w.h_ctrl_heater[hid] = bool(a.get("heater_on", w.h_ctrl_heater[hid]))
+            w.h_ctrl_target[hid] = float(a.get("target_c", w.h_ctrl_target[hid]))
+            w.h_ctrl_valve[hid] = bool(a.get("valve_open", True))
+            w.h_ctrl_appl[hid] = bool(a.get("appliances_on", True))
+            w.h_program[hid] = str(a.get("program", ""))[:24]
+            w.h_reason[hid] = str(a.get("reason", ""))[:60]
+
+    def publish(self):
+        """Called at the end of a tick: env every tick, houses on change or every 10 ticks."""
+        w = self.w
+        if not self.connected:
+            self._watchdog()
+            return
+        c = self.cli
+        hour = w.t // 60 % 24 + (w.t % 60) / 60.0
+        c.publish("hh/tick", json.dumps({"t": w.t, "time": w.time_str()}), qos=0)
+        c.publish("hh/env/weather", json.dumps({"t": w.t, "t_out": round(w.t_out, 1), "wind": round(w.wind, 1), "storm": w.storm_ticks > 0,
+                                                 "precip": w.precip, "hour": round(hour, 2), "night": w.is_night(), "daylight": round(w.daylight, 3)}), qos=0, retain=True)
+        c.publish("hh/env/power", json.dumps({"t": w.t, "available_kw": round(w.available_kw), "demand_kw": round(w.demand_kw), "shedding": w.shedding,
+                                               "reactor_mode": w.r_mode, "tariff_kwh": w.cfg["tariff_kwh"]}), qos=0, retain=True)
+        flags = np.stack([w.h_power_ok, w.h_on_ups, w.h_water_ok, w.h_pipes_ok, w.h_net_online, w.h_limit_w > 0], axis=1).astype(int)
+        changed = (np.abs(w.h_t_in - self.last_t_in) >= 0.2) | (flags != self.last_flags).any(axis=1) | (w.t - self.last_pub_t >= 10)
+        for i in np.flatnonzero(changed):
+            payload = {"t": w.t, "id": int(i), "sector": int(w.h_sector[i]) + 1, "t_in": round(float(w.h_t_in[i]), 1),
+                       "power_ok": bool(w.h_power_ok[i]), "on_ups": bool(w.h_on_ups[i]), "limit_w": int(w.h_limit_w[i]),
+                       "water_ok": bool(w.h_water_ok[i]), "pipes_ok": bool(w.h_pipes_ok[i]), "burst": bool(w.h_burst[i]),
+                       "net_online": bool(w.h_net_online[i]), "sludge": round(float(w.h_sludge[i]), 2), "draw_w": int(w.h_draw_w[i]),
+                       "heater_on": bool(w.h_heater_on[i]), "residents": int(w.h_residents[i])}
+            c.publish(f"hh/house/{int(i)}/sensors", json.dumps(payload), qos=0, retain=True)
+            self.last_t_in[i] = w.h_t_in[i]
+            self.last_flags[i] = flags[i]
+            self.last_pub_t[i] = w.t
+            self.sent += 1
+
+    def status(self):
+        w = self.w
+        fresh = int(((w.t - w.h_ctrl_t) < 15).sum())
+        return {"enabled": True, "connected": self.connected, "broker": f"{self.host}:{self.port}", "controlled": fresh,
+                "sent": self.sent, "received": self.received}
 
 
 # ------------------------------------------------------------------------------------
@@ -2664,10 +2912,25 @@ class Store:
 # Simulation thread and HTTP server
 # ------------------------------------------------------------------------------------
 
+def new_colony(w_holder: dict, reason: str):
+    """Replace the finished world with a fresh one; the old world's events stay in history.db."""
+    old = w_holder["w"]
+    w = World(CFG)
+    w.speed = old.speed
+    w.bridge = getattr(old, "bridge", None)
+    if w.bridge:
+        w.bridge.w = w
+        w.bridge.last_pub_t[:] = -999
+    w.log("INFO", f"New colony founded ({reason}); the previous one ended with: {old.finish_reason or 'operator reset'}")
+    w_holder["w"] = w
+    return w
+
+
 def sim_loop(w_holder: dict, store: Optional[Store]):
     last = time.time()
     acc = 0.0
     last_save = time.time()
+    finished_at = None
     while True:
         w = w_holder["w"]
         now = time.time()
@@ -2675,7 +2938,20 @@ def sim_loop(w_holder: dict, store: Optional[Store]):
         last = now
         n = int(acc)
         acc -= n
-        if w.paused or w.finished:
+        if w.finished:
+            finished_at = finished_at or now
+            if now - finished_at > 120:
+                with w.lock:
+                    if store:
+                        try:
+                            store.record_hour(w)
+                        except Exception:
+                            pass
+                    w = new_colony(w_holder, "automatic restart two minutes after the end")
+                finished_at = None
+            time.sleep(0.05)
+            acc = 0.0
+        elif w.paused:
             time.sleep(0.05)
             acc = 0.0
         else:
@@ -2772,6 +3048,8 @@ def make_handler(w_holder: dict, html: str, geom_json: str, store: Optional[Stor
                         w.paused = False
                 elif cmd == "inject":
                     inject(w, req.get("value", ""))
+                elif cmd == "reset":
+                    w = new_colony(w_holder, "operator")
                 elif cmd == "reactor":
                     v = req.get("value", "")
                     if v == "scram":
@@ -2792,6 +3070,7 @@ def main():
     ap.add_argument("--speed", type=int, default=CFG["default_speed"], help="simulated minutes per real second")
     ap.add_argument("--seed", type=int, default=CFG["seed"])
     ap.add_argument("--headless", type=int, default=0, help="run N ticks without the server, print a summary and exit")
+    ap.add_argument("--mqtt", default=os.environ.get("MQTT_URL", ""), help="broker host:port; enables the sensor/actuator bus for external house controllers")
     args = ap.parse_args()
     CFG["seed"] = args.seed
     store = Store(args.data) if args.data else None
@@ -2800,6 +3079,13 @@ def main():
         w = World(CFG)
     w.speed = args.speed
     admin_token = os.environ.get("ADMIN_TOKEN", "")
+    w.bridge = None
+    if args.mqtt:
+        try:
+            w.bridge = MqttBridge(w, args.mqtt)
+            print(f"mqtt bridge: {args.mqtt}")
+        except ImportError:
+            print("paho-mqtt is not installed, run: pip install paho-mqtt ; continuing without the bus")
     if args.headless:
         t0 = time.time()
         for _ in range(args.headless):
