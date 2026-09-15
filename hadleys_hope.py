@@ -168,7 +168,7 @@ class Rover:
 
 
 class World:
-    SCHEMA = 3      # bump when saved worlds become incompatible; old saves are set aside on load
+    SCHEMA = 4      # bump when array layouts change; new plain attributes are filled in by Store.migrate on load
 
     def __init__(self, cfg=CFG):
         self.schema = self.SCHEMA
@@ -3042,11 +3042,25 @@ class Store:
                 os.replace(self.pkl, old)
                 print(f"saved world has schema {getattr(w, 'schema', 1)}, current is {World.SCHEMA}; moved it to {old}, starting a new world")
                 return None
-            print(f"resumed world from {self.pkl} at {w.time_str()} (tick {w.t})")
+            added = self.migrate(w)
+            print(f"resumed world from {self.pkl} at {w.time_str()} (tick {w.t}){', added fields: ' + ', '.join(added) if added else ''}")
             return w
         except Exception as e:
             print(f"could not load {self.pkl}: {e}; starting a new world")
             return None
+
+    @staticmethod
+    def migrate(w: World):
+        """Fill in attributes a newer version added since the world was saved, using a fresh world's defaults."""
+        fresh = World(w.cfg)
+        added = []
+        for k, v in fresh.__dict__.items():
+            if k not in w.__dict__:
+                setattr(w, k, v)
+                added.append(k)
+        for k, v in fresh.cfg.items():
+            w.cfg.setdefault(k, v)
+        return added
 
     def save_world(self, w: World):
         tmp = self.pkl + ".tmp"
