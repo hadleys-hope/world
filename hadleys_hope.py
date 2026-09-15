@@ -1301,17 +1301,49 @@ window.addEventListener('keyup', e=>{ if(!e.shiftKey) controls.mouseButtons.LEFT
 scene.add(new THREE.AmbientLight(0xa8b0c4, 1.5)); scene.add(new THREE.HemisphereLight(0x778ab0, 0x2a2118, 0.8));
 const sun=new THREE.DirectionalLight(0xffe0b0, 1.3); scene.add(sun); const sunSprite=new THREE.Sprite(new THREE.SpriteMaterial({map:TEX.glow, transparent:true, depthTest:false})); sunSprite.scale.set(1800,1800,1); scene.add(sunSprite);
 { const n=3000, p=new Float32Array(n*3); for(let i=0;i<n;i++){ const v=new THREE.Vector3().randomDirection().multiplyScalar(60000); p.set([v.x,v.y,v.z], i*3); } const g=new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(p,3)); scene.add(new THREE.Points(g, new THREE.PointsMaterial({color:0xbfc8dc, size:2.2, sizeAttenuation:false}))); }
-// planet: layered value noise + craters, used as colour and bump
-{ const W=2048, H=1024, c=document.createElement('canvas'); c.width=W; c.height=H; const x=c.getContext('2d'); const img=x.createImageData(W,H); const d=img.data;
-  const rnd=(i,j)=>{ let n=Math.sin(i*127.1+j*311.7)*43758.5453; return n-Math.floor(n); };
-  const noise=(u,v)=>{ const i=Math.floor(u), j=Math.floor(v), fu=u-i, fv=v-j, su=fu*fu*(3-2*fu), sv=fv*fv*(3-2*fv); const a=rnd(i,j), b=rnd(i+1,j), cc=rnd(i,j+1), dd=rnd(i+1,j+1); return a+(b-a)*su+(cc-a)*sv+(a-b-cc+dd)*su*sv; };
-  for(let y=0;y<H;y++) for(let xx=0;xx<W;xx++){ let v=0, amp=1, f=4; for(let o=0;o<5;o++){ v+=noise(xx/W*f, y/H*f)*amp; amp*=0.5; f*=2.1; } v/=1.94; const k=(y*W+xx)*4; const base=38+v*70; d[k]=base+8*v; d[k+1]=base-2; d[k+2]=base-10; d[k+3]=255; }
-  x.putImageData(img,0,0);
-  for(let i=0;i<900;i++){ const cx=Math.random()*W, cy=Math.random()*H, r=2+Math.random()*Math.random()*40; const g=x.createRadialGradient(cx,cy,r*0.6,cx,cy,r); g.addColorStop(0,'rgba(20,18,16,.55)'); g.addColorStop(0.85,'rgba(120,110,100,.25)'); g.addColorStop(1,'rgba(0,0,0,0)'); x.fillStyle=g; x.beginPath(); x.arc(cx,cy,r,0,7); x.fill(); }
-  const t=new THREE.CanvasTexture(c); t.wrapS=THREE.RepeatWrapping; const bump=new THREE.CanvasTexture(c);
-  scene.add(new THREE.Mesh(new THREE.SphereGeometry(RP,160,120), new THREE.MeshStandardMaterial({map:t, bumpMap:bump, bumpScale:14, roughness:1, metalness:0})));
-  scene.add(new THREE.Mesh(new THREE.SphereGeometry(RP*1.03,64,48), new THREE.MeshBasicMaterial({color:0x4a6a9a, transparent:true, opacity:0.10, side:THREE.BackSide, depthWrite:false}))); }
-
+// planet: procedural terrain baked once on the CPU (value noise, ridges, craters; flat under the colony),
+// shaded in a fragment shader: rock, snow by height and cold, colony glow on the night side, rim light.
+function makePlanet(){
+  const hash=(x,y,z)=>{ const s=Math.sin(x*127.1+y*311.7+z*74.7)*43758.5453; return s-Math.floor(s); };
+  const lerp=(a,b,t)=>a+(b-a)*t;
+  const noise=(x,y,z)=>{ const i=Math.floor(x), j=Math.floor(y), k=Math.floor(z); const fx=x-i, fy=y-j, fz=z-k; const u=fx*fx*(3-2*fx), v=fy*fy*(3-2*fy), w=fz*fz*(3-2*fz);
+    const c=(a,b,c2)=>hash(i+a,j+b,k+c2); return lerp(lerp(lerp(c(0,0,0),c(1,0,0),u),lerp(c(0,1,0),c(1,1,0),u),v), lerp(lerp(c(0,0,1),c(1,0,1),u),lerp(c(0,1,1),c(1,1,1),u),v), w)*2-1; };
+  const fbm=(x,y,z,o=6)=>{ let val=0, amp=0.5, f=1; for(let q=0;q<o;q++){ val+=amp*noise(x*f+1.7*q,y*f+9.2*q,z*f+3.1*q); f*=2.03; amp*=0.5; } return val; };
+  const craters=(x,y,z)=>{ let c=0; for(let q=0;q<2;q++){ const s=2+q*3; const qx=x*s,qy=y*s,qz=z*s; const cx=Math.floor(qx),cy=Math.floor(qy),cz=Math.floor(qz); const h1=hash(cx,cy,cz),h2=hash(cx+7,cy+3,cz+1),h3=hash(cx+2,cy+9,cz+5); const fx=qx-cx-0.5+(h2-0.5)*0.4, fy=qy-cy-0.5+(h3-0.5)*0.4, fz=qz-cz-0.5; const r=0.18+0.22*h1; const d=Math.sqrt(fx*fx+fy*fy+fz*fz); const sm=(e0,e1,t)=>{ t=Math.min(1,Math.max(0,(t-e0)/(e1-e0))); return t*t*(3-2*t); }; const rim=sm(r,r*0.75,d)*(1-sm(r*0.75,r*0.35,d))*0.5; const bowl=sm(r*0.75,0,d); c+=(rim-bowl*0.8)*(0.5+0.5*h1)/(1+q); } return c; };
+  const colonyAngle=1500/RP;
+  const geo=new THREE.SphereGeometry(RP,256,192); const pos=geo.attributes.position; const hArr=new Float32Array(pos.count); const AMP=90;
+  for(let i=0;i<pos.count;i++){ const x=pos.getX(i),y=pos.getY(i),z=pos.getZ(i); const L=Math.hypot(x,y,z); const nx=x/L,ny=y/L,nz=z/L; const ang=Math.acos(Math.max(-1,Math.min(1,ny)));
+    const mask=1-Math.min(1,Math.max(0,(ang-colonyAngle)/(colonyAngle*0.6))); const m=mask*mask*(3-2*mask);
+    const h=(fbm(nx*3,ny*3,nz*3)*1.0 + (1-Math.abs(noise(nx*7,ny*7,nz*7)))*0.35 + craters(nx,ny,nz)*0.5 + fbm(nx*22,ny*22,nz*22,3)*0.08)*(1-m);
+    hArr[i]=h; const r=RP+h*AMP; pos.setXYZ(i,nx*r,ny*r,nz*r); }
+  geo.setAttribute('aH', new THREE.BufferAttribute(hArr,1)); geo.computeVertexNormals();
+  const mat=new THREE.ShaderMaterial({
+    uniforms:{ uSun:{value:new THREE.Vector3(1,0.3,0)}, uColony:{value:new THREE.Vector3(0,1,0)}, uCold:{value:0.6}, uStorm:{value:0.0}, uTime:{value:0}, uColonyAngle:{value:colonyAngle} },
+    vertexShader:`attribute float aH; varying vec3 vN; varying vec3 vP; varying float vH; void main(){ vN=normalize(normalMatrix*normal); vP=(modelMatrix*vec4(position,1.0)).xyz; vH=aH; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+    fragmentShader:`uniform vec3 uSun; uniform vec3 uColony; uniform float uCold; uniform float uStorm; uniform float uTime; uniform float uColonyAngle;
+      varying vec3 vN; varying vec3 vP; varying float vH;
+      float hash(vec3 p){ return fract(sin(dot(p,vec3(127.1,311.7,74.7)))*43758.5453); }
+      float vnoise(vec3 p){ vec3 i=floor(p), f=fract(p); vec3 u=f*f*(3.0-2.0*f); return mix(mix(mix(hash(i),hash(i+vec3(1,0,0)),u.x),mix(hash(i+vec3(0,1,0)),hash(i+vec3(1,1,0)),u.x),u.y),mix(mix(hash(i+vec3(0,0,1)),hash(i+vec3(1,0,1)),u.x),mix(hash(i+vec3(0,1,1)),hash(i+vec3(1,1,1)),u.x),u.y),u.z); }
+      void main(){ vec3 n=normalize(vN); vec3 sn=normalize(vP); vec3 sd=normalize(uSun); float sun=max(dot(n,sd),0.0); float day=smoothstep(-0.15,0.25,dot(sn,sd));
+        float grain=vnoise(sn*140.0)*0.6+vnoise(sn*900.0)*0.4;
+        vec3 rock=mix(vec3(0.15,0.13,0.11), vec3(0.36,0.31,0.26), grain); rock=mix(rock, vec3(0.44,0.38,0.31), smoothstep(0.2,0.6,vH));
+        float snow=smoothstep(0.30-0.35*uCold, 0.60-0.35*uCold, vH+0.25*(grain-0.5)) + 0.35*uStorm; float slope=1.0-max(dot(n,sn),0.0); snow*=1.0-smoothstep(0.25,0.6,slope*3.0); snow=clamp(snow,0.0,1.0);
+        vec3 col=mix(rock, vec3(0.86,0.89,0.94), snow);
+        float ang=acos(clamp(dot(sn,uColony),-1.0,1.0)); float glow=(1.0-smoothstep(uColonyAngle*0.8, uColonyAngle*2.2, ang))*(1.0-day);
+        vec3 lit=col*(0.10+0.95*sun*day+0.07*(1.0-day)) + vec3(1.0,0.75,0.45)*glow*0.35;
+        float rim=pow(1.0-max(dot(n,normalize(cameraPosition-vP)),0.0),3.0); lit+=vec3(0.25,0.35,0.55)*rim*0.5*(0.4+0.6*day);
+        gl_FragColor=vec4(lit,1.0); }`
+  });
+  return new THREE.Mesh(geo, mat);
+}
+const planetMesh=makePlanet(); const planetMat=planetMesh.material; scene.add(planetMesh);
+scene.add(new THREE.Mesh(new THREE.SphereGeometry(RP*1.035,64,48), new THREE.MeshBasicMaterial({color:0x4a6a9a, transparent:true, opacity:0.10, side:THREE.BackSide, depthWrite:false})));
+// weather: snow and blizzard particles around the camera target, fog, a rare tornado
+const weather={snow:null, snowVel:null, tornado:null, wind:8, precip:'none', storm:false, tornadoOn:false};
+{ const n=6000, p=new Float32Array(n*3); for(let i=0;i<n;i++){ p[i*3]=(Math.random()-0.5)*1600; p[i*3+1]=Math.random()*500; p[i*3+2]=(Math.random()-0.5)*1600; }
+  const g=new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(p,3)); weather.snow=new THREE.Points(g, new THREE.PointsMaterial({color:0xe8eef8, size:6, map:TEX.dot, transparent:true, opacity:0.0, depthWrite:false, sizeAttenuation:true})); weather.snow.frustumCulled=false; scene.add(weather.snow);
+  weather.tornado=new THREE.Mesh(new THREE.CylinderGeometry(14,70,260,24,8,true), new THREE.MeshBasicMaterial({color:0x9aa3b5, transparent:true, opacity:0.0, side:THREE.DoubleSide, depthWrite:false})); weather.tornado.visible=false; scene.add(weather.tornado); }
+scene.fog=new THREE.FogExp2(0x2a2e38, 0.0);
 const world=new THREE.Group(); scene.add(world);
 const labelGroup=new THREE.Group(); world.add(labelGroup);
 const lod={near:[], mid:[]};
@@ -1472,7 +1504,7 @@ function onState(s, first){
   setPoints(markers.marines, s.marines, 6);
   setPoints(markers.ups, s.sectors.map((x,i)=>x.ups==='DISCHARGING'||x.ups==='CHARGING'?polar(i*60+8.5,c.hub_radius+22):null).filter(Boolean).concat(s.power.ups_center==='DISCHARGING'||s.power.ups_center==='CHARGING'?[[-88,10]]:[]), 30);
   // gates: arm rotates with gate_open
-  for(let i=0;i<ns;i++){ const st=s.sectors[i].gate, g=gates[i]; g.arm.rotation.x=-Math.PI/2*s.sectors[i].gate_open; const col=st==='LOCKDOWN'?0xe2574d:(st==='OPEN'?0x5ec07a:0x8a93a6); g.arm.material.color.setHex(col); g.lamp.material.color.setHex(col); }
+  for(let i=0;i<ns;i++){ const st=s.sectors[i].gate, g=gates[i]; g.armTarget=-Math.PI/2*s.sectors[i].gate_open; const col=st==='LOCKDOWN'?0xe2574d:(st==='OPEN'?0x5ec07a:0x8a93a6); g.arm.material.color.setHex(col); g.lamp.material.color.setHex(col); }
   // hub and complex live state
   hub.yard.children[0].material.color.setHex(s.power.substation?0x9aa3b5:0xe2574d);
   hub.tankLevel.scale.set(1, Math.max(0.05, 26*s.water.tank_m3/s.water.tank_cap), 1); hub.tankLevel.position.copy(sph(-70,-45, 0.5+13*s.water.tank_m3/s.water.tank_cap));
@@ -1496,10 +1528,12 @@ function onState(s, first){
   for(const p of s.net.packets){ const key=p.t+':'+p.from+':'+p.id; if(!packetsSeen.has(key)) packetsSeen.set(key,{t0:now,p}); }
   const e=s.env; document.getElementById('banner').innerHTML=`<b>${s.time}</b> &nbsp; ${e.t_out} C, wind ${e.wind} m/s${e.storm?' <span class="bad">STORM</span>':''}${e.precip==='snow'?' snow':''}${e.night?' night':' day'}${s.paused?' <span class="warn">PAUSED</span>':''} &nbsp; ${s.speed} min/s`;
   const fin=document.getElementById('finished'); if(s.finished){ fin.style.display='flex'; fin.textContent='SIMULATION OVER: '+s.finish_reason; }
-  const m=s.time.match(/(\d\d):(\d\d)$/); const hour=m?(+m[1]+(+m[2])/60):12; const a=(hour-6)/24*Math.PI*2; sun.position.set(Math.cos(a)*12000, 3200, Math.sin(a)*12000); sunSprite.position.copy(sun.position).multiplyScalar(4); sun.intensity=0.6+0.9*(e.daylight/0.3);
+  const m=s.time.match(/(\d\d):(\d\d)$/); clock.hour=m?(+m[1]+(+m[2])/60):12; clock.speed=s.paused?0:s.speed; clock.at=now; clock.daylight=e.daylight; weather.wind=e.wind; weather.precip=e.precip; weather.storm=e.storm; weather.tornadoOn=e.storm&&e.wind>30;
+  planetMat.uniforms.uCold.value=Math.min(1,Math.max(0,(-e.t_out-30)/35)); planetMat.uniforms.uStorm.value=e.storm?1:(e.precip==='snow'?0.4:0);
   if(first){ speedEl.value=speedToSlider(s.speed); speedV.textContent=s.speed+' min/s'; }
 }
 const prevPole=new Array(1000).fill(-1);
+const clock={hour:12, speed:20, at:0, night:false, daylight:0.1};
 
 // ---------- packets ----------
 function packetPath(pk){ const c=G.cfg, HR=c.hub_radius, WR=c.wall_radius; const path=[];
@@ -1515,7 +1549,7 @@ function updatePackets(){ const now=performance.now(); const good=[], bad=[]; fo
 let flyAnim=null;
 function flyTo(x,y,dist){ const p=sph(x,y), n=p.clone().normalize(); const side=new THREE.Vector3().crossVectors(n, new THREE.Vector3(0,0,1)).normalize(); if(side.lengthSq()<1e-6) side.set(1,0,0); const back=new THREE.Vector3().crossVectors(side,n).normalize(); const pos=p.clone().add(n.multiplyScalar(dist*0.85)).add(back.multiplyScalar(dist*0.55)); flyAnim={from:camera.position.clone(), to:pos, tfrom:controls.target.clone(), tto:p, t0:performance.now()}; }
 document.querySelectorAll('#fly button').forEach(b=>b.onclick=()=>{ const c=G.cfg; const f=b.dataset.f; if(f==='hub') flyTo(0,0,420); else if(f==='gate') flyTo(-c.wall_radius,0,300); else if(f==='reactor') flyTo(c.reactor_pos[0],c.reactor_pos[1],420); else if(f==='solar') flyTo(c.solar_pos[0],c.solar_pos[1],320); else if(f==='tower') flyTo(c.tower_pos[0],c.tower_pos[1],320); else if(f==='mine') flyTo(c.mine_pos[0],c.mine_pos[1],320); else if(f==='city') flyTo(0,0,1900); else flyAnim={from:camera.position.clone(), to:new THREE.Vector3(1200,RP+4200,3800), tfrom:controls.target.clone(), tto:new THREE.Vector3(0,RP,0), t0:performance.now()}; });
-const ray=new THREE.Raycaster(); const mouse=new THREE.Vector2(); ray.params.Points.threshold=8; const planetMesh=scene.children.find(o=>o.geometry&&o.geometry.type==='SphereGeometry');
+const ray=new THREE.Raycaster(); const mouse=new THREE.Vector2(); ray.params.Points.threshold=8; 
 let downAt=null;
 renderer.domElement.addEventListener('pointerdown', ev=>{ downAt=[ev.clientX,ev.clientY]; });
 renderer.domElement.addEventListener('pointerup', ev=>{ if(!downAt) return; const moved=Math.hypot(ev.clientX-downAt[0], ev.clientY-downAt[1]); downAt=null; if(moved>4) return; pick(ev, true); });
@@ -1564,7 +1598,16 @@ let t0=performance.now();
 function frame(){ const now=performance.now(); const t=(now-t0)/1000;
   if(flyAnim){ const u=Math.min(1,(now-flyAnim.t0)/1200); const k=u*u*(3-2*u); camera.position.lerpVectors(flyAnim.from, flyAnim.to, k); controls.target.lerpVectors(flyAnim.tfrom, flyAnim.tto, k); if(u>=1) flyAnim=null; }
   controls.update();
+  { const hour=(clock.hour + clock.speed*(now-clock.at)/1000/60)%24; const a=(hour-6)/24*Math.PI*2; sun.position.set(Math.cos(a)*12000, 3200, Math.sin(a)*12000); sunSprite.position.copy(sun.position).multiplyScalar(4);
+    const dl=Math.max(0, Math.sin(Math.PI*(hour-6)/12))*(weather.storm?0.2:1); sun.intensity=0.5+1.0*dl; sun.color.setHSL(0.08, 0.6, 0.55+0.25*dl); planetMat.uniforms.uSun.value.copy(sun.position).normalize(); planetMat.uniforms.uTime.value=t;
+    const wantFog = weather.storm ? 0.00055 : (weather.precip==='snow' ? 0.00018 : 0.0); scene.fog.density += (wantFog-scene.fog.density)*0.05; scene.fog.color.setHex(weather.storm?0x3a3e48:0x2a2e38);
+    const snowOn = weather.precip==='snow' || weather.storm; const mat=weather.snow.material; mat.opacity += ((snowOn?(weather.storm?0.9:0.6):0)-mat.opacity)*0.05;
+    if(mat.opacity>0.02){ const p=weather.snow.geometry.attributes.position; const c=controls.target; const n=c.clone().normalize(); const side=new THREE.Vector3().crossVectors(n,new THREE.Vector3(0,0,1)).normalize(); const fwd=new THREE.Vector3().crossVectors(side,n); const w=weather.wind*(weather.storm?0.9:0.3); const dt=1/60;
+      for(let i=0;i<p.count;i++){ let x=p.getX(i), y=p.getY(i), z=p.getZ(i); y-=(weather.storm?60:25)*dt*4; x+=w*dt*4; z+=Math.sin(t*3+i)*0.5; if(y<0){ y=500; x=(Math.random()-0.5)*1600; z=(Math.random()-0.5)*1600; } if(x>800) x=-800; p.setXYZ(i,x,y,z); }
+      p.needsUpdate=true; weather.snow.position.copy(c); weather.snow.quaternion.copy(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0), n)); }
+    if(weather.tornadoOn){ const tor=weather.tornado; tor.visible=true; tor.material.opacity+= (0.35-tor.material.opacity)*0.02; const ang=t*0.05; const [tx,ty]=[Math.cos(ang)*1100+300, Math.sin(ang)*900]; tor.position.copy(sph(tx,ty,130)); tor.quaternion.copy(quatAt(tx,ty)); tor.rotateY(t*6); } else if(weather.tornado.visible){ const tor=weather.tornado; tor.material.opacity*=0.97; if(tor.material.opacity<0.01) tor.visible=false; } }
   if(housesMesh){ flowPower.update(t); flowWater.update(t); updatePackets();
+    for(const g of gates){ if(g.armTarget!==undefined) g.arm.rotation.x+=(g.armTarget-g.arm.rotation.x)*0.15; }
     for(const rv of Object.values(rovers)){ if(rv.to){ const u=Math.min(1,(now-rv.t0)/Math.max(200,pollGap)); rv.g.position.lerpVectors(rv.from, rv.to, u); rv.g.quaternion.slerp(rv.q, 0.2); } }
     const d=camera.position.distanceTo(controls.target); lod.near.forEach(s=>s.visible=layers.labels&&d<900); lod.mid.forEach(s=>s.visible=layers.labels&&d<5000);
     complex.rings.forEach((r,k)=>{ const u=((t*0.8)+k/3)%1; r.scale.setScalar(0.5+u*1.5); r.material.opacity=0.6*(1-u); });
