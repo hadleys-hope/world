@@ -3108,7 +3108,18 @@ def main():
     three_base = "/vendor/three/" if vendor_dir else "https://cdn.jsdelivr.net/npm/three@0.160.0/"
     html3d = HTML3D.replace("__THREE_BASE__", three_base)
     handler = make_handler(holder, HTML, json.dumps(house_geometry(w)), store, admin_token, html3d, vendor_dir)
-    srv = ThreadingHTTPServer(("0.0.0.0", args.port), handler)
+    srv = None
+    for attempt in range(30):
+        try:
+            srv = ThreadingHTTPServer(("0.0.0.0", args.port), handler)
+            break
+        except OSError as e:
+            if attempt == 0:
+                print(f"port {args.port} busy ({e}), retrying for 30 s")
+            time.sleep(1)
+    if srv is None:
+        print(f"could not bind port {args.port}; is another instance running? check: ss -tlnp | grep :{args.port}")
+        raise SystemExit(1)
     print(f"Hadley's Hope simulation: open http://localhost:{args.port}  (speed {w.speed} min/s, seed {args.seed})")
     print(f"persistence: {args.data or 'off'}; admin token: {'set' if admin_token else 'not set, everyone can inject'}")
     print("Ctrl+C to stop")
