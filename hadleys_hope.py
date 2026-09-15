@@ -242,6 +242,12 @@ class World:
         self.h_ctrl_appl = np.ones(N, dtype=bool)
         self.h_program = [""] * N
         self.h_reason = [""] * N
+        self.prog_stats = {}        # program name -> {"kwh", "house_ticks", "cold_ticks", "t_sum"} accumulated this month
+        self.h_log = [deque(maxlen=40) for _ in range(N)]      # per-house event log: transitions and decisions
+        self.h_hist = np.full((N, 144), 20.0)                  # indoor temperature every 10 minutes, last 24 h
+        self.h_hist_draw = np.zeros((N, 144))
+        self.h_hist_i = 0
+        self.h_prev = None
 
         # ---- poles: a tree per sector. Spine along the boundary street (angle s*60),
         #      branches along each row street; every pole carries a lamp, a power span
@@ -808,6 +814,16 @@ def power_step(w: World):
     w.available_kw = available
     w.demand_kw = demand
     w.deficit_kw = deficit
+    # statistics by house program (external programs by name, the rest as "thermostat")
+    names = [p if (p and ext_i) else "thermostat" for p, ext_i in zip(w.h_program, getattr(w, "h_ext", np.zeros(w.N, dtype=bool)))]
+    for name in set(names):
+        idx = np.fromiter((k for k, n in enumerate(names) if n == name), dtype=int)
+        st = w.prog_stats.setdefault(name, {"kwh": 0.0, "house_ticks": 0, "cold_ticks": 0, "t_sum": 0.0, "cost": 0.0})
+        st["kwh"] += float(kwh[idx].sum())
+        st["house_ticks"] += int(len(idx))
+        st["cold_ticks"] += int((w.h_t_in[idx] < 16.0).sum())
+        st["t_sum"] += float(w.h_t_in[idx].sum())
+        st["cost"] += float(kwh[idx].sum()) * c["tariff_kwh"]
     w.infra_loads_kw = {k: round(v, 1) for k, v in infra.items()}
     lamps_by_sector = np.bincount(w.p_sector, weights=w.p_lamp_on.astype(float), minlength=S)
     w.sector_dark = (lamps_by_sector < 6) & np.array([w.is_night()] * S)
@@ -885,6 +901,7 @@ HTML = r"""<!doctype html>
   .row { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
   button { background:#232835; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:4px 8px; cursor:pointer; font-size:12px; }
   button:hover { background:#2d3444; } button.on { border-color:var(--blue); color:var(--blue); }
+  a.tab { color:var(--text); text-decoration:none; padding:4px 10px; border:1px solid var(--line); border-radius:6px; background:#1c212c; font-size:12px; } a.tab.on { border-color:var(--blue); color:var(--blue); } a.tab:hover { background:#2d3444; }
   .kpi { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
   .card { background:#1f2430; border:1px solid var(--line); border-radius:8px; padding:6px 8px; }
   .card .v { font-size:17px; font-weight:600; } .card .l { color:var(--dim); font-size:11px; }
@@ -916,6 +933,7 @@ HTML = r"""<!doctype html>
   <div id="tip" style="position:absolute;display:none;background:rgba(23,26,33,.95);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:11px;pointer-events:none"></div>
 </div>
 <div id="side">
+  <div class="row" style="margin-bottom:8px"><a href="/" class="tab">3D planet</a><a href="/flat" class="tab on">flat map</a><a href="/bus" class="tab">bus and programs</a><a href="/house" class="tab">house</a><a href="/graph" class="tab">system graph</a></div>
   <h1>Hadley's Hope, LV-426</h1>
   <div class="row"><span id="time" style="font-weight:600;min-width:120px"></span>
     <button id="pause">Pause</button>
@@ -1160,6 +1178,7 @@ HTML3D = r"""<!doctype html>
   .row { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
   button { background:#232835; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:4px 8px; cursor:pointer; font-size:12px; }
   button:hover { background:#2d3444; } button.on { border-color:var(--blue); color:var(--blue); }
+  a.tab { color:var(--text); text-decoration:none; padding:4px 10px; border:1px solid var(--line); border-radius:6px; background:#1c212c; font-size:12px; } a.tab.on { border-color:var(--blue); color:var(--blue); } a.tab:hover { background:#2d3444; }
   label.chk { display:inline-flex; align-items:center; gap:4px; background:#1c212c; border:1px solid var(--line); border-radius:6px; padding:3px 7px; font-size:11.5px; cursor:pointer; }
   input[type=range] { width:190px; } input[type=text] { background:#0b0e13; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:4px 6px; font-size:12px; width:150px; }
   .kpi { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
@@ -1171,7 +1190,7 @@ HTML3D = r"""<!doctype html>
   #log { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11px; max-height:220px; overflow-y:auto; background:#0b0e13; border:1px solid var(--line); border-radius:6px; padding:6px; }
   #log div { padding:1px 0; } .ALARM { color:var(--bad); } .WARN { color:var(--warn); } .INFO { color:var(--dim); }
   #banner { position:absolute; left:10px; top:10px; background:rgba(18,21,28,.88); border:1px solid var(--line); border-radius:8px; padding:6px 10px; font-size:13px; pointer-events:none; }
-  #hint { position:absolute; left:10px; bottom:10px; background:rgba(18,21,28,.88); border:1px solid var(--line); border-radius:8px; padding:6px 10px; font-size:11px; color:var(--dim); pointer-events:none; }
+  #hint { position:absolute; left:10px; bottom:10px; background:rgba(18,21,28,.88); border:1px solid var(--line); border-radius:8px; padding:6px 10px; font-size:11px; color:var(--dim); pointer-events:none; } #hint a { pointer-events:auto; }
   #tip { position:absolute; display:none; background:rgba(18,21,28,.95); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font-size:11px; pointer-events:none; max-width:260px; }
   #info { position:absolute; right:10px; top:10px; display:none; width:300px; background:rgba(18,21,28,.94); border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:12px; }
   #info h3 { margin:0 0 6px; font-size:13px; } #info .close { float:right; cursor:pointer; color:var(--dim); } #info table { font-size:11.5px; } #info td { text-align:left; }
@@ -1186,7 +1205,7 @@ HTML3D = r"""<!doctype html>
 <body>
 <div id="map">
   <div id="banner">connecting...</div>
-  <div id="hint">drag: rotate &nbsp; right-drag / shift-drag / WASD / arrows: move &nbsp; wheel: zoom &nbsp; double-click: centre there &nbsp; click a building, rover or person for live stats &nbsp; flat map: <b>/flat</b></div>
+  <div id="hint">drag: rotate &nbsp; right-drag / shift-drag / WASD / arrows: move &nbsp; wheel: zoom &nbsp; double-click: centre there &nbsp; click a building, rover or person for live stats &nbsp; flat map: <b>/flat</b> &nbsp; bus and house programs: <b><a href="/bus" target="_blank" style="color:#5aa9ff;pointer-events:auto">/bus</a></b></div>
   <div id="tip"></div>
   <div id="info"><span class="close" id="infoclose">close</span><h3 id="infotitle"></h3><div id="infobody"></div></div>
   <div id="alerts"></div>
@@ -1194,6 +1213,7 @@ HTML3D = r"""<!doctype html>
   <div id="finished"></div>
 </div>
 <div id="side">
+  <div class="row" style="margin-bottom:8px"><a href="/" class="tab on">3D planet</a><a href="/flat" class="tab">flat map</a><a href="/bus" class="tab">bus and programs</a><a href="/house" class="tab">house</a><a href="/graph" class="tab">system graph</a></div>
   <h1>Hadley's Hope, LV-426</h1>
   <div class="row"><span id="time" style="font-weight:600;min-width:120px"></span><button id="pause">Pause</button>
     <span class="dim">speed</span><input type="range" id="speed" min="0" max="100" value="45"><span id="speedv" class="dim" style="min-width:64px"></span></div>
@@ -1215,6 +1235,7 @@ HTML3D = r"""<!doctype html>
     <label class="chk"><input type="checkbox" data-l="shadows" checked> shadows</label>
   </div>
   <div id="ctrl" class="dim" style="font-size:11px;margin-top:4px"></div>
+  <div style="margin-top:4px"><a href="/bus" target="_blank">open the bus page: every house, its program, its last decision, program comparison</a></div>
   <h2>Fly to</h2>
   <div class="row" id="fly"><button data-f="hub">hub</button><button data-f="gate">west gate</button><button data-f="reactor">reactor</button><button data-f="solar">solar</button><button data-f="tower">tower</button><button data-f="mine">mine</button><button data-f="city">city</button><button data-f="planet">planet</button></div>
   <h2>Inject</h2>
@@ -1704,7 +1725,7 @@ function personInfo(per){ const st=['at home','walking to the hub','at the hub',
 function rows(pairs){ return '<table>'+pairs.map(([k,v])=>`<tr><td class="dim">${k}</td><td><b>${v}</b></td></tr>`).join('')+'</table>'; }
 function renderInfo(){ const box=document.getElementById('info'); if(!selected||!S){ box.style.display='none'; return; } const s=S, c=G.cfg; let title='', body='';
   const k=selected.kind, x=selected.extra;
-  if(k==='house'){ title=`House ${selected.id+1}`; body=houseInfo(selected.id,false); }
+  if(k==='house'){ title=`House ${selected.id+1}`; body=houseInfo(selected.id,false)+`<div style="margin-top:6px"><a href="/house?id=${selected.id+1}" target="_blank" style="color:#5aa9ff">open the house page: gauges, history, log</a></div>`; }
   else if(k==='person'){ const per=s.people[selected.id]; title='Colonist'; body=per?personInfo(per):'went home'; }
   else if(k==='substation'){ title='Main substation'; body=rows([['available',s.power.available_kw+' kW'],['load',s.power.demand_kw+' kW'],['deficit',s.power.deficit_kw+' kW'],['shedding level',s.power.shedding],['trunk line',s.power.trunk?'ok':'CUT'],['feeders online',s.power.feeder.filter(Boolean).length+'/6'],['solar in',s.power.solar_kw+' kW'],['mine',s.power.infra.mine+' kW'],['road heating',s.power.infra.road_heating+' kW'],['lamps',s.power.infra.lamps+' kW'],['ups charging',s.power.infra.ups_charge+' kW']]); }
   else if(k==='upsc'){ title='UPS center'; body=rows([['state',s.power.ups_center],['charge',s.power.ups_center_kwh+' / 800 kWh'],['feeds','ops center, comms node, pump station']]); }
@@ -1797,6 +1818,240 @@ function renderSide(s){
 loadGeom().then(()=>{ poll(); frame(); });
 </script></body></html>
 """
+
+# ------------------------------------------------------------------------------------
+# Bus page (served at /bus): what goes over MQTT, every house's controller, program comparison.
+# ------------------------------------------------------------------------------------
+
+HTMLBUS = r"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Hadley's Hope: bus</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --text:#d9dde6; --dim:#8a93a6; --ok:#5ec07a; --warn:#e0b04a; --bad:#e2574d; --blue:#5aa9ff; --cyan:#4fd1c5; }
+  * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--text); font:13px/1.35 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; padding:14px 18px; }
+  h1 { font-size:16px; margin:0 0 8px; } h2 { font-size:12px; color:var(--dim); text-transform:uppercase; letter-spacing:.06em; margin:18px 0 8px; }
+  a { color:var(--blue); } .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .grid { display:grid; grid-template-columns:2fr 1fr; gap:16px; } @media (max-width:1100px){ .grid { grid-template-columns:1fr; } }
+  .card { background:#1a1f2a; border:1px solid var(--line); border-radius:8px; padding:8px 10px; }
+  table { width:100%; border-collapse:collapse; font-size:11.5px; } th,td { padding:2px 5px; text-align:right; border-bottom:1px solid var(--line); white-space:nowrap; } th { color:var(--dim); font-weight:500; cursor:pointer; position:sticky; top:0; background:#1a1f2a; } td:first-child, th:first-child { text-align:left; } td.l, th.l { text-align:left; }
+  .ok { color:var(--ok); } .warn { color:var(--warn); } .bad { color:var(--bad); } .dim { color:var(--dim); }
+  #tail { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11px; max-height:420px; overflow-y:auto; background:#0b0e13; border:1px solid var(--line); border-radius:6px; padding:6px; }
+  #tail div { padding:1px 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; } .out { color:#f2c14e; } .in { color:#4fd1c5; }
+  #houses { max-height:560px; overflow:auto; border:1px solid var(--line); border-radius:6px; }
+  a.tab { color:var(--text); text-decoration:none; padding:4px 10px; border:1px solid var(--line); border-radius:6px; background:#1c212c; font-size:12px; } a.tab.on { border-color:var(--blue); color:var(--blue); } a.tab:hover { background:#2d3444; }
+  select, input { background:#0b0e13; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:3px 6px; font-size:12px; }
+  .kpi { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:6px; } .kpi .v { font-size:16px; font-weight:600; } .kpi .l { color:var(--dim); font-size:11px; }
+  .prog { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:4px; }
+</style></head>
+<body>
+<div class="row" style="margin-bottom:8px"><a href="/" class="tab">3D planet</a><a href="/flat" class="tab">flat map</a><a href="/bus" class="tab on">bus and programs</a><a href="/house" class="tab">house</a><a href="/graph" class="tab">system graph</a></div>
+<h1>Hadley's Hope: MQTT bus and house controllers &nbsp; <span id="time" class="dim" style="font-weight:400"></span></h1>
+<div class="kpi" id="kpi"></div>
+<h2>Program comparison, this month</h2>
+<div class="card"><table id="progs"><thead><tr><th class="l">program</th><th>houses</th><th>avg indoor C</th><th>kWh per house per day</th><th>cost cr per house per day</th><th>time below 16 C</th></tr></thead><tbody></tbody></table>
+<div class="dim" style="margin-top:6px">Each house reports its sensors to the bus, its program answers with actuators, the world applies them. Same weather, same grid, same houses, only the program differs. "thermostat" is the built-in fallback for houses without a live controller.</div></div>
+<div class="grid">
+  <div>
+    <h2>Houses <span class="dim" style="text-transform:none;font-weight:400">(click a header to sort)</span></h2>
+    <div class="row" style="margin-bottom:6px"><label>sector <select id="fsec"><option value="">all</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option></select></label>
+      <label>program <select id="fprog"><option value="">all</option></select></label><label>house # <input id="fid" size="5"></label><span id="count" class="dim"></span></div>
+    <div id="houses"><table id="ht"><thead><tr><th>#</th><th>sec</th><th class="l">program</th><th class="l">last decision</th><th>target</th><th>indoor</th><th>heater</th><th>W</th><th>power</th><th>limit W</th><th>water</th><th>net</th><th>appl</th><th>valve</th><th>sensor age</th><th>decision age</th></tr></thead><tbody></tbody></table></div>
+  </div>
+  <div>
+    <h2>Bus tail <span class="dim" style="text-transform:none;font-weight:400">(every 7th house sampled)</span></h2>
+    <div id="tail"></div>
+    <h2>Topics</h2>
+    <div class="card dim" style="font-size:11.5px">
+      <div><b class="out">hh/house/{id}/sensors</b> world to controller, retained, on change or every 10 min: t_in, power_ok, on_ups, limit_w, water_ok, pipes_ok, burst, net_online, sludge, draw_w, heater_on, residents</div>
+      <div><b class="in">hh/house/{id}/actuators</b> controller to world: heater_on, target_c, valve_open, appliances_on, program, reason</div>
+      <div><b class="out">hh/env/weather</b> t_out, wind, storm, precip, hour, night, daylight &nbsp; <b class="out">hh/env/power</b> available_kw, demand_kw, shedding, reactor_mode, tariff_kwh &nbsp; <b class="out">hh/tick</b> t, time</div>
+      <div style="margin-top:6px">Shell: <code>mosquitto_sub -h localhost -t 'hh/#' -v</code></div>
+    </div>
+  </div>
+</div>
+<script>
+let sortCol=0, sortDir=1, D=null; const COLS=16;
+const pal=['#f2c14e','#5ec07a','#5aa9ff','#b48ead','#e2574d','#4fd1c5','#9aa3b5'];
+document.querySelectorAll('#ht th').forEach((th,i)=>th.onclick=()=>{ if(sortCol===i) sortDir=-sortDir; else { sortCol=i; sortDir=1; } render(); });
+['fsec','fprog','fid'].forEach(id=>document.getElementById(id).oninput=render);
+async function poll(){ try{ D=await (await fetch('/bus.json')).json(); render(); } catch(e){ document.getElementById('time').textContent='update failed'; } setTimeout(poll,1000); }
+function render(){ if(!D) return; document.getElementById('time').textContent=D.time+(D.env.storm?' STORM':'')+(D.env.shedding?' shedding L'+D.env.shedding:'');
+  const m=D.mqtt; const names=[...new Set(D.houses.map(h=>h[2]))].sort(); const col=n=>pal[names.indexOf(n)%pal.length];
+  document.getElementById('kpi').innerHTML=[['bus', m.enabled?(m.connected?'<span class="ok">connected</span> '+m.broker:'<span class="bad">disconnected</span>'):'<span class="warn">off</span>'],
+    ['houses under programs', m.enabled?m.controlled+' / 300':'0 / 300'], ['sensor messages', m.enabled?m.sent.toLocaleString()+' ('+m.out_per_s.toFixed(0)+'/s)':'0'], ['actuator messages', m.enabled?m.received.toLocaleString()+' ('+m.in_per_s.toFixed(0)+'/s)':'0'], ['outdoor', D.env.t_out+' C']].map(([l,v])=>`<div class="card"><div class="v">${v}</div><div class="l">${l}</div></div>`).join('');
+  document.querySelector('#progs tbody').innerHTML=D.programs.map(p=>`<tr><td class="l"><span class="prog" style="background:${col(p.program)}"></span>${p.program}</td><td>${p.houses}</td><td class="${p.avg_t>19?'ok':(p.avg_t>15?'warn':'bad')}">${p.avg_t}</td><td>${p.kwh_per_house_day}</td><td>${p.cost_per_house_day}</td><td class="${p.cold_share<1?'ok':'warn'}">${p.cold_share} %</td></tr>`).join('');
+  const sel=document.getElementById('fprog'); const cur=sel.value; if(sel.options.length!==names.length+1){ sel.innerHTML='<option value="">all</option>'+names.map(n=>`<option>${n}</option>`).join(''); sel.value=cur; }
+  const fs=document.getElementById('fsec').value, fp=sel.value, fi=document.getElementById('fid').value.trim();
+  let rows=D.houses.filter(h=>(!fs||String(h[1])===fs)&&(!fp||h[2]===fp)&&(!fi||String(h[0])===fi));
+  rows.sort((a,b)=>{ const x=a[sortCol], y=b[sortCol]; return (typeof x==='number'? x-y : String(x).localeCompare(String(y)))*sortDir; });
+  document.getElementById('count').textContent=rows.length+' houses';
+  const flag=(v,good='ok',bad='bad')=>v?`<span class="${good}">yes</span>`:`<span class="${bad}">no</span>`;
+  document.querySelector('#ht tbody').innerHTML=rows.slice(0,400).map(h=>`<tr><td><a href="/house?id=${h[0]}" target="_blank">${h[0]}</a></td><td>${h[1]}</td><td class="l"><span class="prog" style="background:${col(h[2])}"></span>${h[2]}</td><td class="l dim">${h[3]}</td><td>${h[4]}</td><td class="${h[5]>19?'ok':(h[5]>15?'warn':'bad')}">${h[5]}</td><td>${h[6]?'<span class="warn">on</span>':'off'}</td><td>${h[7]}</td><td>${h[8]?(h[9]?'<span class="warn">ups</span>':'<span class="ok">grid</span>'):'<span class="bad">none</span>'}</td><td>${h[10]||''}</td><td>${flag(h[11])}</td><td>${flag(h[12],'ok','warn')}</td><td>${h[15]?'on':'<span class="warn">off</span>'}</td><td>${h[16]?'open':'<span class="warn">closed</span>'}</td><td class="dim">${h[13]<0?'':h[13]+' min'}</td><td class="dim">${h[14]<0?'':h[14]+' min'}</td></tr>`).join('');
+  document.getElementById('tail').innerHTML=D.tail.slice().reverse().map(x=>`<div class="${x.dir}">${x.dir==='out'?'&rarr;':'&larr;'} ${x.topic} <span class="dim">${x.body}</span></div>`).join('')||'<div class="dim">bus off or nothing yet</div>';
+}
+poll();
+</script></body></html>
+"""
+
+# ------------------------------------------------------------------------------------
+# Shared navigation strip, house page (/house?id=N) and the system graph (/graph)
+# ------------------------------------------------------------------------------------
+
+NAV_CSS = r"""
+  nav.hh { display:flex; gap:6px; align-items:center; padding:6px 10px; background:#12151c; border-bottom:1px solid #262b36; font-size:12px; }
+  nav.hh a { color:#d9dde6; text-decoration:none; padding:4px 10px; border:1px solid #262b36; border-radius:6px; background:#1c212c; }
+  nav.hh a.on { border-color:#5aa9ff; color:#5aa9ff; } nav.hh a:hover { background:#2d3444; } nav.hh .t { margin-left:auto; color:#8a93a6; }
+"""
+NAV_HTML = r"""<nav class="hh"><a href="/" id="nav-3d">3D planet</a><a href="/flat" id="nav-flat">flat map</a><a href="/bus" id="nav-bus">bus and programs</a><a href="/house" id="nav-house">house</a><a href="/graph" id="nav-graph">system graph</a><span class="t" id="navtime"></span></nav>
+<script>(function(){ const p=location.pathname.replace(/\/$/,'')||'/'; const id={'/':'nav-3d','/flat':'nav-flat','/bus':'nav-bus','/house':'nav-house','/graph':'nav-graph'}[p]; if(id) document.getElementById(id).classList.add('on'); })();</script>"""
+
+HTMLHOUSE = r"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Hadley's Hope: house</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --text:#d9dde6; --dim:#8a93a6; --ok:#5ec07a; --warn:#e0b04a; --bad:#e2574d; --blue:#5aa9ff; --cyan:#4fd1c5; }
+  * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--text); font:13px/1.35 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  main { padding:14px 18px; } h1 { font-size:16px; margin:0 0 8px; } h2 { font-size:12px; color:var(--dim); text-transform:uppercase; letter-spacing:.06em; margin:16px 0 8px; }
+  a { color:var(--blue); } .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  .card { background:#1a1f2a; border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
+  .gauges { display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:10px; } .gauge { text-align:center; } .gauge svg { width:100%; max-width:150px; height:150px; } .gauge .v { font-size:16px; font-weight:600; margin-top:4px; } .gauge .l { color:var(--dim); font-size:11px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; } @media (max-width:1000px){ .grid { grid-template-columns:1fr; } }
+  .ok { color:var(--ok); } .warn { color:var(--warn); } .bad { color:var(--bad); } .dim { color:var(--dim); }
+  #log { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11.5px; max-height:300px; overflow-y:auto; background:#0b0e13; border:1px solid var(--line); border-radius:6px; padding:6px; } #log div { padding:2px 0; }
+  input, button { background:#0b0e13; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:4px 8px; font-size:12px; } button { background:#232835; cursor:pointer; }
+  table { width:100%; border-collapse:collapse; font-size:12px; } td { padding:3px 4px; border-bottom:1px solid var(--line); } td:first-child { color:var(--dim); width:45%; }
+  canvas { display:block; }
+  NAVCSS
+</style></head>
+<body>
+NAVHTML
+<main>
+<div class="row"><h1 id="title">House</h1><button id="prev">&larr; prev</button><input id="hid" size="4"><button id="go">open</button><button id="next">next &rarr;</button><span id="sub" class="dim"></span></div>
+<div class="gauges" id="gauges"></div>
+<div class="grid">
+  <div>
+    <h2>Power draw right now</h2><div class="card row"><canvas id="pie" width="180" height="180"></canvas><div id="pielegend"></div></div>
+    <h2>Last 24 hours</h2><div class="card"><div class="dim" style="font-size:11px">indoor temperature, C</div><canvas id="spark" width="600" height="110" style="width:100%"></canvas><div class="dim" style="font-size:11px;margin-top:6px">draw, W</div><canvas id="spark2" width="600" height="70" style="width:100%"></canvas></div>
+    <h2>Facts</h2><div class="card"><table id="facts"></table></div>
+  </div>
+  <div>
+    <h2>Controller</h2><div class="card" id="ctrl"></div>
+    <h2>House log</h2><div id="log"></div>
+  </div>
+</div>
+</main>
+<script>
+const q=new URLSearchParams(location.search); let id=Math.max(1,Math.min(300, +(q.get('id')||1)));
+document.getElementById('hid').value=id; const setId=v=>{ id=Math.max(1,Math.min(300,v)); document.getElementById('hid').value=id; history.replaceState(null,'','/house?id='+id); poll(true); };
+document.getElementById('prev').onclick=()=>setId(id-1); document.getElementById('next').onclick=()=>setId(id+1); document.getElementById('go').onclick=()=>setId(+document.getElementById('hid').value||1); document.getElementById('hid').onkeydown=e=>{ if(e.key==='Enter') setId(+e.target.value||1); };
+let timer=null;
+async function poll(now){ if(timer) clearTimeout(timer); try{ const d=await (await fetch('/house.json?id='+id)).json(); render(d); }catch(e){ document.getElementById('sub').textContent='update failed'; } timer=setTimeout(poll,1000); }
+function thermo(t, target){ const u=Math.max(0,Math.min(1,(t+50)/80)); const y=120-90*u; const ty=120-90*Math.max(0,Math.min(1,(target+50)/80)); const col=t>19?'#5ec07a':(t>10?'#e0b04a':'#e2574d');
+  return `<svg viewBox="0 0 80 150"><rect x="30" y="20" width="20" height="110" rx="10" fill="#0b0e13" stroke="#8a93a6"/><rect x="34" y="${y}" width="12" height="${130-y}" rx="6" fill="${col}"/><circle cx="40" cy="128" r="14" fill="${col}"/><line x1="22" y1="${ty}" x2="58" y2="${ty}" stroke="#5aa9ff" stroke-width="2"/><text x="62" y="${ty+4}" fill="#5aa9ff" font-size="9">${target}</text>${[-40,-20,0,20].map(v=>`<text x="10" y="${124-90*(v+50)/80}" fill="#8a93a6" font-size="8">${v}</text>`).join('')}</svg>`; }
+function tank(frac, ok){ const h=90*Math.max(0,Math.min(1,frac)); const col=ok?'#5aa9ff':'#e2574d'; return `<svg viewBox="0 0 120 150"><rect x="20" y="25" width="80" height="100" rx="8" fill="#0b0e13" stroke="#8a93a6"/><rect x="24" y="${121-h}" width="72" height="${h}" rx="6" fill="${col}" opacity=".8"/><path d="M60 8 v14" stroke="${col}" stroke-width="6"/><rect x="40" y="128" width="40" height="8" fill="#5a6070"/>${ok?'':'<text x="60" y="80" fill="#fff" font-size="12" text-anchor="middle">NO WATER</text>'}</svg>`; }
+function bolt(ok, ups, limit, upsFrac){ const col=!ok?'#e2574d':(ups?'#4fd1c5':'#f2c14e'); return `<svg viewBox="0 0 120 150"><circle cx="60" cy="70" r="46" fill="#0b0e13" stroke="${col}" stroke-width="3"/><path d="M68 28 L44 76 H62 L52 112 L82 60 H64 Z" fill="${col}"/>${ups?`<rect x="20" y="126" width="80" height="10" rx="3" fill="#0b0e13" stroke="#8a93a6"/><rect x="22" y="128" width="${76*upsFrac}" height="6" rx="2" fill="#4fd1c5"/>`:''}${limit?`<text x="60" y="145" fill="#e0b04a" font-size="10" text-anchor="middle">limit ${limit} W</text>`:''}</svg>`; }
+function wifi(ok, cab){ const col=ok?'#4fd1c5':'#e2574d'; return `<svg viewBox="0 0 120 150">${[46,34,22].map((r,k)=>`<path d="M${60-r} 90 A${r} ${r} 0 0 1 ${60+r} 90" fill="none" stroke="${k<(ok?3:1)?col:'#2a2f3a'}" stroke-width="6" stroke-linecap="round"/>`).join('')}<circle cx="60" cy="100" r="6" fill="${col}"/>${ok?'':`<line x1="30" y1="40" x2="90" y2="115" stroke="#e2574d" stroke-width="5"/>`}<text x="60" y="140" fill="#8a93a6" font-size="10" text-anchor="middle">${cab?'cabinet up':'cabinet down'}</text></svg>`; }
+function sludge(frac, ok){ const h=90*Math.max(0,Math.min(1,frac)); const col=frac>0.9?'#e2574d':(frac>0.7?'#e0b04a':'#9bd36a'); return `<svg viewBox="0 0 120 150"><rect x="30" y="25" width="60" height="100" rx="30" fill="#0b0e13" stroke="#8a93a6"/><rect x="34" y="${121-h}" width="52" height="${h}" rx="20" fill="${col}" opacity=".85"/><circle cx="60" cy="30" r="6" fill="${ok?'#5ec07a':'#e2574d'}"/><text x="60" y="145" fill="#8a93a6" font-size="10" text-anchor="middle">${ok?'aeration on':'aeration broken'}</text></svg>`; }
+function render(d){ document.getElementById('title').textContent=`House ${d.id}, sector ${d.sector}, ${d.type}, ${d.residents} residents`; document.getElementById('sub').textContent=d.time+(d.shedding?' (grid shedding L'+d.shedding+')':''); document.getElementById('navtime').textContent=d.time;
+  document.getElementById('gauges').innerHTML=[
+    ['indoor', thermo(d.t_in, d.target), d.t_in+' C', 'outside '+d.t_out+' C, target '+d.target],
+    ['power', bolt(d.power_ok, d.on_ups, d.limit_w, d.ups_kwh/d.ups_cap), d.power_ok?(d.on_ups?'sector UPS':'grid')+' '+d.draw_w+' W':'no power', d.on_ups?'UPS '+d.ups_kwh+' / '+d.ups_cap+' kWh':(d.limit_w?'limited by the grid':'heater '+(d.heater_on?'on':'off'))],
+    ['water', tank(d.tank_m3/d.tank_cap, d.water_ok), d.water_ok?'flowing':'none', 'city tank '+d.tank_m3+' m3'+(d.burst?', pipes burst':(!d.pipes_ok?', pipes frozen':''))+(d.valve_open?'':', valve closed')],
+    ['network', wifi(d.net_online, d.cabinet), d.net_online?'online':'offline', d.terminal_ok?'terminal ok':'terminal broken'],
+    ['sewage', sludge(d.sludge, d.aeration_ok), Math.round(d.sludge*100)+'% sludge', d.sludge>0.9?'hauler requested':'ok'],
+  ].map(([l,svg,v,s])=>`<div class="card gauge">${svg}<div class="v">${v}</div><div class="l">${l}: ${s}</div></div>`).join('');
+  // pie of the draw
+  const c=document.getElementById('pie').getContext('2d'); c.clearRect(0,0,180,180); const parts=[['heater',d.split.heater,'#ff7a30'],['appliances',d.split.appliances,'#f2c14e'],['aeration',d.split.aeration,'#9bd36a'],['fridge',d.split.fridge,'#5aa9ff']]; const tot=parts.reduce((a,p)=>a+p[1],0)||1; let a0=-Math.PI/2;
+  for(const [n,v,col] of parts){ const a1=a0+2*Math.PI*v/tot; c.beginPath(); c.moveTo(90,90); c.arc(90,90,80,a0,a1); c.closePath(); c.fillStyle=col; c.fill(); a0=a1; } c.beginPath(); c.arc(90,90,48,0,7); c.fillStyle='#1a1f2a'; c.fill(); c.fillStyle='#d9dde6'; c.font='600 15px sans-serif'; c.textAlign='center'; c.fillText(d.draw_w+' W',90,95);
+  document.getElementById('pielegend').innerHTML=parts.map(([n,v,col])=>`<div><span style="display:inline-block;width:10px;height:10px;background:${col};border-radius:2px;margin-right:6px"></span>${n} <b>${v} W</b> <span class="dim">${Math.round(v/tot*100)}%</span></div>`).join('')+`<div class="dim" style="margin-top:6px">this month ${d.kwh_month} kWh, bill so far ${d.bill_month} cr</div>`;
+  spark('spark', d.hist_t, '#5ec07a', -50, 30, d.target); spark('spark2', d.hist_w, '#f2c14e', 0, Math.max(1000, Math.max(...d.hist_w)), null);
+  document.getElementById('facts').innerHTML=[['program',d.program],['pole',d.pole+(d.pole_online?' (energised)':' (dead)')],['water this month',d.water_month_m3+' m3'],['energy total',d.kwh_total+' kWh'],['appliances',d.appliances_on?'on':'switched off by the program'],['open issues',d.issues.length?d.issues.map(i=>i.kind+' ('+i.status+', '+i.cost+' cr)').join(', '):'none']].map(([k,v])=>`<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+  document.getElementById('ctrl').innerHTML=`<div><b>${d.program}</b>${d.ctrl_age>=0?` <span class="dim">decided ${d.ctrl_age} min ago</span>`:''}</div><div>${d.reason}</div><div class="dim">target ${d.target} C, heater ${d.heater_on?'on':'off'} (${d.heater_w} W rated, ${d.heat_w} W delivered)</div>`;
+  document.getElementById('log').innerHTML=[...d.log.map(e=>`<div><span class="dim">${e.t}</span> ${e.text}</div>`), ...d.events.map(e=>`<div><span class="dim">${e.t}</span> <span class="warn">${e.text}</span></div>`)].join('')||'<div class="dim">nothing yet</div>'; }
+function spark(id, arr, col, lo, hi, ref){ const cv=document.getElementById(id), c=cv.getContext('2d'); const W=cv.width, H=cv.height; c.clearRect(0,0,W,H); c.strokeStyle='#2a2f3a'; c.beginPath(); for(let k=0;k<=4;k++){ const y=H-1-(H-2)*k/4; c.moveTo(0,y); c.lineTo(W,y); } c.stroke();
+  if(ref!==null){ const y=H-1-(H-2)*(ref-lo)/(hi-lo); c.strokeStyle='#5aa9ff'; c.setLineDash([4,4]); c.beginPath(); c.moveTo(0,y); c.lineTo(W,y); c.stroke(); c.setLineDash([]); }
+  c.strokeStyle=col; c.lineWidth=2; c.beginPath(); arr.forEach((v,i)=>{ const x=i/(arr.length-1)*W, y=H-1-(H-2)*Math.max(0,Math.min(1,(v-lo)/(hi-lo))); i?c.lineTo(x,y):c.moveTo(x,y); }); c.stroke();
+  c.fillStyle='#8a93a6'; c.font='10px sans-serif'; c.fillText(lo,2,H-3); c.fillText(hi,2,10); }
+poll();
+</script></body></html>
+""".replace("NAVCSS", NAV_CSS).replace("NAVHTML", NAV_HTML)
+
+HTMLGRAPH = r"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Hadley's Hope: system graph</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --text:#d9dde6; --dim:#8a93a6; }
+  * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--text); font:13px/1.35 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; display:flex; flex-direction:column; height:100vh; overflow:hidden; }
+  #wrap { flex:1; position:relative; } canvas { display:block; width:100%; height:100%; cursor:grab; }
+  #legend { position:absolute; left:10px; top:10px; background:rgba(18,21,28,.9); border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:11.5px; max-width:340px; }
+  #legend label { display:inline-flex; gap:4px; align-items:center; margin-right:8px; } .sw { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:4px; }
+  #tip { position:absolute; display:none; background:rgba(18,21,28,.95); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font-size:11.5px; pointer-events:none; max-width:280px; }
+  NAVCSS
+</style></head>
+<body>
+NAVHTML
+<div id="wrap"><canvas id="c"></canvas>
+<div id="legend"><b>System graph</b> <span class="dim" id="stats"></span><br>
+<span class="sw" style="background:#f2c14e"></span>power <span class="sw" style="background:#4fd1c5"></span>network <span class="sw" style="background:#5aa9ff"></span>water <span class="sw" style="background:#b48ead"></span>control (program)<br>
+<label><input type="checkbox" id="lPoles" checked> poles</label><label><input type="checkbox" id="lCtrl" checked> program links</label><label><input type="checkbox" id="lWater" checked> water</label><label><input type="checkbox" id="lSim" checked> physics</label><br>
+<span class="dim">drag nodes, wheel to zoom, drag background to pan, click a house to open it. Node colour: green fine, amber limited or on UPS, red dead, grey offline. Edge colour: lit when the link carries.</span></div>
+<div id="tip"></div></div>
+<script>
+const cv=document.getElementById('c'), ctx=cv.getContext('2d'); const tip=document.getElementById('tip');
+let G=null, S=null, nodes=[], edges=[], byId={}, view={x:0,y:0,k:1}, drag=null, hover=null, panning=null, simOn=true;
+const opt={poles:true, ctrl:true, water:true};
+['lPoles','lCtrl','lWater','lSim'].forEach(id=>document.getElementById(id).onchange=e=>{ const k=id.slice(1).toLowerCase(); if(k==='sim') simOn=e.target.checked; else { opt[k]=e.target.checked; } });
+function node(id, type, label, x, y, r){ const n={id,type,label,x,y,vx:0,vy:0,r,fixed:false,state:'ok'}; nodes.push(n); byId[id]=n; return n; }
+function edge(a,b,kind){ edges.push({a:byId[a], b:byId[b], kind, on:true}); }
+async function init(){ G=await (await fetch('/geometry')).json(); const c=G.cfg; const sc=0.9; const P=v=>[v[0]*sc, v[1]*sc];
+  node('reactor','plant','reactor', ...P([c.reactor_pos[0],c.reactor_pos[1]]), 16); node('solar','plant','solar field', ...P(c.solar_pos), 9); node('wplant','plant','water plant', ...P(c.water_plant_pos), 10);
+  node('substation','hub','substation', 0, -60, 13); node('ups','hub','UPS center', -70, 10, 9); node('comms','hub','comms node', 70, 10, 10); node('tank','hub','water tank', -50, -40, 9); node('ops','hub','ops center', 0, 70, 9);
+  node('tower','plant','radio mast', ...P(c.tower_pos), 10); node('dish','plant','deep-space dish', c.tower_pos[0]*sc+70, c.tower_pos[1]*sc+10, 10);
+  edge('reactor','substation','power'); edge('solar','substation','power'); edge('wplant','tank','water'); edge('substation','tower','power'); edge('comms','tower','net'); edge('tower','dish','net'); edge('substation','ups','power'); edge('substation','ops','power'); edge('substation','comms','power'); edge('comms','reactor','net');
+  for(let s=0;s<c.sectors;s++){ const a=(s*60+3)*Math.PI/180; const rp=node('rp'+s,'sector',`S${s+1} distribution`, Math.cos(a)*180, Math.sin(a)*180, 8); node('cab'+s,'sector',`S${s+1} cabinet`, Math.cos(a+0.08)*180, Math.sin(a+0.08)*180, 6); node('main'+s,'sector',`S${s+1} water main`, Math.cos(a-0.08)*180, Math.sin(a-0.08)*180, 5);
+    edge('substation','rp'+s,'power'); edge('comms','cab'+s,'net'); edge('tank','main'+s,'water'); }
+  for(let i=0;i<G.poles.x.length;i++){ node('p'+i,'pole','pole '+i, G.poles.x[i]*sc, G.poles.y[i]*sc, 2.5); }
+  for(let i=0;i<G.poles.x.length;i++){ const p=G.poles.parent[i]; if(p<0) edge('rp'+G.poles.sector[i],'p'+i,'power'); else edge('p'+p,'p'+i,'power'); if(p<0) edge('cab'+G.poles.sector[i],'p'+i,'net'); else edge('p'+p,'p'+i,'net'); }
+  for(let i=0;i<G.houses.x.length;i++){ node('h'+i,'house','house '+(i+1), G.houses.x[i]*sc, G.houses.y[i]*sc, 4); edge('p'+G.houses.pole[i],'h'+i,'power'); edge('p'+G.houses.pole[i],'h'+i,'net'); edge('main'+G.houses.sector[i],'h'+i,'water'); }
+  const progs=['comfort','eco','night-setback','storm-ready','dumb','thermostat']; progs.forEach((p,k)=>{ const a=k/progs.length*Math.PI*2; node('prog:'+p,'prog',p, Math.cos(a)*820, Math.sin(a)*820, 12); });
+  view.x=cv.clientWidth/2; view.y=cv.clientHeight/2; view.k=Math.min(cv.clientWidth/2400, cv.clientHeight/1500); poll(); loop(); }
+let ctrlEdges=[];
+async function poll(){ try{ S=await (await fetch('/state')).json(); apply(); }catch(e){} setTimeout(poll,1000); }
+function apply(){ const hs=S.houses, pl=S.poles; document.getElementById('navtime').textContent=S.time;
+  for(let i=0;i<hs.t.length;i++){ const n=byId['h'+i]; n.state=!hs.power[i]?'dead':(hs.ups[i]||hs.limit[i]?'warn':'ok'); n.net=!!hs.net[i]; n.info=`house ${i+1}: ${hs.t[i]} C, ${hs.power[i]?(hs.ups[i]?'UPS':'grid'):'no power'}, ${hs.water[i]?'water':'no water'}, ${hs.net[i]?'online':'offline'}, ${S.control.programs[i]||'thermostat'}`; }
+  for(let i=0;i<pl.state.length;i++){ const n=byId['p'+i]; n.state=pl.state[i]===2?'dead':(pl.span[i]?'ok':'warn'); n.info=`pole ${i}: ${['standing','tilted','fallen'][pl.state[i]]}, span ${pl.span[i]?'live':'dead'}, cable ${pl.net[i]?'ok':'cut'}`; }
+  for(let s=0;s<S.sectors.length;s++){ const x=S.sectors[s]; byId['rp'+s].state=x.online?'ok':'dead'; byId['rp'+s].info=`sector ${s+1}: ${x.demand_kw} kW, ${x.power_ok}/50 powered, UPS ${x.ups}`; byId['cab'+s].state=x.cabinet?'ok':'dead'; byId['cab'+s].info=`cabinet: ${x.net_ok}/50 online`; byId['main'+s].state=x.water_ok>0?'ok':'dead'; byId['main'+s].info=`water main: ${x.water_m3_h} m3/h`; }
+  const r=S.reactor; byId.reactor.state=r.mode==='ONLINE'?'ok':(r.mode==='RUNBACK'?'warn':'dead'); byId.reactor.info=`reactor ${r.mode}, ${r.power_mw} MW, core ${r.core_temp} C`; byId.substation.state=S.power.substation&&S.power.trunk?'ok':'dead'; byId.substation.info=`substation ${S.power.available_kw} kW available, ${S.power.demand_kw} kW load, shedding L${S.power.shedding}`;
+  byId.solar.info=`solar ${S.power.solar_kw} kW`; byId.solar.state=S.power.solar_kw>0?'ok':'warn'; byId.wplant.state=S.water.plant?'ok':'dead'; byId.wplant.info=`water plant ${S.water.plant_m3_h} m3/h`; byId.tank.info=`tank ${S.water.tank_m3} m3`; byId.tank.state=S.water.tank_m3>50?'ok':'warn'; byId.comms.state=S.net.comms?'ok':'dead'; byId.comms.info=`comms ${S.net.houses_online}/300 online, ${S.net.packets_per_min} pkt/min`; byId.tower.state=S.power.tower_line?'ok':'dead'; byId.dish.state=S.net.uplink?'ok':'dead'; byId.dish.info=`uplink ${S.net.uplink?'OK':'LOST'}`; byId.ups.info=`UPS center ${S.power.ups_center_kwh} kWh ${S.power.ups_center}`; byId.ops.info='operations center';
+  for(const e of edges){ if(e.kind==='power'){ if(e.b.type==='pole'){ const i=+e.b.id.slice(1); e.on=!!pl.span[i]; } else if(e.b.type==='house'){ const i=+e.b.id.slice(1); e.on=!!hs.power[i]; } else if(e.b.type==='sector'){ e.on=e.b.state==='ok'; } else e.on=S.power.trunk; }
+    else if(e.kind==='net'){ if(e.b.type==='pole'){ const i=+e.b.id.slice(1); e.on=!!pl.net[i]; } else if(e.b.type==='house'){ const i=+e.b.id.slice(1); e.on=!!hs.net[i]; } else if(e.b.type==='sector'){ e.on=e.b.state==='ok'; } else e.on=S.net.uplink; }
+    else if(e.kind==='water'){ e.on=e.b.type==='house'?!!hs.water[+e.b.id.slice(1)]:e.b.state==='ok'; } }
+  ctrlEdges=[]; for(let i=0;i<hs.t.length;i++){ const p=S.control.ext[i]?S.control.programs[i]:'thermostat'; const pn=byId['prog:'+p]; if(pn) ctrlEdges.push({a:pn, b:byId['h'+i], kind:'ctrl', on:true}); }
+  const counts={}; ctrlEdges.forEach(e=>counts[e.a.label]=(counts[e.a.label]||0)+1); for(const n of nodes) if(n.type==='prog'){ n.info=`${n.label}: ${counts[n.label]||0} houses`; n.state=counts[n.label]?'ok':'off'; }
+  document.getElementById('stats').textContent=`${nodes.length} nodes, ${edges.length+ctrlEdges.length} edges, ${S.time}`; }
+function step(){ if(!simOn) return; const K=0.02; for(const n of nodes){ n.fx=0; n.fy=0; }
+  // repulsion (grid-bucketed), springs along edges, gentle pull to the original layout
+  const cell=60, grid=new Map(); for(const n of nodes){ const k=Math.floor(n.x/cell)+','+Math.floor(n.y/cell); (grid.get(k)||grid.set(k,[]).get(k)).push(n); }
+  for(const n of nodes){ const gx=Math.floor(n.x/cell), gy=Math.floor(n.y/cell); for(let dx=-1;dx<=1;dx++) for(let dy=-1;dy<=1;dy++){ const b=grid.get((gx+dx)+','+(gy+dy)); if(!b) continue; for(const m of b){ if(m===n) continue; let ex=n.x-m.x, ey=n.y-m.y; let d2=ex*ex+ey*ey+1; if(d2>3600) continue; const f=120/d2; n.fx+=ex*f; n.fy+=ey*f; } } }
+  const all=opt.ctrl?edges.concat(ctrlEdges):edges; for(const e of all){ if(!opt.poles&&(e.a.type==='pole'||e.b.type==='pole')) continue; if(!opt.water&&e.kind==='water') continue; const ex=e.b.x-e.a.x, ey=e.b.y-e.a.y, d=Math.hypot(ex,ey)||1; const want=e.kind==='ctrl'?600:(e.kind==='water'?40:28); const f=(d-want)*(e.kind==='ctrl'?0.002:0.02); e.a.fx+=ex/d*f; e.a.fy+=ey/d*f; e.b.fx-=ex/d*f; e.b.fy-=ey/d*f; }
+  for(const n of nodes){ if(n.home===undefined){ n.home=[n.x,n.y]; } n.fx+=(n.home[0]-n.x)*0.004; n.fy+=(n.home[1]-n.y)*0.004; if(n.fixed) continue; n.vx=(n.vx+n.fx*K)*0.85; n.vy=(n.vy+n.fy*K)*0.85; n.x+=n.vx; n.y+=n.vy; } }
+const colors={ok:'#5ec07a', warn:'#e0b04a', dead:'#e2574d', off:'#555'};
+const kindCol={power:'#f2c14e', net:'#4fd1c5', water:'#5aa9ff', ctrl:'#b48ead'};
+function draw(){ const W=cv.clientWidth, H=cv.clientHeight; if(cv.width!==W*devicePixelRatio){ cv.width=W*devicePixelRatio; cv.height=H*devicePixelRatio; } ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0); ctx.clearRect(0,0,W,H); ctx.save(); ctx.translate(view.x,view.y); ctx.scale(view.k,view.k);
+  const all=opt.ctrl?edges.concat(ctrlEdges):edges; ctx.lineWidth=1/view.k; for(const e of all){ if(!opt.poles&&(e.a.type==='pole'||e.b.type==='pole')) continue; if(!opt.water&&e.kind==='water') continue; ctx.strokeStyle=e.on?kindCol[e.kind]:'#3a2a2a'; ctx.globalAlpha=e.kind==='ctrl'?0.18:(e.on?0.75:0.5); ctx.beginPath(); ctx.moveTo(e.a.x,e.a.y); ctx.lineTo(e.b.x,e.b.y); ctx.stroke(); } ctx.globalAlpha=1;
+  for(const n of nodes){ if(!opt.poles&&n.type==='pole') continue; ctx.beginPath(); ctx.arc(n.x,n.y,n.r,0,7); ctx.fillStyle=n.type==='prog'?'#b48ead':(n.type==='house'&&n.net===false?'#6a5a7a':colors[n.state]||'#888'); ctx.fill(); if(n.type!=='pole'&&n.type!=='house'){ ctx.strokeStyle='#d9dde6'; ctx.lineWidth=1.2/view.k; ctx.stroke(); } if(n===hover){ ctx.strokeStyle='#fff'; ctx.lineWidth=2/view.k; ctx.stroke(); }
+    if(n.type!=='pole'&&n.type!=='house'&&view.k>0.25){ ctx.fillStyle='#d9dde6'; ctx.font=`${12/view.k}px sans-serif`; ctx.textAlign='center'; ctx.fillText(n.label, n.x, n.y-n.r-4/view.k); } }
+  ctx.restore(); }
+function loop(){ step(); draw(); requestAnimationFrame(loop); }
+function toWorld(ev){ const r=cv.getBoundingClientRect(); return [ (ev.clientX-r.left-view.x)/view.k, (ev.clientY-r.top-view.y)/view.k ]; }
+function pick(x,y){ let best=null, bd=1e9; for(const n of nodes){ if(!opt.poles&&n.type==='pole') continue; const d=Math.hypot(n.x-x,n.y-y); if(d<Math.max(n.r+3/view.k, 6/view.k)&&d<bd){ bd=d; best=n; } } return best; }
+cv.addEventListener('pointerdown', ev=>{ const [x,y]=toWorld(ev); const n=pick(x,y); if(n){ drag={n, moved:false}; n.fixed=true; } else panning={x:ev.clientX, y:ev.clientY, vx:view.x, vy:view.y}; cv.setPointerCapture(ev.pointerId); });
+cv.addEventListener('pointermove', ev=>{ const [x,y]=toWorld(ev); if(drag){ drag.n.x=x; drag.n.y=y; drag.n.home=[x,y]; drag.moved=true; } else if(panning){ view.x=panning.vx+(ev.clientX-panning.x); view.y=panning.vy+(ev.clientY-panning.y); } else { hover=pick(x,y); if(hover){ const r=cv.getBoundingClientRect(); tip.style.display='block'; tip.style.left=(ev.clientX-r.left+14)+'px'; tip.style.top=(ev.clientY-r.top+14)+'px'; tip.textContent=hover.info||hover.label; } else tip.style.display='none'; } });
+cv.addEventListener('pointerup', ev=>{ if(drag){ const n=drag.n; if(!drag.moved){ if(n.type==='house') window.open('/house?id='+(+n.id.slice(1)+1),'_blank'); } n.fixed=false; drag=null; } panning=null; });
+cv.addEventListener('wheel', ev=>{ ev.preventDefault(); const r=cv.getBoundingClientRect(); const mx=ev.clientX-r.left, my=ev.clientY-r.top; const f=Math.exp(-ev.deltaY*0.0015); view.x=mx-(mx-view.x)*f; view.y=my-(my-view.y)*f; view.k*=f; }, {passive:false});
+init();
+</script></body></html>
+""".replace("NAVCSS", NAV_CSS).replace("NAVHTML", NAV_HTML)
 
 # ------------------------------------------------------------------------------------
 # Internet
@@ -2694,6 +2949,7 @@ def finance_month_close(w: World):
     w.month_expense[:] = 0
     w.colony_month_expense = 0.0
     w.colony_month_income = 0.0
+    w.prog_stats = {}
 
 
 def _expense_by_cause(w: World):
@@ -2707,6 +2963,34 @@ def _expense_by_cause(w: World):
 # ------------------------------------------------------------------------------------
 # Tick
 # ------------------------------------------------------------------------------------
+
+def house_events(w: World):
+    """Log state transitions per house in plain words; sample temperature history every 10 minutes."""
+    cur = {"power": w.h_power_ok.copy(), "ups": w.h_on_ups.copy(), "water": w.h_water_ok.copy(), "net": w.h_net_online.copy(),
+           "pipes": w.h_pipes_ok.copy(), "burst": w.h_burst.copy(), "limit": (w.h_limit_w > 0).copy(), "heater": w.h_heater_on.copy(),
+           "target": w.h_target.copy(), "prog": list(w.h_program), "reason": list(w.h_reason)}
+    prev = w.h_prev
+    if prev is not None:
+        texts = {"power": ("power restored", "power lost"), "ups": ("back on the grid", "running on the sector UPS"),
+                 "water": ("water supply restored", "no water"), "net": ("network link up", "network link lost"),
+                 "pipes": ("pipes thawed or repaired", "pipes frozen"), "burst": ("pipes repaired", "pipes burst"),
+                 "limit": ("power limit lifted", "power limit imposed by the grid")}
+        for key, (up, down) in texts.items():
+            changed = np.flatnonzero(cur[key] != prev[key])
+            for i in changed:
+                w.h_log[i].appendleft((w.t, up if cur[key][i] else down))
+        ext = getattr(w, "h_ext", np.zeros(w.N, dtype=bool))
+        for i in range(w.N):
+            if ext[i] and (cur["reason"][i] != prev["reason"][i] or abs(cur["target"][i] - prev["target"][i]) > 0.1):
+                text = f"{cur['prog'][i]}: {cur['reason'][i]} (target {cur['target'][i]:.1f} C)"
+                if not w.h_log[i] or w.h_log[i][0][1] != text:
+                    w.h_log[i].appendleft((w.t, text))
+    w.h_prev = cur
+    if w.t % 10 == 0:
+        w.h_hist[:, w.h_hist_i] = w.h_t_in
+        w.h_hist_draw[:, w.h_hist_i] = w.h_draw_w
+        w.h_hist_i = (w.h_hist_i + 1) % w.h_hist.shape[1]
+
 
 def world_tick(w: World):
     if w.finished:
@@ -2724,6 +3008,7 @@ def world_tick(w: World):
     incidents_step(w)
     roads_step(w)
     people_step(w)
+    house_events(w)
     if w.t % w.cfg["ticks_per_day"] == 0:
         finance_day_close(w)
     if w.t % (w.cfg["ticks_per_day"] * w.cfg["days_per_month"]) == 0:
@@ -2888,6 +3173,58 @@ def snapshot(w: World):
     }
 
 
+def bus_snapshot(w: World):
+    """Everything the /bus page shows: bus status, message tail, per-house control table, per-program comparison."""
+    c = w.cfg
+    ext = getattr(w, "h_ext", np.zeros(w.N, dtype=bool))
+    bridge = getattr(w, "bridge", None)
+    houses = []
+    for i in range(w.N):
+        houses.append([i + 1, int(w.h_sector[i]) + 1, (w.h_program[i] if ext[i] else "thermostat"), w.h_reason[i] if ext[i] else "",
+                       round(float(w.h_target[i]), 1), round(float(w.h_t_in[i]), 1), int(w.h_heater_on[i]), int(w.h_draw_w[i]),
+                       int(w.h_power_ok[i]), int(w.h_on_ups[i]), int(w.h_limit_w[i]), int(w.h_water_ok[i]), int(w.h_net_online[i]),
+                       int(w.t - bridge.last_pub_t[i]) if bridge else -1, int(w.t - w.h_ctrl_t[i]) if ext[i] else -1,
+                       int(w.h_appliances_on[i]), int(w.h_valve_open[i])])
+    progs = []
+    current = [(p if (p and ext[i]) else "thermostat") for i, p in enumerate(w.h_program)]
+    for name, st in sorted(w.prog_stats.items()):
+        ht = max(1, st["house_ticks"])
+        progs.append({"program": name, "houses": current.count(name),
+                      "avg_t": round(st["t_sum"] / ht, 2), "kwh_per_house_day": round(st["kwh"] / ht * 1440, 2),
+                      "cold_share": round(st["cold_ticks"] / ht * 100, 2), "cost_per_house_day": round(st["cost"] / ht * 1440, 2)})
+    return {"t": w.t, "time": w.time_str(), "mqtt": bridge.status() if bridge else {"enabled": False},
+            "tail": bridge.tail_list() if bridge else [], "houses": houses, "programs": progs,
+            "env": {"t_out": round(w.t_out, 1), "storm": w.storm_ticks > 0, "shedding": w.shedding}}
+
+
+def house_snapshot(w: World, i: int):
+    c = w.cfg
+    ext = getattr(w, "h_ext", np.zeros(w.N, dtype=bool))
+    heater = float(w.h_heat_w[i]); aeration = c["aeration_w"] if w.h_aeration_ok[i] else 0.0
+    draw = float(w.h_draw_w[i]); fridge = 100.0 if w.h_power_ok[i] else 0.0
+    rest = max(0.0, draw - heater - (aeration if w.h_power_ok[i] else 0.0) - fridge)
+    order = [(w.h_hist_i + k) % w.h_hist.shape[1] for k in range(w.h_hist.shape[1])]
+    events = [e for e in list(w.events) if f"House {i + 1}:" in e["text"] or f"house:{i}" in e["text"] or f"house {i + 1}" in e["text"].lower()][:10]
+    return {"id": i + 1, "sector": int(w.h_sector[i]) + 1, "type": TYPE_NAMES[int(w.h_type[i])], "residents": int(w.h_residents[i]),
+            "t_in": round(float(w.h_t_in[i]), 1), "target": round(float(w.h_target[i]), 1), "t_out": round(w.t_out, 1),
+            "heater_on": bool(w.h_heater_on[i]), "heater_w": int(w.h_heater_w[i]), "heat_w": int(heater),
+            "draw_w": int(draw), "split": {"heater": int(heater), "appliances": int(rest), "aeration": int(aeration if w.h_power_ok[i] else 0), "fridge": int(fridge)},
+            "power_ok": bool(w.h_power_ok[i]), "on_ups": bool(w.h_on_ups[i]), "limit_w": int(w.h_limit_w[i]),
+            "ups_kwh": round(float(w.ups_kwh[w.h_sector[i]]), 0), "ups_cap": c["ups_sector_kwh"], "ups_state": w.ups_state[w.h_sector[i]],
+            "water_ok": bool(w.h_water_ok[i]), "pipes_ok": bool(w.h_pipes_ok[i]), "burst": bool(w.h_burst[i]), "valve_open": bool(w.h_valve_open[i]),
+            "water_month_m3": round(float(w.h_water_month[i]), 2), "tank_m3": round(w.water_tank_m3, 0), "tank_cap": c["water_tank_m3"],
+            "net_online": bool(w.h_net_online[i]), "terminal_ok": bool(w.h_terminal_ok[i]), "cabinet": bool(w.cabinet_online[w.h_sector[i]]),
+            "sludge": round(float(w.h_sludge[i]), 2), "aeration_ok": bool(w.h_aeration_ok[i]), "appliances_on": bool(w.h_appliances_on[i]),
+            "kwh_month": round(float(w.h_meter_month[i]), 1), "kwh_total": round(float(w.h_meter_kwh[i]), 1),
+            "bill_month": round(float(w.h_meter_month[i]) * c["tariff_kwh"] + float(w.h_water_month[i]) * c["tariff_water_m3"] + float(w.h_repairs_month[i]), 1),
+            "program": (w.h_program[i] if ext[i] else "thermostat"), "reason": w.h_reason[i] if ext[i] else "built-in thermostat",
+            "ctrl_age": int(w.t - w.h_ctrl_t[i]) if ext[i] else -1, "pole": int(w.h_pole[i]), "pole_online": bool(w.s_online[w.h_pole[i]]),
+            "hist_t": [round(float(w.h_hist[i, k]), 1) for k in order], "hist_w": [int(w.h_hist_draw[i, k]) for k in order],
+            "log": [{"t": t, "text": x} for t, x in list(w.h_log[i])], "events": events,
+            "issues": [{"kind": s.kind, "status": s.status, "cost": s.cost} for s in w.open_issues() if s.target in (f"house:{i}", f"aeration:{i}", f"terminal:{i}")],
+            "time": w.time_str(), "t": w.t, "shedding": w.shedding}
+
+
 def house_geometry(w: World):
     c = w.cfg
     return {
@@ -2932,6 +3269,9 @@ class MqttBridge:
         self.sent = 0
         self.received = 0
         self.last_try = 0.0
+        self.tail = deque(maxlen=150)       # recent messages for the /bus page
+        self.rate_in = deque(maxlen=600)    # (wall time) of received actuators, for messages per second
+        self.rate_out = deque(maxlen=600)
         self.cli.connect_async(self.host, self.port, keepalive=30)
         self.cli.loop_start()
 
@@ -2953,7 +3293,11 @@ class MqttBridge:
     def _on_message(self, client, userdata, msg):
         try:
             hid = int(msg.topic.split("/")[2])
-            self.inbox.append((hid, json.loads(msg.payload.decode("utf-8"))))
+            body = msg.payload.decode("utf-8")
+            self.inbox.append((hid, json.loads(body)))
+            self.rate_in.append(time.time())
+            if hid % 7 == 0:
+                self.tail.append({"dir": "in", "topic": msg.topic, "body": body[:160], "at": time.time()})
         except Exception:
             pass
 
@@ -2994,7 +3338,11 @@ class MqttBridge:
                        "water_ok": bool(w.h_water_ok[i]), "pipes_ok": bool(w.h_pipes_ok[i]), "burst": bool(w.h_burst[i]),
                        "net_online": bool(w.h_net_online[i]), "sludge": round(float(w.h_sludge[i]), 2), "draw_w": int(w.h_draw_w[i]),
                        "heater_on": bool(w.h_heater_on[i]), "residents": int(w.h_residents[i])}
-            c.publish(f"hh/house/{int(i)}/sensors", json.dumps(payload), qos=0, retain=True)
+            body = json.dumps(payload)
+            c.publish(f"hh/house/{int(i)}/sensors", body, qos=0, retain=True)
+            self.rate_out.append(time.time())
+            if i % 7 == 0:
+                self.tail.append({"dir": "out", "topic": f"hh/house/{int(i)}/sensors", "body": body[:160], "at": time.time()})
             self.last_t_in[i] = w.h_t_in[i]
             self.last_flags[i] = flags[i]
             self.last_pub_t[i] = w.t
@@ -3003,8 +3351,14 @@ class MqttBridge:
     def status(self):
         w = self.w
         fresh = int(((w.t - w.h_ctrl_t) < 15).sum())
+        now = time.time()
         return {"enabled": True, "connected": self.connected, "broker": f"{self.host}:{self.port}", "controlled": fresh,
-                "sent": self.sent, "received": self.received}
+                "sent": self.sent, "received": self.received,
+                "out_per_s": sum(1 for t in self.rate_out if now - t < 5) / 5.0, "in_per_s": sum(1 for t in self.rate_in if now - t < 5) / 5.0}
+
+    def tail_list(self):
+        now = time.time()
+        return [{"dir": m["dir"], "topic": m["topic"], "body": m["body"], "age": round(now - m["at"], 1)} for m in list(self.tail)[-60:]]
 
 
 # ------------------------------------------------------------------------------------
@@ -3197,6 +3551,26 @@ def make_handler(w_holder: dict, html: str, geom_json: str, store: Optional[Stor
                 with w.lock:
                     body = json.dumps(snapshot(w)).encode("utf-8")
                 self._send(200, "application/json", body)
+            elif self.path.startswith("/house.json"):
+                w = w_holder["w"]
+                try:
+                    hid = int(clamp(int(self.path.split("id=")[1].split("&")[0]) - 1, 0, w.N - 1))
+                except (IndexError, ValueError):
+                    hid = 0
+                with w.lock:
+                    body = json.dumps(house_snapshot(w, hid)).encode("utf-8")
+                self._send(200, "application/json", body)
+            elif self.path.startswith("/house"):
+                self._send(200, "text/html; charset=utf-8", HTMLHOUSE.encode("utf-8"))
+            elif self.path.startswith("/graph"):
+                self._send(200, "text/html; charset=utf-8", HTMLGRAPH.encode("utf-8"))
+            elif self.path.startswith("/bus.json"):
+                w = w_holder["w"]
+                with w.lock:
+                    body = json.dumps(bus_snapshot(w)).encode("utf-8")
+                self._send(200, "application/json", body)
+            elif self.path.startswith("/bus"):
+                self._send(200, "text/html; charset=utf-8", HTMLBUS.encode("utf-8"))
             elif self.path.startswith("/history"):
                 hours = 720
                 if "hours=" in self.path:
