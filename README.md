@@ -59,10 +59,22 @@ with state in memory, and they end the process after each request.
 
 ## What you see
 
-The page at `/` is a 3D view: the colony wrapped onto a small planet. Drag to rotate, wheel to zoom,
-hover a house for details, click a sector row or a "fly to" button to move the camera. Layer
-checkboxes toggle issues, houses without internet, UPS charging icons, heaters, power and water
-flow, packets, people, xenomorphs and labels. three.js is loaded from jsdelivr; for an offline
+The page at `/` is a 3D view: the colony wrapped onto a small planet. Drag to rotate, right-drag,
+shift-drag, WASD or arrows to move, wheel to zoom, double-click to centre on a point. Every building,
+gate, rover and colonist is clickable and opens a panel with live numbers; hovering a house shows its
+state. "Fly to" buttons and sector rows move the camera. Layer checkboxes toggle issues, houses
+without internet, UPS charging icons, heaters, power and water flow, packets, people, xenomorphs and
+labels. When the server has `ADMIN_TOKEN`, paste it into the token field once (it is remembered by the
+browser) or open `/?admin=TOKEN`.
+
+The city: six sectors of five house rows behind a wall with six gates at the sector boundaries. Streets
+run between the rows and along the boundaries, every street has poles with hanging power and internet
+cables and a street lamp, benches, and people walking to the hub. Water mains lie on the ground along
+the boundary streets with branches along the rows. The hub holds the substation with a transformer yard,
+the UPS center, the comms node, the operations center and the pump station with the tank. West of the
+wall the trunk road with its own pole line leads to the reactor complex (containment, cooling towers,
+turbine hall, switchyard, water plant, radioactive waste storage, mine, waste processing) and the lattice
+radio tower. Rovers drive along the roads and wait at locked gates. three.js is loaded from jsdelivr; for an offline
 setup put a copy of the `three` npm package into `vendor/three/` next to the script
 (`npm pack three@0.160.0`, unpack, rename `package` to `three`) and it is served locally.
 The flat 2D map stays at `/flat` and is lighter for phones.

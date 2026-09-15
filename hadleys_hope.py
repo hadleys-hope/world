@@ -10,9 +10,9 @@ import json
 import math
 import os
 import pickle
+import random
 import signal
 import sqlite3
-import random
 import threading
 import time
 from collections import deque
@@ -32,23 +32,24 @@ CFG = {
     "tick_seconds": 60,
     "ticks_per_day": 1440,
     "days_per_month": 30,
-    # geometry (map units, roughly metres)
-    "hub_radius": 80,
-    "house_radius_min": 150,
-    "house_ring_step": 36,
-    "ring_road_radius": 330,
-    "pole_radius_min": 100,
-    "pole_radius_step": 40,
-    "poles_per_sector": 6,
-    "reactor_pos": (-640, 0),
-    "tower_pos": (-500, -270),
-    "tower_junction": (-500, 0),
-    "solar_pos": (-740, -150),
-    "water_plant_pos": (-640, 110),
-    "radwaste_pos": (-640, 210),
-    "mine_pos": (-640, 310),
-    "waste_station_pos": (-560, 70),
-    "walkers": 40,
+    # geometry (map units, roughly metres). The city is a ring of six sectors inside a wall.
+    "hub_radius": 140,
+    "house_radius_min": 300,        # first row of houses
+    "house_ring_step": 60,          # distance between rows; streets run between rows
+    "house_rows": 5,
+    "ring_road_radius": 640,
+    "wall_radius": 690,
+    "spine_radii": [200, 270, 330, 390, 450, 510, 570, 640],   # poles along each boundary street
+    "arc_pole_angles": [10.0, 20.5, 31.0, 41.5, 52.0],         # poles along each row street, degrees inside the sector
+    "reactor_pos": (-1280, 0),
+    "solar_pos": (-1480, -300),
+    "water_plant_pos": (-1280, 220),
+    "radwaste_pos": (-1280, 420),
+    "mine_pos": (-1280, 620),
+    "waste_station_pos": (-1000, 140),
+    "tower_junction": (-1000, 0),
+    "tower_pos": (-1000, -540),
+    "walkers": 60,
     # environment (LV-426: minus 40..60, permanent dusk, storms)
     "t_mean": -45.0,
     "t_daily_amp": 8.0,
@@ -69,17 +70,17 @@ CFG = {
     # reactor
     "reactor_gross_mw": 6.0, "reactor_self_mw": 0.6, "heat_export_mw": 3.0,
     "ramp_frac_per_min": 0.05, "core_temp_nominal": 780.0, "core_temp_limit": 1200.0,
-    "pump_battery_h": 8.0,
+    "pump_battery_h": 8.0, "reserve_mw": 0.5,
     # grid
     "solar_peak_kw": 200.0,
     "mine_kw": 2000.0, "water_plant_kw": 300.0, "waste_storage_kw": 20.0,
     "ops_center_kw": 40.0, "comms_kw": 20.0, "cabinet_kw": 1.0, "gate_kw": 2.0,
-    "lamps_per_sector": 6, "lamp_kw": 0.8, "road_heating_kw": 300.0,
+    "lamp_kw": 0.25, "road_heating_kw": 300.0,
     "aeration_w": 150.0, "pump_station_kw": 50.0,
     "ups_center_kw": 150.0, "ups_center_kwh": 800.0,
     "ups_sector_kw": 100.0, "ups_sector_kwh": 400.0,
     "ups_charge_kw": 100.0,
-    "limit_level3_w": 2000.0, "limit_level5_w": 1000.0,
+    "limit_level3_w": 2500.0, "limit_level5_w": 1800.0,
     # water
     "water_tank_m3": 500.0, "water_plant_m3_h": 12.0,
     # finance
@@ -92,9 +93,9 @@ CFG = {
     "p_nest_fire": 0.02,           # per tick while a xeno attack near the processor is open
     "p_pump_wear": 0.00002,
     # sewage and waste
-    "sludge_per_resident_per_tick": 1.0 / (1440 * 60),   # station tank full in ~30 days for a family
-    "waste_per_resident_per_tick": 1.0 / (1440 * 6 * 50),   # sector bin full in ~6 days
-    "hauler_speed_deg": 6.0,
+    "sludge_per_resident_per_tick": 1.0 / (1440 * 60),
+    "waste_per_resident_per_tick": 1.0 / (1440 * 6 * 50),
+    "rover_speed": 14.0,           # map units per tick on a good road
     # ui
     "http_port": 8000,
     "default_speed": 20,
@@ -118,6 +119,11 @@ def clamp(x, lo, hi):
     return lo if x < lo else hi if x > hi else x
 
 
+def polar(angle_deg, radius):
+    a = math.radians(angle_deg)
+    return radius * math.cos(a), radius * math.sin(a)
+
+
 # ------------------------------------------------------------------------------------
 # World state
 # ------------------------------------------------------------------------------------
@@ -126,7 +132,7 @@ def clamp(x, lo, hi):
 class Issue:
     id: int
     kind: str
-    target: str          # "span:12", "pole:3", "house:17", "reactor:pump_b", "road:2", ...
+    target: str          # "span:12", "pole:3", "house:17", "reactor:pump_b", "road:2", "gate:4" ...
     sector: int          # -1 for colony objects
     cause: str
     cost: float
@@ -143,21 +149,21 @@ class Issue:
 @dataclass
 class Rover:
     name: str
-    kind: str                       # garbage | sludge | repair
-    angle: float = 90.0             # position on ring road, degrees
-    radius: float = 330.0
+    kind: str                       # garbage | sludge | repair | plumber
+    x: float = 0.0
+    y: float = 0.0
     state: str = "IDLE"
-    target_angle: float = 90.0
-    target_radius: float = 330.0
-    job: Optional[object] = None    # sector index or Issue
+    route: list = field(default_factory=list)   # list of (x, y) waypoints
+    job: Optional[object] = None    # sector index, house index or Issue
     timer: int = 0
     load: float = 0.0
-    speed: float = 6.0
+    speed: float = 14.0
     wait: int = 0
+    heading: float = 0.0
 
 
 class World:
-    SCHEMA = 2      # bump when saved worlds become incompatible; old saves are set aside on load
+    SCHEMA = 3      # bump when saved worlds become incompatible; old saves are set aside on load
 
     def __init__(self, cfg=CFG):
         self.schema = self.SCHEMA
@@ -172,7 +178,7 @@ class World:
         self.events = deque(maxlen=400)
         self.issues: list[Issue] = []
         self.next_issue_id = 1
-        self.packets = []            # recent internet packets for the UI
+        self.packets = []
         self.lock = threading.Lock()
         S = cfg["sectors"]
         H = cfg["houses_per_sector"]
@@ -184,7 +190,7 @@ class World:
         self.h_sector = idx // H
         self.h_ring = (idx % H) // 10
         self.h_slot = idx % 10
-        self.h_angle = self.h_sector * 60.0 + 6.0 + self.h_slot * 5.3
+        self.h_angle = self.h_sector * 60.0 + 7.5 + self.h_slot * 5.2
         self.h_radius = cfg["house_radius_min"] + self.h_ring * cfg["house_ring_step"]
         self.h_x = self.h_radius * np.cos(np.radians(self.h_angle))
         self.h_y = self.h_radius * np.sin(np.radians(self.h_angle))
@@ -202,7 +208,7 @@ class World:
         self.h_target = np.full(N, cfg["comfort_c"])
         self.h_draw_w = np.zeros(N)
         self.h_heat_w = np.zeros(N)
-        self.h_limit_w = np.zeros(N)         # 0 = no limit
+        self.h_limit_w = np.zeros(N)
         self.h_power_ok = np.ones(N, dtype=bool)
         self.h_on_ups = np.zeros(N, dtype=bool)
         self.h_meter_kwh = np.zeros(N)
@@ -212,7 +218,7 @@ class World:
         self.h_water_month = np.zeros(N)
         self.h_water_m3 = np.zeros(N)
         self.h_pipes_ok = np.ones(N, dtype=bool)
-        self.h_frozen = np.zeros(N, dtype=int)   # ticks below zero
+        self.h_frozen = np.zeros(N, dtype=int)
         self.h_burst = np.zeros(N, dtype=bool)
         self.h_water_ok = np.ones(N, dtype=bool)
         self.h_wiring_ok = np.ones(N, dtype=bool)
@@ -222,25 +228,50 @@ class World:
         self.h_net_online = np.ones(N, dtype=bool)
         self.h_valve_open = np.ones(N, dtype=bool)
         self.h_repairs_month = np.zeros(N)
-        self.h_pole = self.h_sector * cfg["poles_per_sector"] + np.minimum(self.h_ring + 1, cfg["poles_per_sector"] - 1)
 
-        # ---- poles and spans ----
-        PPS = cfg["poles_per_sector"]
-        self.P = S * PPS
-        self.p_sector = np.arange(self.P) // PPS
-        self.p_k = np.arange(self.P) % PPS
-        self.p_angle = self.p_sector * 60.0 + 30.0
-        self.p_radius = cfg["pole_radius_min"] + self.p_k * cfg["pole_radius_step"]
-        self.p_x = self.p_radius * np.cos(np.radians(self.p_angle))
-        self.p_y = self.p_radius * np.sin(np.radians(self.p_angle))
-        self.p_state = np.zeros(self.P, dtype=int)   # 0 standing, 1 tilted, 2 fallen
-        self.p_lamp_ok = np.ones(self.P, dtype=bool)
-        self.p_lamp_on = np.ones(self.P, dtype=bool)
-        # span k feeds pole k of the same sector (span 0 goes from the rp to pole 0)
-        self.s_health = np.ones(self.P)
-        self.s_ice = np.zeros(self.P)
-        self.s_online = np.ones(self.P, dtype=bool)
-        self.n_span_ok = np.ones(self.P, dtype=bool)    # internet cable on the same route
+        # ---- poles: a tree per sector. Spine along the boundary street (angle s*60),
+        #      branches along each row street; every pole carries a lamp, a power span
+        #      and an internet cable back to its parent ----
+        spine_r = cfg["spine_radii"]
+        arc_a = cfg["arc_pole_angles"]
+        px, py, ps, pk, parent, kind, prad, pang = [], [], [], [], [], [], [], []
+        self.spine_index = {}       # (sector, radius) -> pole index
+        for s in range(S):
+            base_angle = s * 60.0 + 1.6
+            first = len(px)
+            for j, r in enumerate(spine_r):
+                x, y = polar(base_angle, r)
+                px.append(x); py.append(y); ps.append(s); pk.append(j); parent.append(first + j - 1 if j > 0 else -1)
+                kind.append(0); prad.append(r); pang.append(base_angle)
+                self.spine_index[(s, r)] = first + j
+            for k in range(cfg["house_rows"] + 1):
+                r = cfg["house_radius_min"] - 30 + k * cfg["house_ring_step"]   # row street below row k
+                prev = self.spine_index[(s, r)]
+                for m, a in enumerate(arc_a):
+                    ang = s * 60.0 + a
+                    x, y = polar(ang, r - 6)
+                    px.append(x); py.append(y); ps.append(s); pk.append(k); parent.append(prev)
+                    kind.append(1); prad.append(r); pang.append(ang)
+                    prev = len(px) - 1
+        self.P = P = len(px)
+        self.p_x = np.array(px); self.p_y = np.array(py)
+        self.p_sector = np.array(ps); self.p_k = np.array(pk); self.p_parent = np.array(parent)
+        self.p_kind = np.array(kind); self.p_radius = np.array(prad); self.p_angle = np.array(pang)
+        self.p_state = np.zeros(P, dtype=int)   # 0 standing, 1 tilted, 2 fallen
+        self.p_lamp_ok = np.ones(P, dtype=bool)
+        self.p_lamp_on = np.ones(P, dtype=bool)
+        self.s_health = np.ones(P)              # span from parent to pole i
+        self.s_ice = np.zeros(P)
+        self.s_online = np.ones(P, dtype=bool)
+        self.n_span_ok = np.ones(P, dtype=bool)
+        self.net_chain = np.ones(P, dtype=bool)
+        # house -> nearest arc pole of its row street
+        hp = np.zeros(N, dtype=int)
+        for i in range(N):
+            s, k = int(self.h_sector[i]), int(self.h_ring[i])
+            cands = np.flatnonzero((self.p_sector == s) & (self.p_kind == 1) & (self.p_k == k))
+            hp[i] = int(cands[np.argmin(np.abs(self.p_angle[cands] - self.h_angle[i]))])
+        self.h_pole = hp
 
         # ---- grid nodes ----
         self.trunk_ok = True
@@ -261,8 +292,8 @@ class World:
 
         # ---- reactor ----
         self.r_mode = "ONLINE"
-        self.r_power_mw = cfg["reactor_gross_mw"] * 0.85
-        self.r_setpoint_mw = cfg["reactor_gross_mw"] * 0.85
+        self.r_power_mw = 4.5
+        self.r_setpoint_mw = 4.5
         self.r_core_temp = cfg["core_temp_nominal"]
         self.r_decay_mw = 0.0
         self.r_available_mw = 0.0
@@ -275,6 +306,8 @@ class World:
         self.r_shutdown_t = 0
         self.r_faults: list[str] = []
         self.r_link_ok = True
+        self.r_flow = 1.0
+        self.r_coolant_temp = 300.0
 
         # ---- balance ----
         self.available_kw = 0.0
@@ -297,9 +330,11 @@ class World:
         self.water_tank_m3 = cfg["water_tank_m3"]
         self.water_plant_ok = True
         self.water_plant_heat = True
+        self.water_plant_m3_h = 0.0
         self.pump_station_ok = True
         self.water_main_ok = np.ones(S, dtype=bool)
         self.sector_water_m3 = np.zeros(S)
+        self.water_flow_m3_h = 0.0
 
         # ---- internet ----
         self.comms_ok = True
@@ -309,29 +344,31 @@ class World:
         self.cabinet_online = np.ones(S, dtype=bool)
         self.net_sector_online = np.ones(S, dtype=bool)
         self.uplink_ok = True
+        self.packets_per_min = 0
 
-        # ---- roads, gates, waste, sewage ----
-        self.road_integrity = np.full(S, 100.0)     # ring segment per sector
-        self.spoke_integrity = 100.0                 # spoke to the reactor complex
+        # ---- roads, walls, gates, waste, sewage ----
+        self.road_integrity = np.full(S, 100.0)     # ring road segment per sector
         self.road_icy = False
-        self.gate_state = ["OPEN"] * S              # OPEN | CLOSED | LOCKDOWN
+        self.gate_state = ["OPEN"] * S              # gate g sits in the wall at boundary angle g*60
         self.gate_ok = np.ones(S, dtype=bool)
+        self.gate_open_frac = np.ones(S)            # 1 open, 0 closed, animated
         self.lockdown_ticks = np.zeros(S, dtype=int)
         self.waste_level = self.rng.uniform(0.2, 0.6, S)
         self.sludge_store = self.rng.uniform(0.1, 0.4, S)
         self.sanitary = np.full(S, 100.0)
         self.sector_dark = np.zeros(S, dtype=bool)
+        R = cfg["ring_road_radius"]
         self.rovers = [
-            Rover("garbage", "garbage", angle=15.0),
-            Rover("sludge", "sludge", angle=195.0),
-            Rover("engineer", "repair", angle=105.0, speed=8.0),
-            Rover("engineer-2", "repair", angle=345.0, speed=8.0),
-            Rover("plumber", "plumber", angle=285.0, speed=8.0),
+            Rover("garbage", "garbage", *polar(15.0, R), speed=cfg["rover_speed"]),
+            Rover("sludge", "sludge", *polar(195.0, R), speed=cfg["rover_speed"]),
+            Rover("engineer", "repair", *polar(105.0, R), speed=cfg["rover_speed"] * 1.3),
+            Rover("engineer-2", "repair", *polar(345.0, R), speed=cfg["rover_speed"] * 1.3),
+            Rover("plumber", "plumber", *polar(285.0, R), speed=cfg["rover_speed"] * 1.3),
         ]
         self.waste_station_level = 0.0
 
         # ---- people / threats ----
-        self.xeno_markers: list[dict] = []          # visible xenomorphs on the map
+        self.xeno_markers: list[dict] = []
         self.marines_active = 0
         self.nest_alert = 0
         W = cfg["walkers"]
@@ -412,11 +449,9 @@ class World:
 def env_step(w: World):
     c = w.cfg
     hour = (w.t % c["ticks_per_day"]) / 60.0
-    # synoptic random walk, mean reverting
     w.synoptic += w.rng.normal(0, 0.15) - 0.01 * w.synoptic
     w.synoptic = clamp(w.synoptic, -12, 12)
     base = c["t_mean"] - c["t_daily_amp"] * math.cos(2 * math.pi * (hour - 4) / 24)
-    # storms
     if w.storm_ticks > 0:
         w.storm_ticks -= 1
         w.wind += (w.rng.uniform(*c["storm_wind"]) - w.wind) * 0.1
@@ -434,12 +469,10 @@ def env_step(w: World):
         w.precip = "snow" if w.rng.random() < 0.002 else ("none" if w.precip == "none" or w.rng.random() < 0.01 else w.precip)
         w.visibility = 60.0 if w.precip == "snow" else 100.0
     storm_drop = 10.0 if w.storm_ticks > 0 else 0.0
-    w.t_out = base + w.synoptic - storm_drop
-    # daylight: Calpamos is dim, permanent dusk
+    w.t_out = base + w.synoptic - storm_drop + w.rng.normal(0, 0.05)
     w.daylight = c["daylight_max"] * max(0.0, math.sin(math.pi * (hour - 6) / 12)) * (0.2 if w.storm_ticks > 0 else 1.0)
     w.dust = clamp(w.dust + (0.02 * w.wind / 10 - 0.02) * 0.05 + w.rng.normal(0, 0.01), 0.05, 0.95)
     w.road_icy = w.precip == "snow" or w.storm_ticks > 0
-    # ice on spans
     if w.precip == "snow":
         w.s_ice = np.minimum(1.0, w.s_ice + 0.002)
     elif w.t_out > 0:
@@ -457,7 +490,6 @@ def reactor_step(w: World):
     flow = (0.5 * (w.r_pump_a > 0.2) + 0.5 * (w.r_pump_b > 0.2)) * w.r_hx
     w.r_mode_ticks += 1
 
-    # pump wear
     if w.r_mode in ("ONLINE", "RUNBACK"):
         if w.rng.random() < c["p_pump_wear"]:
             which = "pump_b" if w.r_pump_b > 0.2 else "pump_a"
@@ -465,23 +497,27 @@ def reactor_step(w: World):
             w.open_issue("pump_trip", f"reactor:{which}", -1, "wear", "pump", c["reactor_pos"], "critical")
             w.log("ALARM", f"Reactor {which.upper()} tripped")
 
-    if w.r_mode == "ONLINE":
-        if flow < 0.75:
-            w.r_mode = "RUNBACK"
-            w.r_mode_ticks = 0
-            w.log("ALARM", "Reactor RUNBACK: coolant flow reduced")
+    if w.r_mode == "ONLINE" and flow < 0.75:
+        w.r_mode = "RUNBACK"
+        w.r_mode_ticks = 0
+        w.log("ALARM", "Reactor RUNBACK: coolant flow reduced")
     if w.r_mode == "RUNBACK" and flow >= 0.99:
         w.r_mode = "ONLINE"
         w.log("INFO", "Reactor back ONLINE")
 
     if w.r_mode in ("ONLINE", "RUNBACK"):
-        cap = nom * (1.0 if w.r_mode == "ONLINE" else 0.5) * min(1.0, flow / 0.5 if w.r_mode == "RUNBACK" else 1.0)
+        # the operator follows the load: generation tracks demand plus a spinning reserve
+        # during load shedding the operator asks for everything the plant can give
+        wanted = nom if w.shedding > 0 else w.demand_kw / 1000.0 + c["reactor_self_mw"] + 0.15 * c["heat_export_mw"] + c["reserve_mw"]
+        w.r_setpoint_mw = clamp(wanted, 0.2 * nom, nom)
+        cap = nom * (1.0 if w.r_mode == "ONLINE" else min(1.0, flow / 0.5) * 0.5)
         target = min(w.r_setpoint_mw, cap)
-        w.r_power_mw += clamp(target - w.r_power_mw, -ramp, ramp)
+        w.r_power_mw += clamp(target - w.r_power_mw, -ramp, ramp) + w.rng.normal(0, 0.004)
+        w.r_power_mw = clamp(w.r_power_mw, 0.0, nom)
         w.r_decay_mw = 0.0
         thermal = w.r_power_mw / 0.3
         t_eq = 300.0 + 480.0 * (thermal / 20.0) / max(flow, 0.05)
-        w.r_core_temp += (t_eq - w.r_core_temp) * 0.05
+        w.r_core_temp += (t_eq - w.r_core_temp) * 0.05 + w.rng.normal(0, 0.6)
         w.r_core_temp = clamp(w.r_core_temp, 300, 1400)
         w.r_available_mw = max(0.0, min(cap, w.r_power_mw + ramp) - c["reactor_self_mw"] - 0.15 * c["heat_export_mw"])
         w.water_plant_heat = True
@@ -498,7 +534,7 @@ def reactor_step(w: World):
             w.r_battery_h = max(0.0, w.r_battery_h - 1 / 60)
         else:
             w.r_battery_h = min(c["pump_battery_h"], w.r_battery_h + 1 / 240)
-        flow_now = flow if (pumps_powered or w.r_battery_h > 0) else 0.02 * w.r_hx   # natural circulation only
+        flow_now = flow if (pumps_powered or w.r_battery_h > 0) else 0.02 * w.r_hx
         t_eq = 300.0 + 480.0 * (w.r_decay_mw / 20.0) / max(flow_now, 0.002)
         w.r_core_temp += (t_eq - w.r_core_temp) * 0.02
         w.r_core_temp = clamp(w.r_core_temp, 300, 1400)
@@ -539,6 +575,8 @@ def reactor_step(w: World):
             w.log("INFO", "Reactor ONLINE")
     elif w.r_mode == "CORE_DAMAGE":
         w.r_available_mw = 0.0
+    w.r_flow = flow
+    w.r_coolant_temp = 300.0 + (w.r_core_temp - 300.0) * 0.35
     w.r_faults = [f for f, ok in (("PUMP_A_TRIP", w.r_pump_a > 0.2), ("PUMP_B_TRIP", w.r_pump_b > 0.2),
                                   ("HEAT_EXCHANGER_DAMAGE", w.r_hx > 0.7)) if not ok]
 
@@ -557,29 +595,28 @@ def reactor_scram(w: World, reason):
 # ------------------------------------------------------------------------------------
 
 def grid_rebuild(w: World):
-    """Recompute who is online down the tree. Spans are cut by fallen poles and low health."""
-    PPS = w.cfg["poles_per_sector"]
-    # fallen pole cuts the span feeding it and the next one
+    """Walk the pole tree: a pole is online when its parent is online and the span to it is intact."""
     fallen = w.p_state == 2
-    cut = np.zeros(w.P, dtype=bool)
-    cut |= fallen
-    nxt = np.roll(fallen, 1)
-    nxt[w.p_k == 0] = False
-    cut |= nxt
-    span_ok = (w.s_health >= 0.2) & ~cut
-    # cumulative along each sector chain
-    span_ok_m = span_ok.reshape(w.S, PPS)
-    chain = np.cumprod(span_ok_m, axis=1).astype(bool)
+    parent = w.p_parent
+    parent_fallen = np.where(parent >= 0, fallen[np.maximum(parent, 0)], False)
+    span_ok = (w.s_health >= 0.2) & ~fallen & ~parent_fallen
+    net_ok = w.n_span_ok & ~fallen & ~parent_fallen
     sector_feed = w.trunk_ok & w.substation_ok & w.feeder_ok & w.rp_ok
     w.feeder_online = sector_feed
-    w.s_online = (chain & sector_feed[:, None]).reshape(-1)
-    # internet cable on the same route
-    net_span = w.n_span_ok & ~cut
-    w.net_chain = np.cumprod(net_span.reshape(w.S, PPS), axis=1).astype(bool).reshape(-1)
+    online = np.zeros(w.P, dtype=bool)
+    net = np.zeros(w.P, dtype=bool)
+    for i in range(w.P):           # parents always precede children in the arrays
+        p = parent[i]
+        up = sector_feed[w.p_sector[i]] if p < 0 else online[p]
+        upn = True if p < 0 else net[p]
+        online[i] = up and span_ok[i]
+        net[i] = upn and net_ok[i]
+    w.s_online = online
+    w.net_chain = net
 
 
 def houses_decide(w: World):
-    """House programs: thermostat with modes chosen from the power situation."""
+    """House programs: thermostat with modes chosen from the power situation. This is where libhopevm plugs in."""
     c = w.cfg
     target = np.full(w.N, c["comfort_c"])
     target[w.h_on_ups | (w.h_limit_w > 0)] = c["eco_c"]
@@ -589,12 +626,10 @@ def houses_decide(w: World):
     on[w.h_t_in < target - 0.5] = True
     on[w.h_t_in > target + 0.5] = False
     w.h_heater_on = on
-    # valve closes when pipes burst (a good program does this)
     w.h_valve_open = ~w.h_burst
 
 
 def houses_demand(w: World):
-    """Desired draw per house given limit and priorities."""
     c = w.cfg
     night = w.is_night()
     base = w.h_base_w * (0.6 if night else 1.0) + w.rng.uniform(-50, 50, w.N)
@@ -604,12 +639,10 @@ def houses_demand(w: World):
     want = base + heater + aeration
     limit = w.h_limit_w
     lim = np.where(limit > 0, limit, 1e9)
-    # priorities inside the limit: aeration and fridge (100 W) first, heater, then the rest
     essential = aeration + 100.0
     heat_alloc = np.minimum(heater, np.maximum(0.0, lim - essential))
     rest = np.minimum(base - 100.0, np.maximum(0.0, lim - essential - heat_alloc))
-    draw = essential + heat_alloc + rest
-    draw = np.minimum(draw, want)
+    draw = np.minimum(essential + heat_alloc + rest, want)
     return draw, heat_alloc
 
 
@@ -617,16 +650,14 @@ def power_step(w: World):
     c = w.cfg
     S = w.S
     grid_rebuild(w)
-    # sources
-    w.solar_kw = c["solar_peak_kw"] * w.daylight * (1 - w.dust) * w.solar_health
+    w.solar_kw = c["solar_peak_kw"] * w.daylight * (1 - w.dust) * w.solar_health * (1 + w.rng.normal(0, 0.03))
+    w.solar_kw = max(0.0, w.solar_kw)
     reactor_kw = w.r_available_mw * 1000.0 if (w.trunk_ok and w.substation_ok) else 0.0
     available = reactor_kw + (w.solar_kw if w.substation_ok else 0.0)
 
-    # demand from houses with current limits
     houses_decide(w)
     house_pole_online = w.s_online[w.h_pole] & w.h_wiring_ok
     draw, heat_alloc = houses_demand(w)
-    # infrastructure loads
     infra = {
         "mine": c["mine_kw"] * w.mine_frac,
         "water_plant": c["water_plant_kw"] if w.water_plant_ok else 0.0,
@@ -640,12 +671,11 @@ def power_step(w: World):
         "pump_station": c["pump_station_kw"],
         "ups_charge": 0.0,
     }
-    lamps_on = w.p_lamp_ok & (w.s_online) & (w.shedding < 4) & (w.is_night() or w.storm_ticks > 0 or w.precip == "snow")
+    lamps_on = w.p_lamp_ok & w.s_online & (w.shedding < 4) & (w.is_night() or w.storm_ticks > 0 or w.precip == "snow")
     lamp_kw = c["lamp_kw"] * (1.2 if w.storm_lighting else 1.0)
     infra["lamps"] = float(lamps_on.sum()) * lamp_kw
     w.p_lamp_on = lamps_on
     w.road_heating_on = infra["road_heating"] > 0
-    # ups charging demand
     need = np.maximum(0.0, c["ups_sector_kwh"] - w.ups_kwh)
     charge_kw = np.where((need > 0) & w.feeder_online & (w.shedding < 2), c["ups_charge_kw"], 0.0)
     center_need = c["ups_center_kwh"] - w.ups_center_kwh
@@ -657,7 +687,6 @@ def power_step(w: World):
     demand = float(sector_draw.sum()) + sum(infra.values())
     w.sector_demand_kw = sector_draw
 
-    # balance and shedding
     deficit = max(0.0, demand - available)
     if deficit > 0 and available > 0:
         if w.shedding < 8:
@@ -681,13 +710,11 @@ def power_step(w: World):
     w.mine_frac = (1.0 if w.shedding < 6 else 0.5 if w.shedding < 7 else 0.0) if (available > 0 and reactor_up) else 0.0
     w.mine_powered = w.mine_frac > 0
 
-    # apply limits for next tick
     limit = np.zeros(w.N)
     if w.shedding >= 3:
         limit[:] = c["limit_level3_w"]
     if w.shedding >= 5:
         limit[:] = c["limit_level5_w"]
-    # level 8: whole sectors dropped, from 6 down
     shed_sectors = np.zeros(S, dtype=bool)
     if w.shedding >= 8 and available > 0:
         excess = deficit
@@ -699,7 +726,6 @@ def power_step(w: World):
     sector_feed = w.feeder_online & ~shed_sectors
     w.sector_online = sector_feed
 
-    # UPS per sector when feed is lost
     house_feed_ok = house_pole_online & sector_feed[w.h_sector]
     on_ups = np.zeros(w.N, dtype=bool)
     powered = house_feed_ok.copy()
@@ -710,7 +736,6 @@ def power_step(w: World):
             w.ups_state[s] = "CHARGING" if charge_kw[s] > 0 else "STANDBY"
         else:
             if w.ups_kwh[s] > 0 and w.ups_health[s] > 0.2:
-                # ups feeds houses whose local chain is intact, with a 2 kW limit each
                 m = mask & house_pole_online & ~house_feed_ok
                 limit[m] = np.minimum(np.where(limit[m] > 0, limit[m], 1e9), c["limit_level3_w"])
                 sup = min(c["ups_sector_kw"], float(np.minimum(draw[m], c["limit_level3_w"]).sum()) / 1000.0)
@@ -723,7 +748,6 @@ def power_step(w: World):
                     w.log("ALARM", f"Sector {s + 1} UPS depleted")
             else:
                 w.ups_state[s] = "DEPLETED" if w.ups_kwh[s] <= 0 else "FAULT"
-    # center ups
     if w.substation_ok and w.trunk_ok and available > 0:
         w.ups_center_kwh = min(c["ups_center_kwh"], w.ups_center_kwh + center_charge / 60.0)
         w.ups_center_state = "CHARGING" if center_charge > 0 else "STANDBY"
@@ -740,7 +764,6 @@ def power_step(w: World):
             w.comms_powered = False
             w.pump_station_ok = False
 
-    # final house feed
     real_draw = np.where(powered, draw, 0.0)
     heat = np.where(powered, heat_alloc, 0.0)
     w.h_power_ok = powered
@@ -756,10 +779,8 @@ def power_step(w: World):
     w.demand_kw = demand
     w.deficit_kw = deficit
     w.infra_loads_kw = {k: round(v, 1) for k, v in infra.items()}
-    # lamps: dark sectors
     lamps_by_sector = np.bincount(w.p_sector, weights=w.p_lamp_on.astype(float), minlength=S)
-    w.sector_dark = (lamps_by_sector < 2) & np.array([w.is_night()] * S)
-    # mine income
+    w.sector_dark = (lamps_by_sector < 6) & np.array([w.is_night()] * S)
     if w.mine_frac > 0:
         w.colony_budget += c["mine_income_per_tick"] * w.mine_frac
         w.colony_month_income += c["mine_income_per_tick"] * w.mine_frac
@@ -774,9 +795,8 @@ def houses_step(w: World):
     dt = c["tick_seconds"]
     ua_eff = w.h_ua * (1.0 + 0.006 * w.wind)
     q_loss = ua_eff * (w.h_t_in - w.t_out)
-    q_int = (w.h_draw_w - w.h_heat_w) * 0.8 + w.h_residents * 80.0   # appliances and people turn into heat
+    q_int = (w.h_draw_w - w.h_heat_w) * 0.8 + w.h_residents * 80.0
     w.h_t_in += (w.h_heat_w + q_int - q_loss) * dt / w.h_cap
-    # pipes
     cold = w.h_t_in < 0.0
     w.h_frozen = np.where(cold, w.h_frozen + 1, 0)
     newly_frozen = (w.h_frozen == c["freeze_ticks_to_frozen"]) & w.h_pipes_ok
@@ -790,17 +810,17 @@ def houses_step(w: World):
         iss = w.open_issue("pipes_burst", f"house:{i}", int(w.h_sector[i]), "freeze", "pipes",
                            (float(w.h_x[i]), float(w.h_y[i])), "critical")
         iss.cost *= cost_mul
-    # water
     supply = w.water_tank_m3 > 0 and w.pump_station_ok
     w.h_water_ok = supply & w.water_main_ok[w.h_sector] & w.h_pipes_ok & ~w.h_burst
-    use = np.where(w.h_water_ok, c["water_per_house_m3_day"] / 1440.0 * (1 + 0.5 * w.h_residents), 0.0)
+    hour = (w.t % 1440) / 60.0
+    diurnal = 0.5 + 0.9 * max(0.0, math.sin(math.pi * (hour - 5) / 16))     # people use water by day
+    use = np.where(w.h_water_ok, c["water_per_house_m3_day"] / 1440.0 * (1 + 0.5 * w.h_residents) * diurnal, 0.0)
     w.h_water_m3 += use
     w.h_water_day += use
     w.h_water_month += use
     w.sector_water_m3 = np.bincount(w.h_sector, weights=use, minlength=w.S)
+    w.water_flow_m3_h = float(use.sum()) * 60.0
     w.water_tank_m3 = max(0.0, w.water_tank_m3 - float(use.sum()))
-    # sewage: aeration stations need power; sludge accumulates
-    w.h_aeration_ok = w.h_aeration_ok & True
     w.h_sludge += np.where(w.h_water_ok, c["sludge_per_resident_per_tick"] * (1 + w.h_residents), 0.0)
     w.h_sludge = np.minimum(w.h_sludge, 1.0)
 
@@ -809,7 +829,12 @@ def water_step(w: World):
     c = w.cfg
     w.water_plant_ok = w.water_plant_heat and w.trunk_ok
     if w.water_plant_ok:
-        w.water_tank_m3 = min(c["water_tank_m3"], w.water_tank_m3 + c["water_plant_m3_h"] / 60.0)
+        need = c["water_tank_m3"] - w.water_tank_m3
+        rate = c["water_plant_m3_h"] * clamp(need / 60.0, 0.15, 1.0)     # throttles as the tank fills
+        w.water_plant_m3_h = rate
+        w.water_tank_m3 = min(c["water_tank_m3"], w.water_tank_m3 + rate / 60.0)
+    else:
+        w.water_plant_m3_h = 0.0
     if w.water_tank_m3 <= 0 and w.t % 60 == 0:
         w.log("ALARM", "Water tank empty")
 
@@ -887,7 +912,7 @@ HTML = r"""<!doctype html>
 <script>
 const cv = document.getElementById('c'), ctx = cv.getContext('2d');
 let G = null, S = null, packetsSeen = new Map(), lastFetch = 0, animT = 0;
-const ADMIN = new URLSearchParams(location.search).get('admin') || '';
+const ADMIN = new URLSearchParams(location.search).get('admin') || localStorage.getItem('hh_admin') || ''; if(ADMIN) localStorage.setItem('hh_admin', ADMIN);
 const post = async (o) => { const r = await fetch('/cmd', {method:'POST', body: JSON.stringify({...o, token: ADMIN})}); if(r.status===403 && !window.__ro){ window.__ro=true; alert('View only. Open the page as /?admin=TOKEN to control the colony.'); } };
 document.getElementById('pause').onclick = () => post({cmd:'pause'});
 document.querySelectorAll('button[data-s]').forEach(b => b.onclick = () => post({cmd:'speed', value:+b.dataset.s}));
@@ -904,7 +929,7 @@ async function poll(){
 let sc = 1, ox = 0, oy = 0;
 function fit(){
   const W = cv.clientWidth, H = cv.clientHeight; cv.width = W * devicePixelRatio; cv.height = H * devicePixelRatio;
-  const x0=-780, x1=440, y0=-440, y1=440;
+  const x0=-1620, x1=800, y0=-800, y1=800;
   sc = Math.min(W/(x1-x0), H/(y1-y0)); ox = W/2 - sc*(x0+x1)/2; oy = H/2 - sc*(y0+y1)/2;
 }
 const X = x => ox + sc*x, Y = y => oy + sc*y;
@@ -930,73 +955,75 @@ function draw(){
   ctx.clearRect(0,0,cv.clientWidth,cv.clientHeight);
   animT = performance.now()/40;
   if(!G || !S) { requestAnimationFrame(draw); return; }
-  const c = G.cfg, R = c.ring_road_radius, ns = c.sectors;
-  const night = S.env.night;
+  const c = G.cfg, R = c.ring_road_radius, WR = c.wall_radius, HR = c.hub_radius, ns = c.sectors;
   // sectors
   for(let s=0;s<ns;s++){
     const a0=(s*60)*Math.PI/180, a1=((s+1)*60)*Math.PI/180;
-    ctx.beginPath(); ctx.arc(X(0),Y(0),sc*(R+40),a0,a1); ctx.arc(X(0),Y(0),sc*(c.hub_radius+10),a1,a0,true); ctx.closePath();
+    ctx.beginPath(); ctx.arc(X(0),Y(0),sc*(WR),a0,a1); ctx.arc(X(0),Y(0),sc*(HR+10),a1,a0,true); ctx.closePath();
     const sec=S.sectors[s];
-    ctx.fillStyle = sec.gate==='LOCKDOWN' ? 'rgba(226,87,77,.10)' : (!sec.online ? 'rgba(226,87,77,.05)' : (sec.dark ? 'rgba(0,0,0,.35)' : 'rgba(255,255,255,.025)'));
-    ctx.fill(); ctx.strokeStyle='#262b36'; ctx.lineWidth=1; ctx.stroke();
-    const [lx,ly]=polar(s*60+30, R+58); text(lx,ly,`S${s+1}`,'#6d7689',12);
+    ctx.fillStyle = sec.lockdown ? 'rgba(226,87,77,.10)' : (!sec.online ? 'rgba(226,87,77,.05)' : (sec.dark ? 'rgba(0,0,0,.35)' : 'rgba(255,255,255,.025)'));
+    ctx.fill();
+    const [lx,ly]=polar(s*60+30, WR+40); text(lx,ly,`S${s+1}`,'#6d7689',12);
   }
-  // roads: ring segments and spokes
+  // wall
+  ctx.beginPath(); ctx.strokeStyle='#7c766e'; ctx.lineWidth=4; ctx.arc(X(0),Y(0),sc*WR,0,Math.PI*2); ctx.stroke();
+  // roads: ring, boundary streets through the gates, row streets, trunk road, tower road, service road
   for(let s=0;s<ns;s++){
     const integ=S.sectors[s].road; const col = integ<20?'#e2574d':(integ<50?'#8a6a2a':'#3d4350');
     ctx.beginPath(); ctx.strokeStyle=col; ctx.lineWidth=S.power.road_heating?5:4; ctx.arc(X(0),Y(0),sc*R,(s*60)*Math.PI/180,((s+1)*60)*Math.PI/180); ctx.stroke();
-    const [sx,sy]=polar(s*60,c.hub_radius), [ex,ey]=polar(s*60,R); line(sx,sy,ex,ey,'#2e3440',2);
+    const [sx,sy]=polar(s*60,HR), [ex,ey]=polar(s*60,WR+70); line(sx,sy,ex,ey,'#2e3440',2);
+    for(let k=0;k<=c.house_rows;k++){ const r=c.house_radius_min-30+k*c.house_ring_step; ctx.beginPath(); ctx.strokeStyle='#262b36'; ctx.lineWidth=1.5; ctx.arc(X(0),Y(0),sc*r,(s*60+2.5)*Math.PI/180,(s*60+57.5)*Math.PI/180); ctx.stroke(); }
   }
-  line(-R,0,c.reactor[0]+60,0,'#3d4350',4); // spoke to the reactor complex (under the trunk)
-  // gates
-  for(let s=0;s<ns;s++){ const [gx,gy]=polar(s*60,R); const st=S.sectors[s].gate; const col = st==='LOCKDOWN'?'#e2574d':(st==='OPEN'?'#5ec07a':'#8a93a6');
+  line(-WR-70,0,c.reactor_pos[0]+70,0,'#3d4350',4); line(c.tower_junction[0],c.tower_junction[1],c.tower_pos[0],c.tower_pos[1]+40,'#2e3440',2); line(c.reactor_pos[0]+70,-40,c.reactor_pos[0]+70,c.mine_pos[1]+40,'#2e3440',2);
+  // gates in the wall at the sector boundaries
+  for(let s=0;s<ns;s++){ const [gx,gy]=polar(s*60,WR); const st=S.sectors[s].gate; const col = st==='LOCKDOWN'?'#e2574d':(st==='OPEN'?'#5ec07a':'#8a93a6');
     ctx.save(); ctx.translate(X(gx),Y(gy)); ctx.rotate(s*60*Math.PI/180); ctx.fillStyle=col; ctx.fillRect(-3,-9,6,18); ctx.restore(); if(!S.sectors[s].gate_ok) text(gx,gy-12,'!','#e2574d',12); }
-  // water pipes: plant -> hub, hub -> sector mains
+  // water: plant -> trunk road -> hub tank; hub -> sector mains along the boundary streets
   const waterOn = S.water.tank_m3>0 && S.water.pump;
-  flow(c.reactor[0], 100, -c.hub_radius-4, 8, '#5aa9ff', 2, S.water.plant, 1.2);
-  for(let s=0;s<ns;s++){ const [x0,y0]=polar(s*60+36,c.hub_radius), [x1,y1]=polar(s*60+36,R-30); flow(x0,y0,x1,y1,'#5aa9ff',1.5, waterOn && S.sectors[s].water_ok>0, 1.0); }
-  // power: trunk, feeders, spans
+  flow(c.water_plant_pos[0]-10, c.water_plant_pos[1]-40, c.reactor_pos[0]+40, -10, '#5aa9ff', 2, S.water.plant, 1.2); flow(c.reactor_pos[0]+40,-10,-HR+30,-10,'#5aa9ff',2,S.water.plant,1.2);
+  for(let s=0;s<ns;s++){ const [x0,y0]=polar(s*60-1.4,HR-30), [x1,y1]=polar(s*60-1.4,R-20); flow(x0,y0,x1,y1,'#5aa9ff',1.5, waterOn && S.sectors[s].water_ok>0, 1.0); }
+  // power: trunk, tower line, solar line, feeders, spans along the pole tree
   const reactorUp = S.reactor.available_mw>0;
-  flow(c.reactor[0]+40, -4, -c.hub_radius, -4, '#f2c14e', 3, S.power.trunk && reactorUp, 2.5);
-  flow(c.reactor[0]+40, -60, c.tower[0]+20, c.tower[1]+30, '#f2c14e', 1.2, S.power.tower_line && S.power.trunk && reactorUp, 2);
-  for(let s=0;s<ns;s++){ const [x1,y1]=polar(s*60+30,c.hub_radius+18); const [x0,y0]=polar(s*60+30,c.hub_radius-30); flow(x0,y0,x1,y1,'#f2c14e',2,S.power.feeder[s]&&S.sectors[s].online,2); }
-  const PPS=c.poles_per_sector;
+  flow(c.reactor_pos[0]+70, 8, -HR+10, 8, '#f2c14e', 3, S.power.trunk && reactorUp, 2.5);
+  flow(c.tower_junction[0]+7, 8, c.tower_pos[0]+7, c.tower_pos[1]+40, '#f2c14e', 1.2, S.power.tower_line && S.power.trunk && reactorUp, 2);
+  flow(c.solar_pos[0]+70, c.solar_pos[1]+30, c.reactor_pos[0]+40, -60, '#f2c14e', 1.2, S.power.solar_kw>0, 2);
+  for(let s=0;s<ns;s++){ const [x1,y1]=polar(s*60+1.6,HR+20); flow(0,-40,x1,y1,'#f2c14e',2,S.power.feeder[s]&&S.sectors[s].online,2); }
   for(let i=0;i<G.poles.x.length;i++){
-    const k=G.poles.k[i], s=G.poles.sector[i];
-    let px0,py0; if(k===0){ [px0,py0]=polar(s*60+30,c.hub_radius+18); } else { px0=G.poles.x[i-1]; py0=G.poles.y[i-1]; }
+    const p=G.poles.parent[i], s=G.poles.sector[i];
+    let px0,py0; if(p<0){ [px0,py0]=polar(s*60+1.6,HR+20); } else { px0=G.poles.x[p]; py0=G.poles.y[p]; }
     const px1=G.poles.x[i], py1=G.poles.y[i];
     flow(px0,py0,px1,py1,'#f2c14e',1.6,S.poles.span[i]===1,2);
-    // internet cable, offset perpendicular
-    const dx=px1-px0, dy=py1-py0, L=Math.hypot(dx,dy)||1, nx=-dy/L*6, ny=dx/L*6;
+    const dx=px1-px0, dy=py1-py0, L=Math.hypot(dx,dy)||1, nx=-dy/L*5, ny=dx/L*5;
     line(px0+nx,py0+ny,px1+nx,py1+ny,S.poles.net[i]===1?'#4fd1c5':'#4a3030',1);
   }
-  // house drops to poles (faint)
   for(let i=0;i<G.houses.x.length;i++){ const p=G.houses.pole[i]; line(G.houses.x[i],G.houses.y[i],G.poles.x[p],G.poles.y[p],'rgba(242,193,78,.12)',1); }
+  line(-HR+10,12,-WR-40,12,S.net.uplink?'#4fd1c5':'#4a3030',1); line(-WR-40,12,c.tower_junction[0]-6,12,S.net.uplink?'#4fd1c5':'#4a3030',1); line(c.tower_junction[0]-6,12,c.tower_pos[0]-6,c.tower_pos[1]+40,S.net.uplink?'#4fd1c5':'#4a3030',1);
   // hub
-  dot(0,0,sc*c.hub_radius,'#1c2028'); ctx.beginPath(); ctx.strokeStyle=S.power.substation?'#f2c14e':'#e2574d'; ctx.lineWidth=2; ctx.arc(X(0),Y(0),sc*c.hub_radius,0,Math.PI*2); ctx.stroke();
-  text(0,-30,'substation',S.power.substation?'#f2c14e':'#e2574d',11); text(0,-16,`UPS center ${S.power.ups_center_kwh} kWh`,'#9aa3b5',10);
-  text(0,0,S.net.comms?'comms node':'comms DOWN',S.net.comms&&S.net.uplink?'#4fd1c5':'#e2574d',11); text(0,16,'ops center, water pump','#9aa3b5',10);
-  text(0,32,`tank ${S.water.tank_m3} m3`,waterOn?'#5aa9ff':'#e2574d',10);
+  dot(0,0,sc*HR,'#1c2028'); ctx.beginPath(); ctx.strokeStyle=S.power.substation?'#f2c14e':'#e2574d'; ctx.lineWidth=2; ctx.arc(X(0),Y(0),sc*HR,0,Math.PI*2); ctx.stroke();
+  text(0,-60,'substation',S.power.substation?'#f2c14e':'#e2574d',11); text(0,-42,`${S.power.available_kw} / ${S.power.demand_kw} kW`,'#9aa3b5',10);
+  text(0,-16,`UPS center ${S.power.ups_center_kwh} kWh`,'#4fd1c5',10);
+  text(0,4,S.net.comms?`comms node, ${S.net.packets_per_min} pkt/min`:'comms DOWN',S.net.comms&&S.net.uplink?'#4fd1c5':'#e2574d',11); text(0,24,'ops center, pump station','#9aa3b5',10);
+  text(0,44,`tank ${S.water.tank_m3} m3, ${S.water.flow_m3_h} m3/h`,waterOn?'#5aa9ff':'#e2574d',10);
   // reactor complex
-  const rc=modeColor[S.reactor.mode]||'#888';
-  box(c.reactor[0],-110,110,34,'#20242e','#7a6a2a','solar',`${S.power.solar_kw} kW`);
-  box(c.reactor[0],0,120,54,'#20242e',rc,`REACTOR ${S.reactor.mode}`,`${S.reactor.power_mw} MW  core ${S.reactor.core_temp} C`);
-  if(S.reactor.marines) text(c.reactor[0],-38,'MARINES IN THE SUBLEVELS','#e2574d',10);
-  box(c.reactor[0],100,110,34,'#20242e',S.water.plant?'#5aa9ff':'#e2574d','water plant',S.water.plant?'melting ice':'no heat');
-  box(c.reactor[0],200,110,34,'#20242e','#6a7a2a','waste storage',`+${S.finance.waste_station}`);
-  box(c.reactor[0],300,110,34,'#20242e',S.power.mine?'#a08a2a':'#5a5a5a','mine',S.power.mine?`${S.power.infra.mine} kW`:'stopped');
+  const rc=modeColor[S.reactor.mode]||'#888'; const rx=c.reactor_pos[0], ry=c.reactor_pos[1];
+  box(c.solar_pos[0],c.solar_pos[1],120,34,'#20242e','#7a6a2a','solar field',`${S.power.solar_kw} kW`);
+  box(rx,ry,150,54,'#20242e',rc,`REACTOR ${S.reactor.mode}`,`${S.reactor.power_mw} MW el, core ${S.reactor.core_temp} C`);
+  if(S.reactor.marines) text(rx,ry-38,'MARINES IN THE SUBLEVELS','#e2574d',10);
+  box(c.water_plant_pos[0],c.water_plant_pos[1],120,34,'#20242e',S.water.plant?'#5aa9ff':'#e2574d','water plant',S.water.plant?`${S.water.plant_m3_h} m3/h`:'no heat');
+  box(c.radwaste_pos[0],c.radwaste_pos[1],150,34,'#20242e','#e8d34a','radioactive waste storage',`${S.power.infra.waste_storage} kW`);
+  box(c.mine_pos[0],c.mine_pos[1],110,34,'#20242e',S.power.mine?'#a08a2a':'#5a5a5a','mine',S.power.mine?`${S.power.infra.mine} kW`:'stopped');
+  box(c.waste_station_pos[0],c.waste_station_pos[1],120,30,'#20242e','#9bd36a','waste processing',`${S.finance.waste_station} loads`);
   // tower
-  const [tx,ty]=[c.tower[0],c.tower[1]];
+  const [tx,ty]=[c.tower_pos[0],c.tower_pos[1]];
   ctx.beginPath(); ctx.strokeStyle=S.net.uplink?'#4fd1c5':'#e2574d'; ctx.lineWidth=2; ctx.moveTo(X(tx)-10,Y(ty)+18); ctx.lineTo(X(tx),Y(ty)-18); ctx.lineTo(X(tx)+10,Y(ty)+18); ctx.stroke();
   text(tx,ty+32,S.net.uplink?'uplink OK':'uplink LOST',S.net.uplink?'#4fd1c5':'#e2574d',10);
-  line(-c.hub_radius+8,-8,tx+6,ty+14,S.net.uplink?'#4fd1c5':'#4a3030',1.2);
   if(S.net.uplink){ for(let k=0;k<3;k++){ ctx.beginPath(); ctx.strokeStyle=`rgba(79,209,197,${0.5-0.15*k})`; ctx.arc(X(tx),Y(ty)-14,8+6*k+((animT*2)%6),-2.2,-0.9); ctx.stroke(); } }
   // poles and lamps
   for(let i=0;i<G.poles.x.length;i++){ const x=G.poles.x[i],y=G.poles.y[i],st=S.poles.state[i];
-    if(S.poles.lamp[i]===1){ const g=ctx.createRadialGradient(X(x),Y(y),0,X(x),Y(y),sc*28); g.addColorStop(0,'rgba(255,230,140,.35)'); g.addColorStop(1,'rgba(255,230,140,0)'); ctx.fillStyle=g; ctx.beginPath(); ctx.arc(X(x),Y(y),sc*28,0,Math.PI*2); ctx.fill(); }
-    if(st===2){ text(x,y+4,'x','#e2574d',13); } else dot(x,y,3,st===1?'#e0b04a':'#c9cfdb'); }
+    if(S.poles.lamp[i]===1){ const g=ctx.createRadialGradient(X(x),Y(y),0,X(x),Y(y),sc*22); g.addColorStop(0,'rgba(255,230,140,.35)'); g.addColorStop(1,'rgba(255,230,140,0)'); ctx.fillStyle=g; ctx.beginPath(); ctx.arc(X(x),Y(y),sc*22,0,Math.PI*2); ctx.fill(); }
+    if(st===2){ text(x,y+4,'x','#e2574d',13); } else dot(x,y,2.2,st===1?'#e0b04a':'#c9cfdb'); }
   // houses
-  const hs=S.houses; const sz=Math.max(4,sc*9);
+  const hs=S.houses; const sz=Math.max(4,sc*12);
   for(let i=0;i<G.houses.x.length;i++){ const x=X(G.houses.x[i]),y=Y(G.houses.y[i]);
     ctx.fillStyle=tempColor(hs.t[i]); ctx.fillRect(x-sz/2,y-sz/2,sz,sz);
     if(!hs.power[i]){ ctx.strokeStyle='#e2574d'; ctx.lineWidth=1.5; ctx.strokeRect(x-sz/2,y-sz/2,sz,sz); }
@@ -1005,25 +1032,28 @@ function draw(){
     if(hs.heater[i]&&hs.power[i]){ ctx.fillStyle='#ff7a30'; ctx.fillRect(x-1.5,y-1.5,3,3); }
     if(hs.burst[i]){ ctx.strokeStyle='#5aa9ff'; ctx.lineWidth=1.5; ctx.beginPath(); ctx.moveTo(x-sz/2,y-sz/2); ctx.lineTo(x+sz/2,y+sz/2); ctx.moveTo(x+sz/2,y-sz/2); ctx.lineTo(x-sz/2,y+sz/2); ctx.stroke(); }
   }
-  // internet packets
+  // people
+  for(const p of S.people) dot(p[0],p[1],1.6,'#ffffff');
+  // internet packets along the pole tree
   const now=performance.now();
   for(const p of S.net.packets){ const key=p.t+':'+p.from+':'+p.id; if(!packetsSeen.has(key)) packetsSeen.set(key, now); }
   for(const [key,t0] of packetsSeen){ if(now-t0>1800){ packetsSeen.delete(key); continue; }
     const [t,from,id]=key.split(':'); const pk=S.net.packets.find(q=>q.t+':'+q.from+':'+q.id===key); if(!pk) continue;
     let path=[];
-    if(from==='house'){ const i=+id, p=G.houses.pole[i], s=G.houses.sector[i]; path.push([G.houses.x[i],G.houses.y[i]]);
-      for(let k=G.poles.k[p];k>=0;k--){ const j=s*PPS+k; path.push([G.poles.x[j],G.poles.y[j]]); } const [hx,hy]=polar(s*60+30,c.hub_radius+18); path.push([hx,hy]); path.push([0,0]); }
+    if(from==='house'){ const i=+id; let p=G.houses.pole[i], s=G.houses.sector[i]; path.push([G.houses.x[i],G.houses.y[i]]); let guard=0; while(p>=0&&guard++<40){ path.push([G.poles.x[p],G.poles.y[p]]); p=G.poles.parent[p]; } path.push(polar(s*60+4.5,HR+20)); path.push([0,0]); }
     else { path.push([0,0]); }
-    if(pk.uplink) path.push([tx+6,ty+14]);
+    if(pk.kind==='reactor'||pk.kind==='lost'){ path.push([-HR+10,8]); path.push([-WR-40,8]); path.push([rx+70,8]); }
+    else if(pk.uplink) path.push([-HR+10,12],[-WR-40,12],[c.tower_junction[0]-6,12],[tx-6,ty+40]);
     const u=(now-t0)/1800; let seg=Math.floor(u*(path.length-1)), f=u*(path.length-1)-seg; if(seg>=path.length-1){seg=path.length-2;f=1;}
     const [ax,ay]=path[seg],[bx,by]=path[seg+1]; dot(ax+(bx-ax)*f,ay+(by-ay)*f,2.5,pk.uplink?(pk.kind==='reactor'?'#f2c14e':'#4fd1c5'):'#e2574d'); }
-  // waste bins and sludge stores at the ring
+  // waste bins at the ring
   for(let s=0;s<ns;s++){ const [bx,by]=polar(s*60+30,R+22); const w=S.sectors[s].waste; ctx.fillStyle=w>=1?'#e2574d':(w>=0.9?'#e0b04a':'#3d4350'); ctx.fillRect(X(bx)-5,Y(by)-5,10,10); ctx.fillStyle='#8a93a6'; ctx.fillRect(X(bx)-4,Y(by)+4-8*Math.min(1,w),8,8*Math.min(1,w)); }
   // rovers
   const rc2={garbage:['G','#9bd36a'],sludge:['S','#b48ead'],repair:['E','#f2c14e'],plumber:['P','#5aa9ff']};
-  for(const r of S.rovers){ const [l,col]=rc2[r.name==='engineer-2'?'repair':(r.name==='engineer'?'repair':r.name)]||['?','#fff']; dot(r.x,r.y,7,col); text(r.x,r.y+4,l,'#111',10); text(r.x,r.y+16,r.state.toLowerCase().replace('_',' '),'#9aa3b5',9); }
-  // xenomorphs
+  for(const r of S.rovers){ const [l,col]=rc2[r.kind]||['?','#fff']; dot(r.x,r.y,7,col); text(r.x,r.y+4,l,'#111',10); text(r.x,r.y+16,r.state.toLowerCase().replace('_',' '),'#9aa3b5',9); }
+  // xenomorphs and marines
   for(const x of S.xenos){ ctx.save(); ctx.translate(X(x.x),Y(x.y)); ctx.rotate(Math.PI/4); ctx.fillStyle='#e2574d'; ctx.fillRect(-5,-5,10,10); ctx.restore(); }
+  for(const m of S.marines) dot(m[0],m[1],2.5,'#8be05a');
   // issues
   for(const i of S.issues){ const col=i.sev==='critical'?'#e2574d':(i.sev==='warning'?'#e0b04a':'#8a93a6'); dot(i.x+8,i.y-8,6,col); text(i.x+8,i.y-4,'!','#111',10); }
   // banner
@@ -1082,8 +1112,8 @@ window.addEventListener('resize', fit);
 """
 
 # ------------------------------------------------------------------------------------
-# 3D UI (served at /): the colony wrapped onto a small planet, three.js, orbit and zoom.
-# The flat 2D map stays at /flat. __THREE_BASE__ is replaced at startup (cdn or /vendor/).
+# 3D UI (served at /): the colony on a small planet, three.js. Flat 2D map stays at /flat.
+# __THREE_BASE__ is replaced at startup (cdn or /vendor/).
 # ------------------------------------------------------------------------------------
 
 HTML3D = r"""<!doctype html>
@@ -1101,7 +1131,7 @@ HTML3D = r"""<!doctype html>
   button { background:#232835; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:4px 8px; cursor:pointer; font-size:12px; }
   button:hover { background:#2d3444; } button.on { border-color:var(--blue); color:var(--blue); }
   label.chk { display:inline-flex; align-items:center; gap:4px; background:#1c212c; border:1px solid var(--line); border-radius:6px; padding:3px 7px; font-size:11.5px; cursor:pointer; }
-  input[type=range] { width:200px; }
+  input[type=range] { width:190px; } input[type=text] { background:#0b0e13; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:4px 6px; font-size:12px; width:150px; }
   .kpi { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
   .card { background:#1a1f2a; border:1px solid var(--line); border-radius:8px; padding:6px 8px; }
   .card .v { font-size:17px; font-weight:600; } .card .l { color:var(--dim); font-size:11px; }
@@ -1113,28 +1143,27 @@ HTML3D = r"""<!doctype html>
   #banner { position:absolute; left:10px; top:10px; background:rgba(18,21,28,.88); border:1px solid var(--line); border-radius:8px; padding:6px 10px; font-size:13px; pointer-events:none; }
   #hint { position:absolute; left:10px; bottom:10px; background:rgba(18,21,28,.88); border:1px solid var(--line); border-radius:8px; padding:6px 10px; font-size:11px; color:var(--dim); pointer-events:none; }
   #tip { position:absolute; display:none; background:rgba(18,21,28,.95); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font-size:11px; pointer-events:none; max-width:260px; }
+  #info { position:absolute; right:10px; top:10px; display:none; width:300px; background:rgba(18,21,28,.94); border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:12px; }
+  #info h3 { margin:0 0 6px; font-size:13px; } #info .close { float:right; cursor:pointer; color:var(--dim); } #info table { font-size:11.5px; } #info td { text-align:left; }
   #finished { position:absolute; inset:0; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,.6); font-size:28px; color:var(--bad); }
   pre { white-space:pre-wrap; font-size:11px; background:#0b0e13; padding:6px; border-radius:6px; border:1px solid var(--line); }
-  @media (max-width: 900px) {
-    body { flex-direction:column; overflow:auto; height:auto; }
-    #map { flex:none; height:64vh; min-height:360px; }
-    #side { width:100%; flex:none; border-left:none; border-top:1px solid var(--line); }
-    #hint { display:none; }
-  }
+  @media (max-width: 900px) { body { flex-direction:column; overflow:auto; height:auto; } #map { flex:none; height:64vh; min-height:360px; } #side { width:100%; flex:none; border-left:none; border-top:1px solid var(--line); } #hint { display:none; } #info { width:220px; } }
 </style>
 <script type="importmap">{"imports":{"three":"__THREE_BASE__build/three.module.js","three/addons/":"__THREE_BASE__examples/jsm/"}}</script>
 </head>
 <body>
 <div id="map">
   <div id="banner">connecting...</div>
-  <div id="hint">drag to rotate the planet, wheel to zoom, hover a house for details, click a sector row to fly there. Flat map: <b>/flat</b></div>
+  <div id="hint">drag: rotate &nbsp; right-drag / shift-drag / WASD / arrows: move &nbsp; wheel: zoom &nbsp; double-click: centre there &nbsp; click a building, rover or person for live stats &nbsp; flat map: <b>/flat</b></div>
   <div id="tip"></div>
+  <div id="info"><span class="close" id="infoclose">close</span><h3 id="infotitle"></h3><div id="infobody"></div></div>
   <div id="finished"></div>
 </div>
 <div id="side">
   <h1>Hadley's Hope, LV-426</h1>
   <div class="row"><span id="time" style="font-weight:600;min-width:120px"></span><button id="pause">Pause</button>
     <span class="dim">speed</span><input type="range" id="speed" min="0" max="100" value="45"><span id="speedv" class="dim" style="min-width:64px"></span></div>
+  <div class="row" style="margin-top:6px"><span class="dim">admin token</span><input type="text" id="token" placeholder="paste token"><button id="tokenbtn">use</button><span id="tokenstate" class="dim"></span></div>
   <h2>Layers</h2>
   <div class="row" id="layers">
     <label class="chk"><input type="checkbox" data-l="issues" checked> issues</label>
@@ -1149,7 +1178,7 @@ HTML3D = r"""<!doctype html>
     <label class="chk"><input type="checkbox" data-l="labels" checked> labels</label>
   </div>
   <h2>Fly to</h2>
-  <div class="row" id="fly"><button data-f="hub">hub</button><button data-f="reactor">reactor</button><button data-f="solar">solar</button><button data-f="tower">tower</button><button data-f="mine">mine</button><button data-f="planet">whole planet</button></div>
+  <div class="row" id="fly"><button data-f="hub">hub</button><button data-f="gate">west gate</button><button data-f="reactor">reactor</button><button data-f="solar">solar</button><button data-f="tower">tower</button><button data-f="mine">mine</button><button data-f="city">city</button><button data-f="planet">planet</button></div>
   <h2>Inject</h2>
   <div class="row">
     <button data-i="span">break span</button><button data-i="pole">fell pole</button><button data-i="xeno">xenomorphs</button>
@@ -1174,65 +1203,73 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 
 // ---------- state, polling, controls ----------
-const ADMIN = new URLSearchParams(location.search).get('admin') || '';
-let G = null, S = null;
-const post = async (o) => { const r = await fetch('/cmd', {method:'POST', body: JSON.stringify({...o, token: ADMIN})}); if(r.status===403 && !window.__ro){ window.__ro=true; alert('View only. Open the page as /?admin=TOKEN to control the colony.'); } };
+let ADMIN = new URLSearchParams(location.search).get('admin') || localStorage.getItem('hh_admin') || '';
+if (ADMIN) localStorage.setItem('hh_admin', ADMIN);
+let G = null, S = null, prevS = null, lastPoll = 0, pollGap = 300;
+const tokenEl = document.getElementById('token'), tokenState = document.getElementById('tokenstate');
+tokenEl.value = ADMIN;
+async function checkToken(){ const r = await (await fetch('/cmd', {method:'POST', body: JSON.stringify({cmd:'auth', token: ADMIN})})).json(); tokenState.textContent = !r.protected ? 'open server' : (r.ok ? 'control enabled' : 'view only'); tokenState.className = r.ok ? 'ok' : 'warn'; }
+document.getElementById('tokenbtn').onclick = () => { ADMIN = tokenEl.value.trim(); localStorage.setItem('hh_admin', ADMIN); checkToken(); };
+checkToken();
+const post = async (o) => { const r = await fetch('/cmd', {method:'POST', body: JSON.stringify({...o, token: ADMIN})}); if(r.status===403){ tokenState.textContent='view only: paste the admin token above'; tokenState.className='bad'; } };
 document.getElementById('pause').onclick = () => post({cmd:'pause'});
 document.querySelectorAll('button[data-i]').forEach(b => b.onclick = () => post({cmd:'inject', value:b.dataset.i}));
 const speedEl = document.getElementById('speed'), speedV = document.getElementById('speedv');
-const sliderToSpeed = v => Math.round(Math.exp(Math.log(600) * v / 100));   // 0..100 -> 1..600, log scale
-const speedToSlider = s => Math.round(Math.log(Math.max(1, s)) / Math.log(600) * 100);
+const sliderToSpeed = v => v===0?0:Math.round(Math.exp(Math.log(600) * v / 100));
+const speedToSlider = s => s<=0?0:Math.round(Math.log(Math.max(1, s)) / Math.log(600) * 100);
 speedEl.oninput = () => { speedV.textContent = sliderToSpeed(+speedEl.value) + ' min/s'; };
 speedEl.onchange = () => post({cmd:'speed', value: sliderToSpeed(+speedEl.value)});
 const layers = {}; document.querySelectorAll('#layers input').forEach(c => { layers[c.dataset.l] = c.checked; c.onchange = () => { layers[c.dataset.l] = c.checked; applyLayers(); }; });
 
 async function loadGeom(){ G = await (await fetch('/geometry')).json(); }
 async function poll(){
-  try { const s = await (await fetch('/state')).json(); const first = !S; S = s; renderSide(s); onState(s, first); }
+  try { const s = await (await fetch('/state')).json(); const first = !S; prevS = S; S = s; const now=performance.now(); pollGap = lastPoll ? Math.min(1200, now-lastPoll) : 300; lastPoll = now; renderSide(s); onState(s, first); renderInfo(); }
   catch(e) { document.getElementById('banner').textContent = 'no connection'; }
   setTimeout(poll, 300);
 }
 
-// ---------- planet geometry helpers ----------
-const RP = 1500;
+// ---------- planet helpers ----------
+const RP = 3200;
 const UP = new THREE.Vector3(0,1,0);
 function sph(x, y, h=0){ const d=Math.hypot(x,y), th=d/RP, ph=Math.atan2(y,x), r=RP+h; return new THREE.Vector3(r*Math.sin(th)*Math.cos(ph), r*Math.cos(th), r*Math.sin(th)*Math.sin(ph)); }
 function quatAt(x, y, yaw=0){ const n=sph(x,y).normalize(); const q=new THREE.Quaternion().setFromUnitVectors(UP, n); if(yaw) q.multiply(new THREE.Quaternion().setFromAxisAngle(UP, yaw)); return q; }
 function polar(a, r){ const t=a*Math.PI/180; return [r*Math.cos(t), r*Math.sin(t)]; }
 function subdiv(pts, step=14){ const out=[]; for(let i=0;i<pts.length-1;i++){ const [x0,y0]=pts[i],[x1,y1]=pts[i+1]; const n=Math.max(1,Math.ceil(Math.hypot(x1-x0,y1-y0)/step)); for(let k=0;k<n;k++) out.push([x0+(x1-x0)*k/n, y0+(y1-y0)*k/n]); } out.push(pts[pts.length-1]); return out; }
-function arcPts(a0, a1, r, n=24){ const out=[]; for(let i=0;i<=n;i++){ out.push(polar(a0+(a1-a0)*i/n, r)); } return out; }
+function arcPts(a0, a1, r, n=24){ const out=[]; for(let i=0;i<=n;i++) out.push(polar(a0+(a1-a0)*i/n, r)); return out; }
+function offsetArc(a0,a1,r,off,n=24){ return arcPts(a0,a1,r+off,n); }
 
-// ribbon on the sphere for roads and streets
-function ribbon(flat, width, h, color){
+function ribbon(flat, width, h, color, opts={}){
   const pts = subdiv(flat, 10); const pos=[], idx=[];
   for(let i=0;i<pts.length;i++){ const p=pts[i], q=pts[Math.min(i+1,pts.length-1)], o=pts[Math.max(i-1,0)]; let dx=q[0]-o[0], dy=q[1]-o[1]; const L=Math.hypot(dx,dy)||1; dx/=L; dy/=L; const nx=-dy*width/2, ny=dx*width/2;
     const a=sph(p[0]+nx,p[1]+ny,h), b=sph(p[0]-nx,p[1]-ny,h); pos.push(a.x,a.y,a.z,b.x,b.y,b.z); if(i<pts.length-1){ const k=i*2; idx.push(k,k+1,k+2, k+1,k+3,k+2); } }
   const g=new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos,3)); g.setIndex(idx); g.computeVertexNormals();
-  return new THREE.Mesh(g, new THREE.MeshStandardMaterial({color, roughness:1, metalness:0, polygonOffset:true, polygonOffsetFactor:-1}));
+  const m=new THREE.Mesh(g, new THREE.MeshStandardMaterial({color, roughness:1, metalness:0, polygonOffset:true, polygonOffsetFactor:-1, ...opts})); world.add(m); return m;
 }
+function tube(pts3, radius, color, opts={}){ const g=new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts3), Math.max(8, pts3.length*3), radius, 6, false); const m=new THREE.Mesh(g, new THREE.MeshStandardMaterial({color, roughness:.5, metalness:.3, ...opts})); world.add(m); return m; }
+function cap(radius, h, color, rings=24, segs=96){ const pos=[], idx=[]; for(let r=0;r<=rings;r++){ const rr=radius*r/rings; for(let s=0;s<segs;s++){ const [x,y]=polar(s*360/segs, rr); const p=sph(x,y,h); pos.push(p.x,p.y,p.z); } }
+  for(let r=0;r<rings;r++) for(let s=0;s<segs;s++){ const a=r*segs+s, b=r*segs+(s+1)%segs, c2=(r+1)*segs+s, d=(r+1)*segs+(s+1)%segs; idx.push(a,c2,b, b,c2,d); }
+  const g=new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos,3)); g.setIndex(idx); g.computeVertexNormals(); const m=new THREE.Mesh(g, new THREE.MeshStandardMaterial({color, roughness:1, side:THREE.DoubleSide})); world.add(m); return m; }
+function flat3(flat, h){ return subdiv(flat, 20).map(p=>sph(p[0],p[1],h)); }
+function catenary(a3, b3, sag){ const out=[]; const mid=a3.clone().add(b3).multiplyScalar(0.5); const n=mid.clone().normalize(); for(let i=0;i<=8;i++){ const t=i/8; const p=a3.clone().lerp(b3,t); p.addScaledVector(n, -sag*4*t*(1-t)); out.push(p); } return out; }
 
-// line layer: many polylines, colour per polyline, vertex colours
-class LineLayer {
-  constructor(polylines, h, baseColor, width=1){ // polylines: [[[x,y],...],...]
-    this.ranges=[]; const pos=[], col=[]; const c=new THREE.Color(baseColor);
-    for(const pl of polylines){ const pts=subdiv(pl, 16); const start=pos.length/3; for(let i=0;i<pts.length-1;i++){ const a=sph(pts[i][0],pts[i][1],h), b=sph(pts[i+1][0],pts[i+1][1],h); pos.push(a.x,a.y,a.z,b.x,b.y,b.z); col.push(c.r,c.g,c.b,c.r,c.g,c.b); } this.ranges.push([start, pos.length/3]); }
+class LineLayer {   // many 3D polylines, colour per polyline
+  constructor(polylines3, baseColor){ this.ranges=[]; const pos=[], col=[]; const c=new THREE.Color(baseColor);
+    for(const pts of polylines3){ const start=pos.length/3; for(let i=0;i<pts.length-1;i++){ const a=pts[i], b=pts[i+1]; pos.push(a.x,a.y,a.z,b.x,b.y,b.z); col.push(c.r,c.g,c.b,c.r,c.g,c.b); } this.ranges.push([start, pos.length/3]); }
     const g=new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos,3)); g.setAttribute('color', new THREE.Float32BufferAttribute(col,3));
-    this.mesh=new THREE.LineSegments(g, new THREE.LineBasicMaterial({vertexColors:true, linewidth:width})); this.polylines=polylines; }
-  setColor(i, color){ const c=new THREE.Color(color), a=this.mesh.geometry.attributes.color; const [s,e]=this.ranges[i]; for(let k=s;k<e;k++){ a.setXYZ(k,c.r,c.g,c.b);} a.needsUpdate=true; }
+    this.mesh=new THREE.LineSegments(g, new THREE.LineBasicMaterial({vertexColors:true})); this.polylines=polylines3; this.mesh.frustumCulled=false; world.add(this.mesh); }
+  setColor(i, color){ const c=new THREE.Color(color), a=this.mesh.geometry.attributes.color; const [s,e]=this.ranges[i]; for(let k=s;k<e;k++) a.setXYZ(k,c.r,c.g,c.b); a.needsUpdate=true; }
 }
-
-// flow dots moving along polylines
-class FlowLayer {
-  constructor(polylines, h, color, size, perLine=3, speed=0.35){ this.pls=polylines.map(pl=>{ const pts=subdiv(pl,8).map(p=>sph(p[0],p[1],h)); const cum=[0]; for(let i=1;i<pts.length;i++) cum.push(cum[i-1]+pts[i].distanceTo(pts[i-1])); return {pts,cum,len:cum[cum.length-1]}; });
-    this.active=new Array(polylines.length).fill(false); this.per=perLine; this.speed=speed; const n=polylines.length*perLine;
+class FlowLayer {   // dots moving along 3D polylines
+  constructor(polylines3, color, size, perLine=3, speed=40){ this.pls=polylines3.map(pts=>{ const cum=[0]; for(let i=1;i<pts.length;i++) cum.push(cum[i-1]+pts[i].distanceTo(pts[i-1])); return {pts,cum,len:cum[cum.length-1]}; });
+    this.active=new Array(polylines3.length).fill(false); this.per=perLine; this.speed=speed; const n=polylines3.length*perLine;
     const g=new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(n*3),3));
-    this.mesh=new THREE.Points(g, new THREE.PointsMaterial({color, size, map:TEX.dot, transparent:true, depthWrite:false, sizeAttenuation:true})); this.mesh.frustumCulled=false; }
-  update(t){ const a=this.mesh.geometry.attributes.position; let k=0; for(let i=0;i<this.pls.length;i++){ const pl=this.pls[i]; for(let j=0;j<this.per;j++){ if(!this.active[i]||pl.len===0){ a.setXYZ(k++, 0,-99999,0); continue; } const u=((t*this.speed*100/pl.len)+j/this.per)%1; const p=sample(pl,u); a.setXYZ(k++, p.x,p.y,p.z); } } a.needsUpdate=true; }
+    this.mesh=new THREE.Points(g, new THREE.PointsMaterial({color, size, map:TEX.dot, transparent:true, depthWrite:false, sizeAttenuation:true})); this.mesh.frustumCulled=false; world.add(this.mesh); }
+  update(t){ const a=this.mesh.geometry.attributes.position; let k=0; for(let i=0;i<this.pls.length;i++){ const pl=this.pls[i]; for(let j=0;j<this.per;j++){ if(!this.active[i]||pl.len===0){ a.setXYZ(k++, 0,-99999,0); continue; } const u=((t*this.speed/pl.len)+j/this.per)%1; const p=sample(pl,u); a.setXYZ(k++, p.x,p.y,p.z); } } a.needsUpdate=true; }
 }
 function sample(pl, u){ const d=u*pl.len; let i=1; while(i<pl.cum.length-1 && pl.cum[i]<d) i++; const t=(d-pl.cum[i-1])/((pl.cum[i]-pl.cum[i-1])||1); return pl.pts[i-1].clone().lerp(pl.pts[i], t); }
 
-// sprite textures
-function tex(draw){ const c=document.createElement('canvas'); c.width=c.height=64; const x=c.getContext('2d'); draw(x); const t=new THREE.CanvasTexture(c); return t; }
+// ---------- textures and sprites ----------
+function tex(draw){ const c=document.createElement('canvas'); c.width=c.height=64; draw(c.getContext('2d')); return new THREE.CanvasTexture(c); }
 const TEX = {
   dot: tex(x=>{ const g=x.createRadialGradient(32,32,2,32,32,30); g.addColorStop(0,'rgba(255,255,255,1)'); g.addColorStop(0.5,'rgba(255,255,255,.6)'); g.addColorStop(1,'rgba(255,255,255,0)'); x.fillStyle=g; x.fillRect(0,0,64,64); }),
   glow: tex(x=>{ const g=x.createRadialGradient(32,32,0,32,32,32); g.addColorStop(0,'rgba(255,240,180,.9)'); g.addColorStop(0.3,'rgba(255,220,120,.35)'); g.addColorStop(1,'rgba(255,200,80,0)'); x.fillStyle=g; x.fillRect(0,0,64,64); }),
@@ -1240,111 +1277,168 @@ const TEX = {
   diamond: tex(x=>{ x.fillStyle='#ff3b3b'; x.beginPath(); x.moveTo(32,4); x.lineTo(60,32); x.lineTo(32,60); x.lineTo(4,32); x.closePath(); x.fill(); x.fillStyle='#200'; x.beginPath(); x.arc(32,32,7,0,7); x.fill(); }),
   bolt: tex(x=>{ x.fillStyle='#4fd1c5'; x.beginPath(); x.arc(32,32,28,0,7); x.fill(); x.fillStyle='#062'; x.beginPath(); x.moveTo(36,6); x.lineTo(18,36); x.lineTo(31,36); x.lineTo(27,58); x.lineTo(46,26); x.lineTo(33,26); x.closePath(); x.fill(); }),
   nonet: tex(x=>{ x.fillStyle='#d857d8'; x.beginPath(); x.arc(32,32,26,0,7); x.fill(); x.strokeStyle='#fff'; x.lineWidth=6; x.beginPath(); x.moveTo(18,18); x.lineTo(46,46); x.moveTo(46,18); x.lineTo(18,46); x.stroke(); }),
-  person: tex(x=>{ x.fillStyle='#ffffff'; x.beginPath(); x.arc(32,18,9,0,7); x.fill(); x.beginPath(); x.roundRect(20,30,24,30,8); x.fill(); }),
-  marine: tex(x=>{ x.fillStyle='#8be05a'; x.beginPath(); x.arc(32,18,9,0,7); x.fill(); x.beginPath(); x.roundRect(20,30,24,30,8); x.fill(); x.fillStyle='#233'; x.fillRect(10,40,44,6); }),
+  person: tex(x=>{ x.fillStyle='#ffffff'; x.beginPath(); x.arc(32,16,8,0,7); x.fill(); x.beginPath(); x.roundRect(22,28,20,32,8); x.fill(); }),
+  marine: tex(x=>{ x.fillStyle='#8be05a'; x.beginPath(); x.arc(32,16,8,0,7); x.fill(); x.beginPath(); x.roundRect(22,28,20,32,8); x.fill(); x.fillStyle='#233'; x.fillRect(10,40,44,6); }),
   flame: tex(x=>{ x.fillStyle='#ff7a30'; x.beginPath(); x.moveTo(32,6); x.bezierCurveTo(50,26,50,44,32,58); x.bezierCurveTo(14,44,14,26,32,6); x.fill(); }),
   rad: tex(x=>{ x.fillStyle='#e8d34a'; x.beginPath(); x.arc(32,32,28,0,7); x.fill(); x.fillStyle='#222'; for(let k=0;k<3;k++){ x.beginPath(); x.moveTo(32,32); x.arc(32,32,24, k*2.094+0.35, k*2.094+1.4); x.closePath(); x.fill(); } x.beginPath(); x.arc(32,32,5,0,7); x.fill(); }),
+  steam: tex(x=>{ const g=x.createRadialGradient(32,32,0,32,32,30); g.addColorStop(0,'rgba(230,235,245,.55)'); g.addColorStop(1,'rgba(230,235,245,0)'); x.fillStyle=g; x.fillRect(0,0,64,64); }),
+  red: tex(x=>{ const g=x.createRadialGradient(32,32,0,32,32,30); g.addColorStop(0,'rgba(255,60,60,1)'); g.addColorStop(0.4,'rgba(255,60,60,.5)'); g.addColorStop(1,'rgba(255,60,60,0)'); x.fillStyle=g; x.fillRect(0,0,64,64); }),
 };
-function textSprite(text, color='#d9dde6', px=28){ const c=document.createElement('canvas'); const x=c.getContext('2d'); x.font=`600 ${px}px sans-serif`; const w=Math.ceil(x.measureText(text).width)+16; c.width=w; c.height=px+14; const x2=c.getContext('2d'); x2.font=`600 ${px}px sans-serif`; x2.fillStyle='rgba(10,12,18,.75)'; x2.beginPath(); x2.roundRect(0,0,w,px+14,8); x2.fill(); x2.fillStyle=color; x2.textBaseline='middle'; x2.fillText(text,8,(px+14)/2); const s=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(c), transparent:true, depthTest:false})); s.scale.set(w/px*4.2, 4.2*(px+14)/px, 1); return s; }
+const spriteCache=new Map();
+function textSprite(text, color='#d9dde6', px=28){ const key=text+'|'+color+'|'+px; if(!spriteCache.has(key)){ const c=document.createElement('canvas'); const x=c.getContext('2d'); x.font=`600 ${px}px sans-serif`; const w=Math.ceil(x.measureText(text).width)+16; c.width=w; c.height=px+14; const x2=c.getContext('2d'); x2.font=`600 ${px}px sans-serif`; x2.fillStyle='rgba(10,12,18,.78)'; x2.beginPath(); x2.roundRect(0,0,w,px+14,8); x2.fill(); x2.fillStyle=color; x2.textBaseline='middle'; x2.fillText(text,8,(px+14)/2); spriteCache.set(key, {map:new THREE.CanvasTexture(c), w, h:px+14}); }
+  const e=spriteCache.get(key); const s=new THREE.Sprite(new THREE.SpriteMaterial({map:e.map, transparent:true, depthTest:false})); s.scale.set(e.w/px*4.6, 4.6*e.h/px, 1); s.userData.px=px; return s; }
+function retext(sprite, text, color){ const key=text+'|'+color+'|'+sprite.userData.px; if(sprite.userData.key===key) return; sprite.userData.key=key; const tmp=textSprite(text,color,sprite.userData.px); sprite.material.map=tmp.material.map; sprite.material.needsUpdate=true; sprite.scale.copy(tmp.scale); }
 
 // ---------- scene ----------
 const mapEl=document.getElementById('map');
 const renderer=new THREE.WebGLRenderer({antialias:true}); renderer.setPixelRatio(Math.min(devicePixelRatio,2)); mapEl.appendChild(renderer.domElement);
 const scene=new THREE.Scene(); scene.background=new THREE.Color(0x05070b);
-const camera=new THREE.PerspectiveCamera(50,1,1,60000); camera.position.set(250, RP+720, 820);
-const controls=new OrbitControls(camera, renderer.domElement); controls.target.set(0,RP,0); controls.minDistance=60; controls.maxDistance=RP*4; controls.enablePan=true; controls.panSpeed=0.6; controls.enableDamping=true; controls.dampingFactor=0.08; controls.zoomSpeed=1.2;
+const camera=new THREE.PerspectiveCamera(50,1,1,80000); camera.position.set(500, RP+1500, 1700);
+const controls=new OrbitControls(camera, renderer.domElement); controls.target.set(0,RP,0); controls.minDistance=40; controls.maxDistance=RP*4; controls.enablePan=true; controls.screenSpacePanning=false; controls.panSpeed=2.2; controls.zoomSpeed=3.0; controls.enableDamping=true; controls.dampingFactor=0.1; controls.keyPanSpeed=40; controls.listenToKeyEvents(window);
+controls.mouseButtons={LEFT:THREE.MOUSE.ROTATE, MIDDLE:THREE.MOUSE.DOLLY, RIGHT:THREE.MOUSE.PAN};
+window.addEventListener('keydown', e=>{ if(e.shiftKey) controls.mouseButtons.LEFT=THREE.MOUSE.PAN; if(['w','a','s','d'].includes(e.key)){ const d=camera.position.distanceTo(controls.target)*0.06; const f=new THREE.Vector3().subVectors(controls.target,camera.position); const n=controls.target.clone().normalize(); f.projectOnPlane(n).normalize(); const r=new THREE.Vector3().crossVectors(f,n).normalize(); const m=e.key==='w'?f:e.key==='s'?f.clone().negate():e.key==='d'?r.clone().negate():r; m.multiplyScalar(d); controls.target.add(m); camera.position.add(m); } });
+window.addEventListener('keyup', e=>{ if(!e.shiftKey) controls.mouseButtons.LEFT=THREE.MOUSE.ROTATE; });
 scene.add(new THREE.AmbientLight(0xa8b0c4, 1.5)); scene.add(new THREE.HemisphereLight(0x778ab0, 0x2a2118, 0.8));
-const sun=new THREE.DirectionalLight(0xffe0b0, 1.3); scene.add(sun); const sunSprite=new THREE.Sprite(new THREE.SpriteMaterial({map:TEX.glow, transparent:true, depthTest:false})); sunSprite.scale.set(900,900,1); scene.add(sunSprite);
-// stars
-{ const n=2500, p=new Float32Array(n*3); for(let i=0;i<n;i++){ const v=new THREE.Vector3().randomDirection().multiplyScalar(30000); p.set([v.x,v.y,v.z], i*3); } const g=new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(p,3)); scene.add(new THREE.Points(g, new THREE.PointsMaterial({color:0xbfc8dc, size:2.2, sizeAttenuation:false}))); }
-// planet
-{ const c=document.createElement('canvas'); c.width=1024; c.height=512; const x=c.getContext('2d'); x.fillStyle='#2c2925'; x.fillRect(0,0,1024,512); for(let i=0;i<9000;i++){ const r=Math.random(); x.fillStyle=r<0.5?'#25221e':(r<0.8?'#36312c':'#413b35'); x.globalAlpha=0.6; x.beginPath(); x.arc(Math.random()*1024, Math.random()*512, Math.random()*9+1, 0, 7); x.fill(); } x.globalAlpha=1;
-  const t=new THREE.CanvasTexture(c); t.wrapS=THREE.RepeatWrapping; const planet=new THREE.Mesh(new THREE.SphereGeometry(RP,128,96), new THREE.MeshStandardMaterial({map:t, roughness:1, metalness:0})); scene.add(planet);
-  const atm=new THREE.Mesh(new THREE.SphereGeometry(RP*1.035,64,48), new THREE.MeshBasicMaterial({color:0x4a6a9a, transparent:true, opacity:0.10, side:THREE.BackSide, depthWrite:false})); scene.add(atm); }
+const sun=new THREE.DirectionalLight(0xffe0b0, 1.3); scene.add(sun); const sunSprite=new THREE.Sprite(new THREE.SpriteMaterial({map:TEX.glow, transparent:true, depthTest:false})); sunSprite.scale.set(1800,1800,1); scene.add(sunSprite);
+{ const n=3000, p=new Float32Array(n*3); for(let i=0;i<n;i++){ const v=new THREE.Vector3().randomDirection().multiplyScalar(60000); p.set([v.x,v.y,v.z], i*3); } const g=new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(p,3)); scene.add(new THREE.Points(g, new THREE.PointsMaterial({color:0xbfc8dc, size:2.2, sizeAttenuation:false}))); }
+// planet: layered value noise + craters, used as colour and bump
+{ const W=2048, H=1024, c=document.createElement('canvas'); c.width=W; c.height=H; const x=c.getContext('2d'); const img=x.createImageData(W,H); const d=img.data;
+  const rnd=(i,j)=>{ let n=Math.sin(i*127.1+j*311.7)*43758.5453; return n-Math.floor(n); };
+  const noise=(u,v)=>{ const i=Math.floor(u), j=Math.floor(v), fu=u-i, fv=v-j, su=fu*fu*(3-2*fu), sv=fv*fv*(3-2*fv); const a=rnd(i,j), b=rnd(i+1,j), cc=rnd(i,j+1), dd=rnd(i+1,j+1); return a+(b-a)*su+(cc-a)*sv+(a-b-cc+dd)*su*sv; };
+  for(let y=0;y<H;y++) for(let xx=0;xx<W;xx++){ let v=0, amp=1, f=4; for(let o=0;o<5;o++){ v+=noise(xx/W*f, y/H*f)*amp; amp*=0.5; f*=2.1; } v/=1.94; const k=(y*W+xx)*4; const base=38+v*70; d[k]=base+8*v; d[k+1]=base-2; d[k+2]=base-10; d[k+3]=255; }
+  x.putImageData(img,0,0);
+  for(let i=0;i<900;i++){ const cx=Math.random()*W, cy=Math.random()*H, r=2+Math.random()*Math.random()*40; const g=x.createRadialGradient(cx,cy,r*0.6,cx,cy,r); g.addColorStop(0,'rgba(20,18,16,.55)'); g.addColorStop(0.85,'rgba(120,110,100,.25)'); g.addColorStop(1,'rgba(0,0,0,0)'); x.fillStyle=g; x.beginPath(); x.arc(cx,cy,r,0,7); x.fill(); }
+  const t=new THREE.CanvasTexture(c); t.wrapS=THREE.RepeatWrapping; const bump=new THREE.CanvasTexture(c);
+  scene.add(new THREE.Mesh(new THREE.SphereGeometry(RP,160,120), new THREE.MeshStandardMaterial({map:t, bumpMap:bump, bumpScale:14, roughness:1, metalness:0})));
+  scene.add(new THREE.Mesh(new THREE.SphereGeometry(RP*1.03,64,48), new THREE.MeshBasicMaterial({color:0x4a6a9a, transparent:true, opacity:0.10, side:THREE.BackSide, depthWrite:false}))); }
 
 const world=new THREE.Group(); scene.add(world);
 const labelGroup=new THREE.Group(); world.add(labelGroup);
-const lod = { near: [], mid: [] };   // sprites shown by camera distance
-function addLabel(text, x, y, h, color, tier='mid'){ const s=textSprite(text,color); s.position.copy(sph(x,y,h)); labelGroup.add(s); lod[tier].push(s); return s; }
-let housesMesh, polesMesh, spans, feeders, trunkLine, towerLine, solarLine, waterMain, waterSectors, cableTrunk, cableTower, cableSectors, flowPower, flowWater, packetsPts, markers={}, gates=[], rovers={}, hub={}, complex={}, roadMeshes=[];
-const flatHouses=[];
+const lod={near:[], mid:[]};
+function addLabel(text, x, y, h, color, tier='mid', live=false){ const s=textSprite(text,color); s.position.copy(sph(x,y,h)); labelGroup.add(s); lod[tier].push(s); if(live) liveLabels.push(s); return s; }
+const liveLabels=[];
+const clickables=[];   // {obj, id, kind, extra}
+function clickable(obj, id, kind, extra){ obj.traverse(o=>{ o.userData.click={id,kind,extra}; }); obj.userData.click={id,kind,extra}; clickables.push(obj); return obj; }
+let housesMesh, polesMesh, armsMesh, lampsMesh, wallMesh, benchMesh, spanLines, netLines, flowPower, flowWater, packetsPts, markers={}, gates=[], rovers={}, hub={}, complex={}, roadMeshes={ring:[]}, pipes={}, rpBoxes=[], cabBoxes=[];
+const flatHouses=[]; let spanCurves=[], trunkCurves=[], towerCurves=[], solarCurves=[], feederCurves=[], waterMainPts=[], waterSectorPts=[], cableTowerCurves=[];
 
-function build(){
-  const c=G.cfg, R=c.ring_road_radius, ns=c.sectors, PPS=c.poles_per_sector;
-  // roads
-  const ring=arcPts(0,360,R,120); roadMeshes.ring = []; for(let s=0;s<ns;s++){ const m=ribbon(arcPts(s*60,(s+1)*60,R,24), 12, 0.6, 0x6a7182); world.add(m); roadMeshes.ring.push(m); }
-  for(let s=0;s<ns;s++){ world.add(ribbon([polar(s*60,c.hub_radius+2), polar(s*60,R)], 6, 0.5, 0x3f4656)); world.add(ribbon([polar(s*60+30,c.hub_radius+2), polar(s*60+30,R)], 5, 0.5, 0x3a4150)); }
-  for(let k=0;k<5;k++){ const r=c.house_radius_min+k*c.house_ring_step; for(let s=0;s<ns;s++) world.add(ribbon(arcPts(s*60+3,s*60+57,r-10,20), 3, 0.4, 0x363c4a)); }
-  world.add(ribbon([[-R,0],[c.reactor[0]+30,0]], 12, 0.6, 0x6a7182));                       // trunk road
-  world.add(ribbon([c.tower_junction, c.tower], 6, 0.5, 0x3f4656));                            // tower road
-  world.add(ribbon([[c.reactor[0]+30,0],[c.reactor[0]+30,c.mine[1]+20]], 6, 0.5, 0x3f4656)); // service road along the complex
-  world.add(ribbon([[c.reactor[0]+30,-20],c.solar], 5, 0.5, 0x3f4656));
-  // hub plaza
-  world.add(new THREE.Mesh(new THREE.CircleGeometry(c.hub_radius,48), new THREE.MeshStandardMaterial({color:0x2b303c, roughness:1})).translateY(0)); { const m=world.children[world.children.length-1]; m.position.copy(sph(0,0,0.7)); m.quaternion.copy(quatAt(0,0)); m.rotateX(-Math.PI/2); }
-  // houses
-  const hg=new THREE.BoxGeometry(12,8,12); housesMesh=new THREE.InstancedMesh(hg, new THREE.MeshLambertMaterial({emissive:0x202020}), G.houses.x.length); const m4=new THREE.Matrix4();
-  for(let i=0;i<G.houses.x.length;i++){ const x=G.houses.x[i], y=G.houses.y[i]; flatHouses.push([x,y]); m4.compose(sph(x,y,4), quatAt(x,y,-Math.atan2(y,x)), new THREE.Vector3(1,G.houses.type[i]===3?1.6:1,1)); housesMesh.setMatrixAt(i,m4); housesMesh.setColorAt(i,new THREE.Color(0xffa040)); }
-  housesMesh.instanceMatrix.needsUpdate=true; world.add(housesMesh);
-  // poles and lamps
-  polesMesh=new THREE.InstancedMesh(new THREE.CylinderGeometry(1.1,1.4,18,6), new THREE.MeshStandardMaterial({color:0xb8b8b8}), G.poles.x.length);
-  for(let i=0;i<G.poles.x.length;i++){ m4.compose(sph(G.poles.x[i],G.poles.y[i],9), quatAt(G.poles.x[i],G.poles.y[i]), new THREE.Vector3(1,1,1)); polesMesh.setMatrixAt(i,m4); } world.add(polesMesh);
-  markers.lamps=pointsLayer(G.poles.x.length, TEX.glow, 0xffe08a, 40, true);
-  // power spans: rp -> pole0 -> ... per sector; feeders hub -> rp
-  const spanPl=[]; for(let i=0;i<G.poles.x.length;i++){ const k=G.poles.k[i], s=G.poles.sector[i]; const a= k===0? polar(s*60+30,c.hub_radius+18) : [G.poles.x[i-1],G.poles.y[i-1]]; spanPl.push([a,[G.poles.x[i],G.poles.y[i]]]); }
-  spans=new LineLayer(spanPl, 17, 0xf2c14e); world.add(spans.mesh);
-  const feederPl=[]; for(let s=0;s<ns;s++) feederPl.push([polar(s*60+30,c.hub_radius-30), polar(s*60+30,c.hub_radius+18)]); feeders=new LineLayer(feederPl, 17, 0xf2c14e); world.add(feeders.mesh);
-  const drops=[]; for(let i=0;i<G.houses.x.length;i++){ const p=G.houses.pole[i]; drops.push([[G.houses.x[i],G.houses.y[i]],[G.poles.x[p],G.poles.y[p]]]); } const dropLayer=new LineLayer(drops, 8, 0x5a4a2a); world.add(dropLayer.mesh);
-  trunkLine=new LineLayer([[[c.reactor[0]+22,6],[-R,6],[-c.hub_radius+6,6]]], 17, 0xf2c14e); world.add(trunkLine.mesh);
-  towerLine=new LineLayer([[[c.tower_junction[0]+6,6],[c.tower[0]+6,c.tower[1]+12]]], 17, 0xf2c14e); world.add(towerLine.mesh);
-  solarLine=new LineLayer([[[c.solar[0]+30,c.solar[1]+10],[c.reactor[0]+22,-8]]], 17, 0xf2c14e); world.add(solarLine.mesh);
-  // water: plant -> trunk road (offset -6) -> hub; hub -> sector mains along the radial street (offset +6)
-  waterMain=new LineLayer([[[c.water_plant[0]+20,c.water_plant[1]-20],[c.reactor[0]+40,-6],[-R,-6],[-c.hub_radius+6,-6]]], 2, 0x5aa9ff); world.add(waterMain.mesh);
-  const wsec=[]; for(let s=0;s<ns;s++){ const a=s*60+30, off=7; const pts=[]; for(const r of [c.hub_radius-20, R-20]){ const [x,y]=polar(a,r); pts.push([x-Math.sin(a*Math.PI/180)*off, y+Math.cos(a*Math.PI/180)*off]); } wsec.push(pts); } waterSectors=new LineLayer(wsec, 2, 0x5aa9ff); world.add(waterSectors.mesh);
-  // internet cable: tower -> junction -> trunk road (offset +12) -> hub; hub -> cabinets -> along poles (offset -7)
-  cableTower=new LineLayer([[[c.tower[0]-6,c.tower[1]+12],[c.tower_junction[0]-6,12],[-R,12],[-c.hub_radius+8,12]]], 15, 0x4fd1c5); world.add(cableTower.mesh);
-  const csec=[]; for(let i=0;i<G.poles.x.length;i++){ const k=G.poles.k[i], s=G.poles.sector[i], a=(s*60+30)*Math.PI/180, off=-7; const o=p=>[p[0]-Math.sin(a)*off, p[1]+Math.cos(a)*off]; const p0= k===0? polar(s*60+30,c.hub_radius-30):[G.poles.x[i-1],G.poles.y[i-1]]; csec.push([o(p0), o([G.poles.x[i],G.poles.y[i]])]); } cableSectors=new LineLayer(csec, 15, 0x4fd1c5); world.add(cableSectors.mesh);
-  // flow layers
-  flowPower=new FlowLayer([...spanPl, ...feederPl, trunkLine.polylines[0], towerLine.polylines[0], solarLine.polylines[0]], 18, 0xfff2b0, 6, 2, 0.5); world.add(flowPower.mesh);
-  flowWater=new FlowLayer([waterMain.polylines[0], ...wsec], 3, 0x9ad0ff, 5, 3, 0.3); world.add(flowWater.mesh);
-  packetsPts=pointsLayer(80, TEX.dot, 0x4fd1c5, 8, false); markers.packetsRed=pointsLayer(20, TEX.dot, 0xe2574d, 8, false);
-  // markers
-  markers.issues=pointsLayer(60, TEX.bang, 0xffffff, 18, false); markers.nonet=pointsLayer(300, TEX.nonet, 0xffffff, 10, false); markers.heater=pointsLayer(300, TEX.flame, 0xffffff, 7, false);
-  markers.people=pointsLayer(60, TEX.person, 0xffffff, 7, false); markers.xenos=pointsLayer(20, TEX.diamond, 0xffffff, 16, false); markers.marines=pointsLayer(8, TEX.marine, 0xffffff, 9, false); markers.ups=pointsLayer(7, TEX.bolt, 0xffffff, 16, false);
-  // gates
-  for(let s=0;s<ns;s++){ const [gx,gy]=polar(s*60,R); const g=new THREE.Group(); g.position.copy(sph(gx,gy,1)); g.quaternion.copy(quatAt(gx,gy,-s*60*Math.PI/180)); const post=new THREE.Mesh(new THREE.BoxGeometry(3,10,3), new THREE.MeshStandardMaterial({color:0x8a93a6})); post.position.set(0,5,8); g.add(post); const arm=new THREE.Mesh(new THREE.BoxGeometry(1.6,1.6,16), new THREE.MeshStandardMaterial({color:0x5ec07a})); arm.position.set(0,9,8); arm.geometry.translate(0,0,-8); g.add(arm); const lamp=new THREE.Mesh(new THREE.SphereGeometry(1.4,8,8), new THREE.MeshBasicMaterial({color:0x5ec07a})); lamp.position.set(0,11,8); g.add(lamp); world.add(g); gates.push({g, arm, lamp}); }
-  // hub buildings
-  hub.sub=box(0,-38,44,16,24,0x6a6d78,0xf2c14e); hub.ups=box(-46,8,26,12,18,0x3f6a6a,0x4fd1c5); hub.ops=box(0,40,40,14,20,0x666a78,0xc9cfdb); hub.tank=cyl(-14,-4,12,22,0x2a4a6a,0x5aa9ff);
-  hub.comms=cyl(46,8,2.2,46,0x9aa3b5,null); { const s=new THREE.Mesh(new THREE.SphereGeometry(4,10,10), new THREE.MeshBasicMaterial({color:0x4fd1c5})); s.position.copy(sph(46,8,50)); world.add(s); hub.commsBall=s; }
-  addLabel('substation',0,-38,22,'#f2c14e','near'); addLabel('UPS center',-46,8,20,'#4fd1c5','near'); addLabel('ops center',0,40,20,'#c9cfdb','near'); addLabel('water tank',-14,-4,30,'#5aa9ff','near'); addLabel('comms node',46,8,58,'#4fd1c5','near');
-  // reactor complex
-  const rx=c.reactor[0], ry=c.reactor[1];
-  complex.contain=cyl(rx,ry,24,26,0x555a66,null); complex.dome=new THREE.Mesh(new THREE.SphereGeometry(24,24,12,0,Math.PI*2,0,Math.PI/2), new THREE.MeshStandardMaterial({color:0x6a6f7a, roughness:.6})); complex.dome.position.copy(sph(rx,ry,26)); complex.dome.quaternion.copy(quatAt(rx,ry)); world.add(complex.dome);
-  complex.tw1=cyl(rx-44,ry-30,10,44,0x8a8f9a,null); complex.tw2=cyl(rx-44,ry+30,10,44,0x8a8f9a,null);
-  complex.core=new THREE.Mesh(new THREE.SphereGeometry(6,10,10), new THREE.MeshBasicMaterial({color:0x5ec07a})); complex.core.position.copy(sph(rx,ry,52)); world.add(complex.core);
-  addLabel('REACTOR', rx, ry, 70, '#5ec07a', 'mid');
-  // solar field
-  complex.panels=[]; for(let i=0;i<6;i++) for(let j=0;j<4;j++){ const px=c.solar[0]-30+i*12, py=c.solar[1]-18+j*12; const p=new THREE.Mesh(new THREE.BoxGeometry(10,0.8,7), new THREE.MeshStandardMaterial({color:0x1c2f5a, roughness:.3, metalness:.4, emissive:0x102040, emissiveIntensity:0.2})); p.position.copy(sph(px,py,3)); p.quaternion.copy(quatAt(px,py)); p.rotateX(-0.5); world.add(p); complex.panels.push(p); }
-  addLabel('solar field', c.solar[0], c.solar[1], 20, '#e0b04a', 'mid');
-  complex.water=box(c.water_plant[0],c.water_plant[1],36,16,26,0x2a4a6a,0x5aa9ff); complex.waterTank=cyl(c.water_plant[0]+28,c.water_plant[1],9,20,0x2a4a6a,0x5aa9ff); addLabel('water plant: melting ice', c.water_plant[0], c.water_plant[1], 24, '#5aa9ff', 'mid');
-  complex.rad=box(c.radwaste[0],c.radwaste[1],44,9,32,0x5a5a2a,0xe8d34a); addLabel('radioactive waste storage', c.radwaste[0], c.radwaste[1], 16, '#e8d34a', 'mid');
-  { const s=new THREE.Sprite(new THREE.SpriteMaterial({map:TEX.rad, transparent:true})); s.scale.set(12,12,1); s.position.copy(sph(c.radwaste[0],c.radwaste[1],14)); world.add(s); }
-  complex.mine=box(c.mine[0],c.mine[1],40,14,30,0x4a3a2a,0xa08a2a); complex.head=box(c.mine[0]+30,c.mine[1],6,40,6,0x6a5a3a,null); addLabel('mine', c.mine[0], c.mine[1], 24, '#a08a2a', 'mid');
-  complex.waste=box(c.waste_station[0],c.waste_station[1],26,10,20,0x3a4a2a,0x9bd36a); addLabel('waste processing', c.waste_station[0], c.waste_station[1], 16, '#9bd36a', 'near');
-  // tower
-  complex.tower=cyl(c.tower[0],c.tower[1],2.2,70,0x9aa3b5,null); complex.towerBall=new THREE.Mesh(new THREE.SphereGeometry(4,10,10), new THREE.MeshBasicMaterial({color:0x4fd1c5})); complex.towerBall.position.copy(sph(c.tower[0],c.tower[1],74)); world.add(complex.towerBall);
-  complex.rings=[]; for(let k=0;k<3;k++){ const r=new THREE.Mesh(new THREE.TorusGeometry(8+k*7,0.6,6,32), new THREE.MeshBasicMaterial({color:0x4fd1c5, transparent:true, opacity:0.5-0.12*k})); r.position.copy(sph(c.tower[0],c.tower[1],74)); r.quaternion.copy(quatAt(c.tower[0],c.tower[1])); r.rotateX(Math.PI/2); world.add(r); complex.rings.push(r); }
-  addLabel('radio tower: uplink', c.tower[0], c.tower[1], 92, '#4fd1c5', 'mid');
-  // rovers
-  const rc={garbage:[0x9bd36a,'G'], sludge:[0xb48ead,'S'], engineer:[0xf2c14e,'E'], 'engineer-2':[0xf2c14e,'E2'], plumber:[0x5aa9ff,'P']};
-  for(const [name,[col,l]] of Object.entries(rc)){ const g=new THREE.Group(); const body=new THREE.Mesh(new THREE.BoxGeometry(10,5,6), new THREE.MeshStandardMaterial({color:col})); body.position.y=3; g.add(body); const lab=textSprite(l,'#fff',26); lab.position.y=12; lab.scale.multiplyScalar(0.7); g.add(lab); world.add(g); rovers[name]={g,lab,target:null,state:''}; }
-  // sector labels
-  for(let s=0;s<ns;s++){ const [x,y]=polar(s*60+30,R+40); addLabel(`S${s+1}`,x,y,6,'#9aa3b5','mid'); }
-  applyLayers();
-}
-function box(x,y,w,h,d,color,edge){ const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d), new THREE.MeshStandardMaterial({color, roughness:.8})); m.position.copy(sph(x,y,h/2)); m.quaternion.copy(quatAt(x,y,Math.atan2(y,x))); world.add(m); if(edge){ const e=new THREE.LineSegments(new THREE.EdgesGeometry(m.geometry), new THREE.LineBasicMaterial({color:edge})); m.add(e); } return m; }
-function cyl(x,y,r,h,color){ const m=new THREE.Mesh(new THREE.CylinderGeometry(r,r,h,16), new THREE.MeshStandardMaterial({color, roughness:.7})); m.position.copy(sph(x,y,h/2)); m.quaternion.copy(quatAt(x,y)); world.add(m); return m; }
+function box(x,y,w,h,d,color,edge,yaw){ const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d), new THREE.MeshStandardMaterial({color, roughness:.8})); m.position.copy(sph(x,y,h/2)); m.quaternion.copy(quatAt(x,y,yaw===undefined?-Math.atan2(y,x):yaw)); world.add(m); if(edge){ m.add(new THREE.LineSegments(new THREE.EdgesGeometry(m.geometry), new THREE.LineBasicMaterial({color:edge}))); } return m; }
+function cyl(x,y,r,h,color,opts={}){ const m=new THREE.Mesh(new THREE.CylinderGeometry(r,r,h,18), new THREE.MeshStandardMaterial({color, roughness:.7, ...opts})); m.position.copy(sph(x,y,h/2)); m.quaternion.copy(quatAt(x,y)); world.add(m); return m; }
+function localGroup(x,y,h,yaw){ const g=new THREE.Group(); g.position.copy(sph(x,y,h)); g.quaternion.copy(quatAt(x,y,yaw||0)); world.add(g); return g; }
 function pointsLayer(n, map, color, size, additive){ const g=new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(n*3).fill(-99999),3)); const m=new THREE.Points(g, new THREE.PointsMaterial({map, color, size, transparent:true, depthWrite:false, blending: additive?THREE.AdditiveBlending:THREE.NormalBlending, sizeAttenuation:true})); m.frustumCulled=false; world.add(m); return m; }
 function setPoints(layer, flatPts, h){ const a=layer.geometry.attributes.position; const n=a.count; for(let i=0;i<n;i++){ if(i<flatPts.length){ const p=sph(flatPts[i][0],flatPts[i][1],h); a.setXYZ(i,p.x,p.y,p.z); } else a.setXYZ(i,0,-99999,0); } a.needsUpdate=true; }
+
+function build(){
+  const c=G.cfg, R=c.ring_road_radius, WR=c.wall_radius, ns=c.sectors, HR=c.hub_radius, rx=c.reactor_pos[0], ry=c.reactor_pos[1];
+  // ground plate of the city, lighter than the terrain
+  cap(WR+6, 0.25, 0x33302c);
+  // ---- roads ----
+  for(let s=0;s<ns;s++){ roadMeshes.ring.push(ribbon(arcPts(s*60,(s+1)*60,R,30), 14, 0.7, 0x7c8496)); ribbon(arcPts(s*60,(s+1)*60,R,30), 0.8, 0.9, 0xb9c0cc); }
+  for(let s=0;s<ns;s++){ ribbon([polar(s*60,HR-4), polar(s*60,WR+70)], 10, 0.6, 0x717889); }   // boundary streets through the gate and out
+  for(let s=0;s<ns;s++) for(let k=0;k<=c.house_rows;k++){ const r=c.house_radius_min-30+k*c.house_ring_step; ribbon(arcPts(s*60+2.5,s*60+57.5,r,20), 8, 0.6, 0x5c6374); }
+  ribbon([[-WR-70,0],[rx+70,0]], 14, 0.7, 0x7c8496); ribbon([[-WR-70,0],[rx+70,0]], 0.8, 0.9, 0xb9c0cc);   // trunk road
+  ribbon([[rx+70,-40],[rx+70,c.mine_pos[1]+40]], 10, 0.6, 0x717889);      // service road along the complex
+  ribbon([[rx+70,-40],[c.solar_pos[0]+60,c.solar_pos[1]+40]], 8, 0.6, 0x717889);
+  ribbon([c.tower_junction,[c.tower_pos[0],c.tower_pos[1]+40]], 8, 0.6, 0x717889);
+  ribbon([[c.waste_station_pos[0]+40,0],[c.waste_station_pos[0]+40,c.waste_station_pos[1]-20]], 8, 0.6, 0x717889);
+  // hub plaza
+  cap(HR, 0.9, 0x3a3f4b, 8, 64);
+  // ---- wall and gates ----
+  { const segs=[]; for(let s=0;s<ns;s++){ const a0=s*60+3.2, a1=(s+1)*60-3.2, n=24; for(let i=0;i<n;i++){ const a=a0+(a1-a0)*(i+0.5)/n; segs.push(a); } }
+    wallMesh=new THREE.InstancedMesh(new THREE.BoxGeometry(WR*2*Math.PI*54/360/24+1.5, 14, 5), new THREE.MeshStandardMaterial({color:0x6f6a62, roughness:.9}), segs.length); const m4=new THREE.Matrix4();
+    segs.forEach((a,i)=>{ const [x,y]=polar(a,WR); m4.compose(sph(x,y,7), quatAt(x,y,-a*Math.PI/180-Math.PI/2), new THREE.Vector3(1,1,1)); wallMesh.setMatrixAt(i,m4); }); world.add(wallMesh);
+    for(let g=0;g<ns;g++){ const a=g*60; const [gx,gy]=polar(a,WR); const grp=localGroup(gx,gy,0,-a*Math.PI/180); const tw=new THREE.MeshStandardMaterial({color:0x7c766e});
+      const t1=new THREE.Mesh(new THREE.BoxGeometry(8,22,8), tw); t1.position.set(0,11,-12); grp.add(t1); const t2=new THREE.Mesh(new THREE.BoxGeometry(8,22,8), tw); t2.position.set(0,11,12); grp.add(t2);
+      const arm=new THREE.Mesh(new THREE.BoxGeometry(1.8,1.8,20), new THREE.MeshStandardMaterial({color:0x5ec07a})); arm.geometry.translate(0,0,10); arm.position.set(0,7,-10); grp.add(arm);
+      const lamp=new THREE.Mesh(new THREE.SphereGeometry(1.6,8,8), new THREE.MeshBasicMaterial({color:0x5ec07a})); lamp.position.set(0,23,-12); grp.add(lamp);
+      clickable(grp, 'gate'+g, 'gate', g); gates.push({g:grp, arm, lamp}); addLabel(`gate ${g+1}`, gx, gy, 32, '#c9cfdb', 'near'); }
+  }
+  // ---- houses ----
+  const hg=new THREE.BoxGeometry(20,11,20); housesMesh=new THREE.InstancedMesh(hg, new THREE.MeshLambertMaterial({emissive:0x1a1a1a}), G.houses.x.length); const m4=new THREE.Matrix4();
+  for(let i=0;i<G.houses.x.length;i++){ const x=G.houses.x[i], y=G.houses.y[i]; flatHouses.push([x,y]); m4.compose(sph(x,y,5.5), quatAt(x,y,-Math.atan2(y,x)), new THREE.Vector3(1,G.houses.type[i]===3?1.7:1,1)); housesMesh.setMatrixAt(i,m4); housesMesh.setColorAt(i,new THREE.Color(0xffa040)); }
+  housesMesh.instanceMatrix.needsUpdate=true; world.add(housesMesh);
+  // benches along the row streets
+  { const list=[]; for(let s=0;s<ns;s++) for(let k=0;k<=c.house_rows;k++){ const r=c.house_radius_min-30+k*c.house_ring_step+6; for(let m=0;m<4;m++){ const a=s*60+9+m*13; list.push([a,r]); } }
+    benchMesh=new THREE.InstancedMesh(new THREE.BoxGeometry(6,1.6,2), new THREE.MeshStandardMaterial({color:0x8a6a3a}), list.length);
+    list.forEach(([a,r],i)=>{ const [x,y]=polar(a,r); m4.compose(sph(x,y,1.2), quatAt(x,y,-a*Math.PI/180), new THREE.Vector3(1,1,1)); benchMesh.setMatrixAt(i,m4); }); world.add(benchMesh); }
+  // ---- poles, arms, lamps, cables ----
+  const P=G.poles.x.length;
+  polesMesh=new THREE.InstancedMesh(new THREE.CylinderGeometry(0.9,1.2,24,8), new THREE.MeshStandardMaterial({color:0x9a9a9a}), P);
+  armsMesh=new THREE.InstancedMesh(new THREE.BoxGeometry(7,0.8,0.8), new THREE.MeshStandardMaterial({color:0x777}), P);
+  lampsMesh=new THREE.InstancedMesh(new THREE.SphereGeometry(1.3,8,8), new THREE.MeshBasicMaterial({color:0xffe9a8}), P);
+  markers.lampGlow=pointsLayer(P, TEX.glow, 0xffe08a, 60, true);
+  for(let i=0;i<P;i++){ const x=G.poles.x[i], y=G.poles.y[i]; const yaw=G.poles.kind[i]===0? -G.poles.angle[i]*Math.PI/180+Math.PI/2 : -G.poles.angle[i]*Math.PI/180;
+    m4.compose(sph(x,y,12), quatAt(x,y,yaw), new THREE.Vector3(1,1,1)); polesMesh.setMatrixAt(i,m4); m4.compose(sph(x,y,23), quatAt(x,y,yaw), new THREE.Vector3(1,1,1)); armsMesh.setMatrixAt(i,m4); m4.compose(sph(x,y,21), quatAt(x,y,yaw), new THREE.Vector3(1,1,1)); lampsMesh.setMatrixAt(i,m4); }
+  world.add(polesMesh); world.add(armsMesh); world.add(lampsMesh);
+  spanCurves=[]; const netCurves=[];
+  for(let i=0;i<P;i++){ const p=G.poles.parent[i]; const b=sph(G.poles.x[i],G.poles.y[i],24); let a; if(p<0){ const s=G.poles.sector[i]; const [qx,qy]=polar(s*60+1.6, HR+20); a=sph(qx,qy,24); } else a=sph(G.poles.x[p],G.poles.y[p],24);
+    const L=a.distanceTo(b); spanCurves.push(catenary(a,b,Math.min(5,L*0.08))); const a2=a.clone().addScaledVector(a.clone().normalize(),-3), b2=b.clone().addScaledVector(b.clone().normalize(),-3); netCurves.push(catenary(a2,b2,Math.min(6,L*0.09))); }
+  spanLines=new LineLayer(spanCurves, 0xf2c14e); netLines=new LineLayer(netCurves, 0x4fd1c5);
+  // rp cabinets and internet cabinets at the start of each boundary street
+  for(let s=0;s<ns;s++){ const [qx,qy]=polar(s*60+1.6, HR+20); const rp=box(qx,qy,6,10,10,0x6a6d78,0xf2c14e,-(s*60)*Math.PI/180); clickable(rp,'rp'+s,'rp',s); rpBoxes.push(rp);
+    const [cx,cy]=polar(s*60+4.5, HR+20); const cab=box(cx,cy,5,9,7,0x3f6a6a,0x4fd1c5,-(s*60)*Math.PI/180); clickable(cab,'cab'+s,'cabinet',s); cabBoxes.push(cab);
+    const [ux,uy]=polar(s*60+8.5, HR+22); const ups=box(ux,uy,14,8,10,0x3f6a6a,0x4fd1c5,-(s*60)*Math.PI/180); clickable(ups,'ups'+s,'ups',s); hub['ups'+s]=ups; addLabel(`S${s+1} distribution, UPS, cabinet`, qx, qy, 24, '#9aa3b5', 'near'); }
+  // feeders: underground from the substation to each rp (drawn as ground lines)
+  feederCurves=[]; for(let s=0;s<ns;s++){ const [qx,qy]=polar(s*60+1.6, HR+20); feederCurves.push(flat3([[0,-40],[qx,qy]],1.2)); } const feederLayer=new LineLayer(feederCurves,0xf2c14e); hub.feederLayer=feederLayer;
+  // trunk poles along the trunk road, tower poles along the tower road, solar line
+  { const tp=[]; for(let x=-WR-40;x>=rx+90;x-=60) tp.push([x,8]); const tpolesGeom=new THREE.CylinderGeometry(1.0,1.3,28,8); const tm=new THREE.InstancedMesh(tpolesGeom, new THREE.MeshStandardMaterial({color:0x9a9a9a}), tp.length+10);
+    let idx=0; tp.forEach(([x,y])=>{ m4.compose(sph(x,y,14), quatAt(x,y,Math.PI/2), new THREE.Vector3(1,1,1)); tm.setMatrixAt(idx++,m4); });
+    const towerPoles=[]; for(let y=-60;y>=c.tower_pos[1]+60;y-=70) towerPoles.push([c.tower_junction[0]+7,y]); towerPoles.forEach(([x,y])=>{ m4.compose(sph(x,y,14), quatAt(x,y,0), new THREE.Vector3(1,1,1)); tm.setMatrixAt(idx++,m4); }); tm.count=idx; world.add(tm);
+    const trunkPts=[sph(rx+70,8,28), ...tp.map(([x,y])=>sph(x,y,28)), sph(-WR-40,8,28)]; trunkCurves=[]; for(let i=0;i<trunkPts.length-1;i++) trunkCurves.push(catenary(trunkPts[i],trunkPts[i+1],5));
+    trunkCurves.push(flat3([[-WR-40,8],[-HR+10,8]],24)); hub.trunkLayer=new LineLayer(trunkCurves,0xf2c14e);   // into the city the trunk goes on the boundary street poles
+    const tpts=[sph(c.tower_junction[0]+7,8,28), ...towerPoles.map(([x,y])=>sph(x,y,28)), sph(c.tower_pos[0]+7,c.tower_pos[1]+40,28)]; towerCurves=[]; for(let i=0;i<tpts.length-1;i++) towerCurves.push(catenary(tpts[i],tpts[i+1],5)); hub.towerLayer=new LineLayer(towerCurves,0xf2c14e);
+    const npts=tpts.map(p=>p.clone().addScaledVector(p.clone().normalize(),-3)); cableTowerCurves=[]; for(let i=0;i<npts.length-1;i++) cableTowerCurves.push(catenary(npts[i],npts[i+1],6)); cableTowerCurves.push(...trunkPts.map(p=>p.clone().addScaledVector(p.clone().normalize(),-3)).map((p,i,arr)=> i<arr.length-1? catenary(p,arr[i+1],6):null).filter(Boolean)); cableTowerCurves.push(flat3([[-WR-40,8],[-HR+10,8]],21)); hub.cableTowerLayer=new LineLayer(cableTowerCurves,0x4fd1c5);
+    solarCurves=[flat3([[c.solar_pos[0]+70,c.solar_pos[1]+30],[rx+40,-60]],1.2)]; hub.solarLayer=new LineLayer(solarCurves,0xf2c14e); }
+  // ---- water: main pipe on the ground from the plant along the trunk road to the pump station, sector mains along boundary streets, branches along row streets ----
+  waterMainPts=flat3([[c.water_plant_pos[0]-10,c.water_plant_pos[1]-40],[rx+40,-10],[-WR-40,-10],[-HR+30,-10],[-60,-40]],1.6); pipes.main=tube(waterMainPts,2.2,0x3a78c8);
+  waterSectorPts=[]; pipes.sectors=[]; for(let s=0;s<ns;s++){ const a=s*60-1.4; const pts=flat3([polar(a,HR-30), polar(a,R-20)],1.2); waterSectorPts.push(pts); pipes.sectors.push(tube(pts,1.6,0x3a78c8)); for(let k=0;k<=c.house_rows;k++){ const r=c.house_radius_min-30+k*c.house_ring_step-3; tube(flat3(arcPts(a,s*60+57,r,16),0.9),0.7,0x2f5f9e); } }
+  // ---- hub: substation with transformers and a fenced yard, ups, comms, ops, pump station and tank ----
+  { const yard=localGroup(0,-70,0,0); const fence=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(70,6,44)), new THREE.LineBasicMaterial({color:0x9aa3b5})); fence.position.y=3; yard.add(fence);
+    for(let i=0;i<3;i++){ const tr=new THREE.Mesh(new THREE.BoxGeometry(12,10,9), new THREE.MeshStandardMaterial({color:0x6a6d78})); tr.position.set(-22+i*22,5,0); yard.add(tr); for(let j=0;j<3;j++){ const b=new THREE.Mesh(new THREE.CylinderGeometry(0.6,0.6,6,6), new THREE.MeshStandardMaterial({color:0xdddddd})); b.position.set(-22+i*22-3+j*3,13,0); yard.add(b); } }
+    const bus=new THREE.Mesh(new THREE.BoxGeometry(60,0.6,0.6), new THREE.MeshStandardMaterial({color:0xf2c14e})); bus.position.set(0,16.5,0); yard.add(bus); hub.yard=yard; clickable(yard,'substation','substation'); addLabel('substation 6 kV', 0, -70, 26, '#f2c14e', 'near', true).userData.role='sub';
+    hub.ups=clickable(box(-88,10,26,12,20,0x3f6a6a,0x4fd1c5),'upsc','upsc'); addLabel('UPS center', -88, 10, 24, '#4fd1c5', 'near', true).userData.role='ups';
+    hub.comms=clickable(box(88,10,22,14,18,0x4a4f5c,0x4fd1c5),'comms','comms'); const mast=cyl(88,10,1.2,44,0x9aa3b5); const dish=new THREE.Mesh(new THREE.ConeGeometry(4,3,12,1,true), new THREE.MeshStandardMaterial({color:0xdddddd, side:THREE.DoubleSide})); dish.position.copy(sph(88,10,40)); dish.quaternion.copy(quatAt(88,10)); dish.rotateX(-1.2); world.add(dish); addLabel('comms node', 88, 10, 52, '#4fd1c5', 'near', true).userData.role='comms';
+    hub.ops=clickable(box(0,80,44,16,26,0x666a78,0xc9cfdb),'ops','ops'); addLabel('operations center', 0, 80, 26, '#c9cfdb', 'near');
+    hub.pump=clickable(box(-40,-40,18,9,14,0x2a4a6a,0x5aa9ff),'pump','pump'); hub.tank=clickable(cyl(-70,-45,16,26,0x2a4a6a),'tank','tank'); addLabel('pump station', -40, -40, 20, '#5aa9ff', 'near', true).userData.role='pump'; addLabel('water tank', -70, -45, 38, '#5aa9ff', 'near', true).userData.role='tank';
+    pipes.hub=tube(flat3([[-60,-40],[-40,-40],[-70,-45]],2),2,0x3a78c8); for(let s=0;s<ns;s++){ const a=s*60-1.4; tube(flat3([[-70,-45],polar(a,HR-30)],1.4),1.4,0x3a78c8); }
+    // water level inside the tank
+    hub.tankLevel=new THREE.Mesh(new THREE.CylinderGeometry(16.5,16.5,1,18), new THREE.MeshBasicMaterial({color:0x5aa9ff, transparent:true, opacity:.8})); hub.tankLevel.quaternion.copy(quatAt(-70,-45)); world.add(hub.tankLevel); }
+  // ---- reactor complex ----
+  complex.contain=clickable(cyl(rx,ry,46,50,0x555a66),'reactor','reactor'); complex.dome=new THREE.Mesh(new THREE.SphereGeometry(46,32,16,0,Math.PI*2,0,Math.PI/2), new THREE.MeshStandardMaterial({color:0x6a6f7a, roughness:.6})); complex.dome.position.copy(sph(rx,ry,50)); complex.dome.quaternion.copy(quatAt(rx,ry)); world.add(complex.dome); clickable(complex.dome,'reactor','reactor');
+  complex.turbine=clickable(box(rx+10,ry+80,70,22,34,0x5c6070,0x9aa3b5),'reactor','reactor'); addLabel('turbine hall', rx+10, ry+80, 34, '#9aa3b5','near');
+  complex.tw1=cyl(rx-90,ry-60,22,90,0x8a8f9a); complex.tw2=cyl(rx-90,ry+60,22,90,0x8a8f9a); complex.steam=pointsLayer(24, TEX.steam, 0xffffff, 60, false); clickable(complex.tw1,'reactor','reactor'); clickable(complex.tw2,'reactor','reactor');
+  complex.core=new THREE.Mesh(new THREE.SphereGeometry(8,12,12), new THREE.MeshBasicMaterial({color:0x5ec07a})); complex.core.position.copy(sph(rx,ry,98)); world.add(complex.core);
+  { const sw=localGroup(rx+50,-60,0,0); for(let i=0;i<2;i++){ const tr=new THREE.Mesh(new THREE.BoxGeometry(12,10,9), new THREE.MeshStandardMaterial({color:0x6a6d78})); tr.position.set(i*18,5,0); sw.add(tr); } const fence=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(44,6,30)), new THREE.LineBasicMaterial({color:0x9aa3b5})); fence.position.set(9,3,0); sw.add(fence); addLabel('switchyard', rx+50, -60, 20, '#f2c14e','near'); }
+  addLabel('REACTOR, atmosphere processor', rx, ry, 120, '#5ec07a', 'mid', true).userData.role='reactor';
+  complex.panels=[]; for(let i=0;i<8;i++) for(let j=0;j<5;j++){ const px=c.solar_pos[0]-60+i*17, py=c.solar_pos[1]-40+j*20; const p=new THREE.Mesh(new THREE.BoxGeometry(14,0.8,10), new THREE.MeshStandardMaterial({color:0x1c2f5a, roughness:.3, metalness:.4, emissive:0x102040, emissiveIntensity:0.2})); p.position.copy(sph(px,py,4)); p.quaternion.copy(quatAt(px,py)); p.rotateX(-0.5); world.add(p); complex.panels.push(p); clickable(p,'solar','solar'); }
+  addLabel('solar field', c.solar_pos[0], c.solar_pos[1], 26, '#e0b04a', 'mid', true).userData.role='solar';
+  complex.water=clickable(box(c.water_plant_pos[0],c.water_plant_pos[1],60,24,40,0x2a4a6a,0x5aa9ff),'wplant','wplant'); complex.waterTank=clickable(cyl(c.water_plant_pos[0]+52,c.water_plant_pos[1]-10,14,30,0x2a4a6a),'wplant','wplant'); tube(flat3([[c.water_plant_pos[0]-30,c.water_plant_pos[1]+30],[c.water_plant_pos[0]-60,c.water_plant_pos[1]+90]],1.5),2,0x7a8aa0); addLabel('water plant: melting ground ice', c.water_plant_pos[0], c.water_plant_pos[1], 36, '#5aa9ff', 'mid', true).userData.role='wplant';
+  complex.rad=clickable(box(c.radwaste_pos[0],c.radwaste_pos[1],70,12,50,0x5a5a2a,0xe8d34a),'rad','rad'); { const s=new THREE.Sprite(new THREE.SpriteMaterial({map:TEX.rad, transparent:true})); s.scale.set(16,16,1); s.position.copy(sph(c.radwaste_pos[0],c.radwaste_pos[1],20)); world.add(s); const f=localGroup(c.radwaste_pos[0],c.radwaste_pos[1],0,0); const fence=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(100,5,80)), new THREE.LineBasicMaterial({color:0xe8d34a})); fence.position.y=2.5; f.add(fence); } addLabel('radioactive waste storage', c.radwaste_pos[0], c.radwaste_pos[1], 30, '#e8d34a', 'mid');
+  complex.mine=clickable(box(c.mine_pos[0],c.mine_pos[1],60,20,44,0x4a3a2a,0xa08a2a),'mine','mine'); { const hf=localGroup(c.mine_pos[0]+50,c.mine_pos[1],0,0); const legs=new THREE.Mesh(new THREE.BoxGeometry(3,60,3), new THREE.MeshStandardMaterial({color:0x8a7a5a})); legs.position.set(-8,30,0); hf.add(legs); const legs2=legs.clone(); legs2.position.set(8,30,0); hf.add(legs2); const wheel=new THREE.Mesh(new THREE.TorusGeometry(8,1.2,8,24), new THREE.MeshStandardMaterial({color:0xaaaaaa})); wheel.position.set(0,62,0); hf.add(wheel); complex.wheel=wheel; } addLabel('mine', c.mine_pos[0], c.mine_pos[1], 34, '#a08a2a', 'mid', true).userData.role='mine';
+  complex.waste=clickable(box(c.waste_station_pos[0],c.waste_station_pos[1],40,14,30,0x3a4a2a,0x9bd36a),'wproc','wproc'); addLabel('waste processing', c.waste_station_pos[0], c.waste_station_pos[1], 24, '#9bd36a', 'near', true).userData.role='wproc';
+  // ---- radio tower: lattice mast with guy wires, antennas and a dish ----
+  { const tx=c.tower_pos[0], ty=c.tower_pos[1]; const g=localGroup(tx,ty,0,0); const H=130; const legMat=new THREE.MeshStandardMaterial({color:0xc44a3a});
+    for(let k=0;k<4;k++){ const a=k*Math.PI/2+Math.PI/4; const leg=new THREE.Mesh(new THREE.CylinderGeometry(0.5,0.9,H,6), legMat); leg.position.set(Math.cos(a)*4,H/2,Math.sin(a)*4); leg.rotation.z=-Math.cos(a)*0.055; leg.rotation.x=Math.sin(a)*0.055; g.add(leg); }
+    const brace=[]; for(let l=0;l<12;l++){ const y=l*H/12, w=8-l*0.5; for(let k=0;k<4;k++){ const a1=k*Math.PI/2+Math.PI/4, a2=(k+1)*Math.PI/2+Math.PI/4; brace.push(Math.cos(a1)*w/2,y,Math.sin(a1)*w/2, Math.cos(a2)*w/2,y,Math.sin(a2)*w/2); brace.push(Math.cos(a1)*w/2,y,Math.sin(a1)*w/2, Math.cos(a2)*(w-0.5)/2,y+H/12,Math.sin(a2)*(w-0.5)/2); } }
+    const bg=new THREE.BufferGeometry(); bg.setAttribute('position', new THREE.Float32BufferAttribute(brace,3)); g.add(new THREE.LineSegments(bg, new THREE.LineBasicMaterial({color:0xd8d8d8})));
+    for(let k=0;k<3;k++){ const a=k*2.094; const wire=new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,H*0.75,0), new THREE.Vector3(Math.cos(a)*60,0,Math.sin(a)*60)]); g.add(new THREE.Line(wire, new THREE.LineBasicMaterial({color:0x888888}))); }
+    for(let k=0;k<3;k++){ const a=k*2.094; const panel=new THREE.Mesh(new THREE.BoxGeometry(2,12,5), new THREE.MeshStandardMaterial({color:0xeeeeee})); panel.position.set(Math.cos(a)*5,H-10,Math.sin(a)*5); panel.rotation.y=-a; g.add(panel); }
+    const dish=new THREE.Mesh(new THREE.ConeGeometry(7,4,16,1,true), new THREE.MeshStandardMaterial({color:0xeeeeee, side:THREE.DoubleSide})); dish.position.set(0,H*0.6,-6); dish.rotation.x=-1.3; g.add(dish);
+    complex.towerLight=new THREE.Sprite(new THREE.SpriteMaterial({map:TEX.red, transparent:true, depthTest:false})); complex.towerLight.scale.set(14,14,1); complex.towerLight.position.set(0,H+4,0); g.add(complex.towerLight);
+    complex.rings=[]; for(let k=0;k<3;k++){ const r=new THREE.Mesh(new THREE.TorusGeometry(10+k*8,0.6,6,32), new THREE.MeshBasicMaterial({color:0x4fd1c5, transparent:true, opacity:0.5})); r.position.set(0,H-10,0); r.rotation.x=Math.PI/2; g.add(r); complex.rings.push(r); }
+    clickable(g,'tower','tower'); complex.towerGroup=g; addLabel('radio tower: uplink to Weyland-Yutani', tx, ty, H+20, '#4fd1c5', 'mid', true).userData.role='tower'; }
+  // ---- flows, markers, rovers, sector labels ----
+  flowPower=new FlowLayer([...spanCurves, ...feederCurves, ...trunkCurves, ...towerCurves, ...solarCurves], 0xfff2b0, 8, 2, 45);
+  flowWater=new FlowLayer([waterMainPts, ...waterSectorPts], 0x9ad0ff, 7, 4, 30);
+  packetsPts=pointsLayer(80, TEX.dot, 0x4fd1c5, 9, false); markers.packetsRed=pointsLayer(20, TEX.dot, 0xe2574d, 9, false);
+  markers.issues=pointsLayer(60, TEX.bang, 0xffffff, 22, false); markers.nonet=pointsLayer(300, TEX.nonet, 0xffffff, 12, false); markers.heater=pointsLayer(300, TEX.flame, 0xffffff, 8, false);
+  markers.people=pointsLayer(80, TEX.person, 0xffffff, 9, false); markers.xenos=pointsLayer(20, TEX.diamond, 0xffffff, 20, false); markers.marines=pointsLayer(8, TEX.marine, 0xffffff, 11, false); markers.ups=pointsLayer(8, TEX.bolt, 0xffffff, 20, false);
+  const rc={garbage:[0x9bd36a,'garbage rover'], sludge:[0xb48ead,'sludge hauler'], engineer:[0xf2c14e,'engineering crew 1'], 'engineer-2':[0xf2c14e,'engineering crew 2'], plumber:[0x5aa9ff,'plumber']};
+  for(const [name,[col,l]] of Object.entries(rc)){ const g=new THREE.Group(); const body=new THREE.Mesh(new THREE.BoxGeometry(14,5,8), new THREE.MeshStandardMaterial({color:col})); body.position.y=3.5; g.add(body); const cab=new THREE.Mesh(new THREE.BoxGeometry(5,4,7), new THREE.MeshStandardMaterial({color:0x2a2f3a})); cab.position.set(5,8,0); g.add(cab); for(const [wx,wz] of [[-4,4],[4,4],[-4,-4],[4,-4]]){ const wh=new THREE.Mesh(new THREE.CylinderGeometry(2,2,1.5,10), new THREE.MeshStandardMaterial({color:0x222})); wh.rotation.x=Math.PI/2; wh.position.set(wx,2,wz); g.add(wh); }
+    const lab=textSprite(l,'#fff',22); lab.position.y=16; lab.scale.multiplyScalar(0.5); g.add(lab); world.add(g); clickable(g,'rover:'+name,'rover',name); rovers[name]={g,lab,from:null,to:null,q:null,t0:0}; }
+  for(let s=0;s<ns;s++){ const [x,y]=polar(s*60+30,R+70); addLabel(`Sector ${s+1}`,x,y,8,'#9aa3b5','mid'); }
+  applyLayers();
+}
 function applyLayers(){ if(!markers.issues) return; markers.issues.visible=layers.issues; markers.nonet.visible=layers.nonet; markers.ups.visible=layers.ups; markers.heater.visible=layers.heater; flowPower.mesh.visible=layers.power; flowWater.mesh.visible=layers.water; packetsPts.visible=layers.packets; markers.packetsRed.visible=layers.packets; markers.people.visible=layers.people; markers.xenos.visible=layers.threats; markers.marines.visible=layers.threats; labelGroup.visible=layers.labels; }
 
 // ---------- per state update ----------
@@ -1353,72 +1447,115 @@ function tempColor(t){ const u=Math.max(0,Math.min(1,(t+40)/65)); if(u<0.6){ con
 const packetsSeen=new Map();
 function onState(s, first){
   if(!G) return; if(!housesMesh) build();
-  const c=G.cfg, R=c.ring_road_radius, ns=c.sectors, PPS=c.poles_per_sector, hs=s.houses;
-  // houses
+  const c=G.cfg, ns=c.sectors, hs=s.houses, P=G.poles.x.length, m4=new THREE.Matrix4();
   for(let i=0;i<flatHouses.length;i++){ const col=tempColor(hs.t[i]).clone(); if(!hs.power[i]) col.multiplyScalar(0.35).lerp(new THREE.Color(0x203050),0.4); else if(hs.ups[i]) col.lerp(new THREE.Color(0x4fd1c5),0.45); else if(hs.limit[i]>0) col.lerp(new THREE.Color(0xe0b04a),0.3); housesMesh.setColorAt(i,col); }
   housesMesh.instanceColor.needsUpdate=true;
-  // spans, feeders, trunk, cable colours
-  for(let i=0;i<spans.polylines.length;i++) spans.setColor(i, s.poles.span[i]?0xf2c14e:0x5a2a2a);
-  for(let i=0;i<ns;i++) feeders.setColor(i, s.power.feeder[i]&&s.sectors[i].online?0xf2c14e:0x5a2a2a);
-  trunkLine.setColor(0, s.power.trunk?0xf2c14e:0x5a2a2a); towerLine.setColor(0, s.power.tower_line?0xf2c14e:0x5a2a2a); solarLine.setColor(0, s.power.solar_kw>0?0xf2c14e:0x6a5a3a);
-  for(let i=0;i<cableSectors.polylines.length;i++) cableSectors.setColor(i, s.poles.net[i]?0x4fd1c5:0x5a2a2a); cableTower.setColor(0, s.net.uplink?0x4fd1c5:0x5a2a2a);
-  waterMain.setColor(0, s.water.plant?0x5aa9ff:0x2a3a5a); for(let i=0;i<ns;i++) waterSectors.setColor(i, s.sectors[i].water_ok>0?0x5aa9ff:0x2a3a5a);
-  // flows
-  const nsp=spans.polylines.length; const reactorUp=s.reactor.available_mw>0;
-  for(let i=0;i<nsp;i++) flowPower.active[i]=!!s.poles.span[i]; for(let i=0;i<ns;i++) flowPower.active[nsp+i]=s.power.feeder[i]&&s.sectors[i].online;
-  flowPower.active[nsp+ns]=s.power.trunk&&reactorUp; flowPower.active[nsp+ns+1]=s.power.tower_line&&s.power.trunk&&reactorUp; flowPower.active[nsp+ns+2]=s.power.solar_kw>0;
-  const waterOn=s.water.tank_m3>0&&s.water.pump; flowWater.active[0]=s.water.plant; for(let i=0;i<ns;i++) flowWater.active[1+i]=waterOn&&s.sectors[i].water_ok>0;
-  // lamps
-  setPoints(markers.lamps, G.poles.x.map((x,i)=>s.poles.lamp[i]?[x,G.poles.y[i]]:null).filter(Boolean), 20);
-  // poles: fallen ones lie down (scale)
-  const m4=new THREE.Matrix4(); for(let i=0;i<G.poles.x.length;i++){ const st=s.poles.state[i]; const q=quatAt(G.poles.x[i],G.poles.y[i]); if(st===2) q.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),1.4)); else if(st===1) q.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),0.35)); m4.compose(sph(G.poles.x[i],G.poles.y[i],st===2?2:9), q, new THREE.Vector3(1,1,1)); polesMesh.setMatrixAt(i,m4); } polesMesh.instanceMatrix.needsUpdate=true;
+  for(let i=0;i<P;i++){ spanLines.setColor(i, s.poles.span[i]?0xf2c14e:0x5a2a2a); netLines.setColor(i, s.poles.net[i]?0x4fd1c5:0x5a2a2a); flowPower.active[i]=!!s.poles.span[i]; }
+  for(let i=0;i<ns;i++){ hub.feederLayer.setColor(i, s.power.feeder[i]&&s.sectors[i].online?0xf2c14e:0x5a2a2a); flowPower.active[P+i]=s.power.feeder[i]&&s.sectors[i].online; }
+  const reactorUp=s.reactor.available_mw>0; const nT=trunkCurves.length, nTw=towerCurves.length;
+  for(let i=0;i<nT;i++){ hub.trunkLayer.setColor(i, s.power.trunk?0xf2c14e:0x5a2a2a); flowPower.active[P+ns+i]=s.power.trunk&&reactorUp; }
+  for(let i=0;i<nTw;i++){ hub.towerLayer.setColor(i, s.power.tower_line?0xf2c14e:0x5a2a2a); flowPower.active[P+ns+nT+i]=s.power.tower_line&&s.power.trunk&&reactorUp; }
+  hub.solarLayer.setColor(0, s.power.solar_kw>0?0xf2c14e:0x6a5a3a); flowPower.active[P+ns+nT+nTw]=s.power.solar_kw>0;
+  for(let i=0;i<cableTowerCurves.length;i++) hub.cableTowerLayer.setColor(i, s.net.uplink?0x4fd1c5:0x5a2a2a);
+  const waterOn=s.water.tank_m3>0&&s.water.pump; flowWater.active[0]=s.water.plant; pipes.main.material.color.setHex(s.water.plant?0x3a78c8:0x3a4050); for(let i=0;i<ns;i++){ flowWater.active[1+i]=waterOn&&s.sectors[i].water_ok>0; pipes.sectors[i].material.color.setHex(waterOn&&s.sectors[i].water_ok>0?0x3a78c8:0x3a4050); }
+  // lamps and poles
+  setPoints(markers.lampGlow, G.poles.x.map((x,i)=>s.poles.lamp[i]?[x,G.poles.y[i]]:null).filter(Boolean), 21);
+  for(let i=0;i<P;i++){ const st=s.poles.state[i]; if(st===prevPole[i]) continue; prevPole[i]=st; const x=G.poles.x[i], y=G.poles.y[i]; const yaw=G.poles.kind[i]===0? -G.poles.angle[i]*Math.PI/180+Math.PI/2 : -G.poles.angle[i]*Math.PI/180; const q=quatAt(x,y,yaw); if(st===2) q.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),1.45)); else if(st===1) q.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),0.3));
+    m4.compose(sph(x,y,st===2?3:12), q, new THREE.Vector3(1,1,1)); polesMesh.setMatrixAt(i,m4); m4.compose(sph(x,y,st===2?3:23), q, new THREE.Vector3(st===2?0.01:1,1,1)); armsMesh.setMatrixAt(i,m4); lampsMesh.setMatrixAt(i,m4); polesMesh.instanceMatrix.needsUpdate=true; armsMesh.instanceMatrix.needsUpdate=true; lampsMesh.instanceMatrix.needsUpdate=true; }
+  lampsMesh.material.color.setHex(s.env.night||s.env.storm?0xffe9a8:0x777777);
   // markers
-  setPoints(markers.issues, s.issues.map(i=>[i.x,i.y]), 26);
-  setPoints(markers.nonet, flatHouses.filter((p,i)=>!hs.net[i]), 14);
-  setPoints(markers.heater, flatHouses.filter((p,i)=>hs.heater[i]&&hs.power[i]), 12);
-  setPoints(markers.people, s.people, 4);
-  setPoints(markers.xenos, s.xenos.map(x=>[x.x,x.y]), 8);
-  setPoints(markers.marines, s.marines, 5);
-  setPoints(markers.ups, s.sectors.map((x,i)=>x.ups==='DISCHARGING'||x.ups==='CHARGING'?polar(i*60+30,c.hub_radius+8):null).filter(Boolean).concat(s.power.ups_center==='DISCHARGING'||s.power.ups_center==='CHARGING'?[[-46,8]]:[]), 26);
-  // gates
-  for(let i=0;i<ns;i++){ const st=s.sectors[i].gate, g=gates[i]; g.arm.rotation.x = st==='OPEN'? -Math.PI/2 : 0; const col = st==='LOCKDOWN'?0xe2574d:(st==='OPEN'?0x5ec07a:0x8a93a6); g.arm.material.color.setHex(col); g.lamp.material.color.setHex(col); }
-  // hub and complex states
-  hub.sub.children[0].material.color.setHex(s.power.substation?0xf2c14e:0xe2574d); hub.commsBall.material.color.setHex(s.net.comms&&s.net.uplink?0x4fd1c5:0xe2574d);
-  for(let i=0;i<ns;i++){ const it=s.sectors[i].road; roadMeshes.ring[i].material.color.setHex(it<20?0x8a3a3a:(it<50?0x7a6a3a:0x6a7182)); }
-  const mc={ONLINE:0x5ec07a,RUNBACK:0xe0b04a,STARTING:0x5aa9ff}[s.reactor.mode]||0xe2574d; complex.core.material.color.setHex(mc); complex.core.scale.setScalar(s.reactor.mode==='ONLINE'?1:1.4);
+  setPoints(markers.issues, s.issues.map(i=>[i.x,i.y]), 34);
+  setPoints(markers.nonet, flatHouses.filter((p,i)=>!hs.net[i]), 18);
+  setPoints(markers.heater, flatHouses.filter((p,i)=>hs.heater[i]&&hs.power[i]), 15);
+  setPoints(markers.people, s.people, 3);
+  setPoints(markers.xenos, s.xenos.map(x=>[x.x,x.y]), 10);
+  setPoints(markers.marines, s.marines, 6);
+  setPoints(markers.ups, s.sectors.map((x,i)=>x.ups==='DISCHARGING'||x.ups==='CHARGING'?polar(i*60+8.5,c.hub_radius+22):null).filter(Boolean).concat(s.power.ups_center==='DISCHARGING'||s.power.ups_center==='CHARGING'?[[-88,10]]:[]), 30);
+  // gates: arm rotates with gate_open
+  for(let i=0;i<ns;i++){ const st=s.sectors[i].gate, g=gates[i]; g.arm.rotation.x=-Math.PI/2*s.sectors[i].gate_open; const col=st==='LOCKDOWN'?0xe2574d:(st==='OPEN'?0x5ec07a:0x8a93a6); g.arm.material.color.setHex(col); g.lamp.material.color.setHex(col); }
+  // hub and complex live state
+  hub.yard.children[0].material.color.setHex(s.power.substation?0x9aa3b5:0xe2574d);
+  hub.tankLevel.scale.set(1, Math.max(0.05, 26*s.water.tank_m3/s.water.tank_cap), 1); hub.tankLevel.position.copy(sph(-70,-45, 0.5+13*s.water.tank_m3/s.water.tank_cap));
+  for(let i=0;i<ns;i++){ cabBoxes[i].material.color.setHex(s.sectors[i].cabinet?0x3f6a6a:0x6a3030); rpBoxes[i].material.color.setHex(s.sectors[i].rp_ok?0x6a6d78:0x6a3030); }
+  const mc={ONLINE:0x5ec07a,RUNBACK:0xe0b04a,STARTING:0x5aa9ff}[s.reactor.mode]||0xe2574d; complex.core.material.color.setHex(mc);
   const sol=Math.min(1, s.power.solar_kw/60); complex.panels.forEach(p=>{ p.material.emissiveIntensity=0.1+sol*1.2; p.material.emissive.setHex(0x2a5aff); });
-  complex.water.material.color.setHex(s.water.plant?0x2a4a6a:0x4a2a2a); complex.towerBall.material.color.setHex(s.net.uplink?0x4fd1c5:0xe2574d);
-  complex.mine.material.color.setHex(s.power.mine?0x4a3a2a:0x2a2a2a);
-  // rovers
-  for(const r of s.rovers){ const rv=rovers[r.name]; if(!rv) continue; rv.target=sph(r.x,r.y,3); rv.q=quatAt(r.x,r.y,Math.atan2(r.y,r.x)+Math.PI/2); if(first){ rv.g.position.copy(rv.target); } if(rv.state!==r.state){ rv.state=r.state; rv.g.remove(rv.lab); rv.lab=textSprite(`${r.name} ${r.state.toLowerCase().replace('_',' ')}`,'#fff',22); rv.lab.position.y=12; rv.lab.scale.multiplyScalar(0.55); rv.g.add(rv.lab); } }
-  // packets
-  const now=performance.now(); for(const p of s.net.packets){ const key=p.t+':'+p.from+':'+p.id; if(!packetsSeen.has(key)) packetsSeen.set(key,{t0:now,p}); }
-  // banner and sun
+  complex.water.material.color.setHex(s.water.plant?0x2a4a6a:0x4a2a2a); complex.towerLight.material.color.setHex(s.net.uplink?0xff3b3b:0x553030); complex.rings.forEach(r=>r.visible=!!s.net.uplink);
+  complex.mine.material.color.setHex(s.power.mine?0x4a3a2a:0x2a2a2a); complex.steamOn=s.reactor.mode==='ONLINE'||s.reactor.mode==='RUNBACK';
+  for(let i=0;i<ns;i++){ const it=s.sectors[i].road; roadMeshes.ring[i].material.color.setHex(it<20?0x8a3a3a:(it<50?0x7a6a3a:0x7c8496)); }
+  // live labels
+  for(const l of liveLabels){ const r=l.userData.role; if(r==='sub') retext(l, `substation ${s.power.available_kw} kW available, ${s.power.demand_kw} kW load${s.power.shedding?', shedding L'+s.power.shedding:''}`, s.power.substation?'#f2c14e':'#e2574d');
+    else if(r==='ups') retext(l, `UPS center ${s.power.ups_center_kwh} kWh ${s.power.ups_center.toLowerCase()}`, '#4fd1c5'); else if(r==='comms') retext(l, `comms node ${s.net.houses_online}/300 online, ${s.net.packets_per_min} pkt/min, uplink ${s.net.uplink?'OK':'LOST'}`, s.net.uplink?'#4fd1c5':'#e2574d');
+    else if(r==='pump') retext(l, `pump station ${s.water.flow_m3_h} m3/h to the city`, s.water.pump?'#5aa9ff':'#e2574d'); else if(r==='tank') retext(l, `water tank ${s.water.tank_m3} / ${s.water.tank_cap} m3`, s.water.tank_m3>100?'#5aa9ff':'#e2574d');
+    else if(r==='reactor') retext(l, `REACTOR ${s.reactor.mode}: ${s.reactor.power_mw} MW el, ${s.reactor.thermal_mw} MW th, core ${s.reactor.core_temp} C`, {ONLINE:'#5ec07a',RUNBACK:'#e0b04a',STARTING:'#5aa9ff'}[s.reactor.mode]||'#e2574d');
+    else if(r==='solar') retext(l, `solar field ${s.power.solar_kw} kW`, '#e0b04a'); else if(r==='wplant') retext(l, `water plant ${s.water.plant?s.water.plant_m3_h+' m3/h':'no heat'}`, s.water.plant?'#5aa9ff':'#e2574d');
+    else if(r==='mine') retext(l, `mine ${s.power.infra.mine} kW${s.power.mine_frac<1?' (curtailed)':''}`, s.power.mine?'#a08a2a':'#777'); else if(r==='wproc') retext(l, `waste processing, ${s.finance.waste_station} loads received`, '#9bd36a');
+    else if(r==='tower') retext(l, `radio tower uplink ${s.net.uplink?'OK':'LOST'}`, s.net.uplink?'#4fd1c5':'#e2574d'); }
+  // rovers: interpolate between the last two samples
+  const now=performance.now();
+  for(const r of s.rovers){ const rv=rovers[r.name]; if(!rv) continue; rv.from=rv.to||sph(r.x,r.y,1); rv.to=sph(r.x,r.y,1); rv.q=quatAt(r.x,r.y,-r.heading); rv.t0=now; rv.state=r.state; if(first) rv.g.position.copy(rv.to); retext(rv.lab, `${r.name} ${r.state.toLowerCase().replace(/_/g,' ')}`, '#fff'); }
+  for(const p of s.net.packets){ const key=p.t+':'+p.from+':'+p.id; if(!packetsSeen.has(key)) packetsSeen.set(key,{t0:now,p}); }
   const e=s.env; document.getElementById('banner').innerHTML=`<b>${s.time}</b> &nbsp; ${e.t_out} C, wind ${e.wind} m/s${e.storm?' <span class="bad">STORM</span>':''}${e.precip==='snow'?' snow':''}${e.night?' night':' day'}${s.paused?' <span class="warn">PAUSED</span>':''} &nbsp; ${s.speed} min/s`;
   const fin=document.getElementById('finished'); if(s.finished){ fin.style.display='flex'; fin.textContent='SIMULATION OVER: '+s.finish_reason; }
-  const m=s.time.match(/(\d\d):(\d\d)$/); const hour=m?(+m[1]+(+m[2])/60):12; const a=(hour-6)/24*Math.PI*2; sun.position.set(Math.cos(a)*6000, 1500, Math.sin(a)*6000); sunSprite.position.copy(sun.position).multiplyScalar(4); sun.intensity=0.6+0.9*(e.daylight/0.3);
+  const m=s.time.match(/(\d\d):(\d\d)$/); const hour=m?(+m[1]+(+m[2])/60):12; const a=(hour-6)/24*Math.PI*2; sun.position.set(Math.cos(a)*12000, 3200, Math.sin(a)*12000); sunSprite.position.copy(sun.position).multiplyScalar(4); sun.intensity=0.6+0.9*(e.daylight/0.3);
   if(first){ speedEl.value=speedToSlider(s.speed); speedV.textContent=s.speed+' min/s'; }
 }
+const prevPole=new Array(1000).fill(-1);
 
-// ---------- packets and rover motion per frame ----------
-function packetPath(pk){ const c=G.cfg, R=c.ring_road_radius, PPS=c.poles_per_sector; const path=[];
-  if(pk.from==='house'){ const i=pk.id, p=G.houses.pole[i], s=G.houses.sector[i]; path.push([G.houses.x[i],G.houses.y[i]]); for(let k=G.poles.k[p];k>=0;k--){ const j=s*PPS+k; path.push([G.poles.x[j],G.poles.y[j]]); } path.push(polar(s*60+30,c.hub_radius-30)); path.push([0,0]); }
-  else path.push([0,0]);
-  if(pk.kind==='reactor'||pk.kind==='lost'){ path.push([-c.hub_radius+8,12]); path.push([-R,12]); path.push([c.reactor[0]+22,12]); }
-  else if(pk.uplink){ path.push([-c.hub_radius+8,12]); path.push([-R,12]); path.push([c.tower_junction[0]-6,12]); path.push([c.tower[0]-6,c.tower[1]+12]); }
-  return path.map(p=>sph(p[0],p[1],16)); }
-function updatePackets(){ const now=performance.now(); const good=[], bad=[]; for(const [key,v] of packetsSeen){ const u=(now-v.t0)/1800; if(u>=1){ packetsSeen.delete(key); continue; } if(!v.path) v.path=packetPath(v.p); const P=v.path; let seg=Math.floor(u*(P.length-1)); const f=u*(P.length-1)-seg; if(seg>=P.length-1){ seg=P.length-2; } const q=P[seg].clone().lerp(P[seg+1], f); (v.p.uplink||v.p.kind==='reactor'?good:bad).push(q); }
+// ---------- packets ----------
+function packetPath(pk){ const c=G.cfg, HR=c.hub_radius, WR=c.wall_radius; const path=[];
+  if(pk.from==='house'){ let i=pk.id, p=G.houses.pole[i]; path.push(sph(G.houses.x[i],G.houses.y[i],6)); let guard=0; while(p>=0 && guard++<40){ path.push(sph(G.poles.x[p],G.poles.y[p],21)); p=G.poles.parent[p]; } const s=G.houses.sector[i]; const [cx,cy]=polar(s*60+4.5,HR+20); path.push(sph(cx,cy,10)); path.push(sph(88,10,20)); }
+  else path.push(sph(88,10,20));
+  if(pk.kind==='reactor'||pk.kind==='lost'){ path.push(sph(-HR+10,8,21)); path.push(sph(-WR-40,8,25)); path.push(sph(c.reactor_pos[0]+70,8,25)); path.push(sph(c.reactor_pos[0],c.reactor_pos[1],30)); }
+  else if(pk.uplink){ path.push(sph(-HR+10,8,21)); path.push(sph(-WR-40,8,25)); path.push(sph(c.tower_junction[0]+7,8,25)); path.push(sph(c.tower_pos[0]+7,c.tower_pos[1]+40,25)); path.push(sph(c.tower_pos[0],c.tower_pos[1],120)); }
+  return path; }
+function updatePackets(){ const now=performance.now(); const good=[], bad=[]; for(const [key,v] of packetsSeen){ const u=(now-v.t0)/2200; if(u>=1){ packetsSeen.delete(key); continue; } if(!v.path) v.path=packetPath(v.p); const Pp=v.path; let seg=Math.floor(u*(Pp.length-1)); const f=u*(Pp.length-1)-seg; if(seg>=Pp.length-1) seg=Pp.length-2; const q=Pp[seg].clone().lerp(Pp[seg+1], f); (v.p.uplink||v.p.kind==='reactor'?good:bad).push(q); }
   const put=(layer,arr)=>{ const a=layer.geometry.attributes.position; for(let i=0;i<a.count;i++){ if(i<arr.length) a.setXYZ(i,arr[i].x,arr[i].y,arr[i].z); else a.setXYZ(i,0,-99999,0);} a.needsUpdate=true; }; put(packetsPts, good); put(markers.packetsRed, bad); }
 
-// ---------- camera fly, tooltip ----------
-function flyTo(x,y,dist){ const p=sph(x,y), n=p.clone().normalize(); const side=new THREE.Vector3().crossVectors(n, new THREE.Vector3(0,0,1)).normalize(); if(side.lengthSq()<1e-6) side.set(1,0,0); const back=new THREE.Vector3().crossVectors(side,n).normalize(); const pos=p.clone().add(n.multiplyScalar(dist*0.85)).add(back.multiplyScalar(dist*0.55)); flyAnim={from:camera.position.clone(), to:pos, tfrom:controls.target.clone(), tto:p, t0:performance.now()}; }
+// ---------- camera, picking, info panel ----------
 let flyAnim=null;
-document.querySelectorAll('#fly button').forEach(b=>b.onclick=()=>{ const c=G.cfg; const f=b.dataset.f; if(f==='hub') flyTo(0,0,320); else if(f==='reactor') flyTo(c.reactor[0],c.reactor[1],260); else if(f==='solar') flyTo(c.solar[0],c.solar[1],220); else if(f==='tower') flyTo(c.tower[0],c.tower[1],220); else if(f==='mine') flyTo(c.mine[0],c.mine[1],220); else flyAnim={from:camera.position.clone(), to:new THREE.Vector3(500,RP+2200,2000), tfrom:controls.target.clone(), tto:new THREE.Vector3(0,RP,0), t0:performance.now()}; });
-const ray=new THREE.Raycaster(); const mouse=new THREE.Vector2(); let hoverId=-1; ray.params.Points.threshold=6;
-renderer.domElement.addEventListener('mousemove', ev=>{ const r=renderer.domElement.getBoundingClientRect(); mouse.set(((ev.clientX-r.left)/r.width)*2-1, -((ev.clientY-r.top)/r.height)*2+1); showTip(ev.clientX-r.left, ev.clientY-r.top); });
-function showTip(mx,my){ const tip=document.getElementById('tip'); if(!housesMesh||!S){ tip.style.display='none'; return; } ray.setFromCamera(mouse,camera); const hit=ray.intersectObject(housesMesh,false)[0]; if(!hit){ tip.style.display='none'; hoverId=-1; return; } const i=hit.instanceId, h=S.houses; hoverId=i;
-  tip.innerHTML=`<b>House ${i+1}</b> (S${G.houses.sector[i]+1}, ${G.types[G.houses.type[i]]})<br>indoor ${h.t[i]} C, heater ${h.heater[i]?'on':'off'}<br>power ${h.power[i]?(h.ups[i]?'sector UPS':'grid'):'<span class="bad">none</span>'}${h.limit[i]?', limit '+h.limit[i]+' W':''}<br>water ${h.water[i]?'ok':'<span class="bad">no</span>'}${h.burst[i]?', <span class="bad">pipes burst</span>':''}<br>internet ${h.net[i]?'online':'<span class="warn">offline</span>'}, sludge ${Math.round(h.sludge[i]*100)}%`;
-  tip.style.display='block'; tip.style.left=(mx+14)+'px'; tip.style.top=(my+14)+'px'; }
+function flyTo(x,y,dist){ const p=sph(x,y), n=p.clone().normalize(); const side=new THREE.Vector3().crossVectors(n, new THREE.Vector3(0,0,1)).normalize(); if(side.lengthSq()<1e-6) side.set(1,0,0); const back=new THREE.Vector3().crossVectors(side,n).normalize(); const pos=p.clone().add(n.multiplyScalar(dist*0.85)).add(back.multiplyScalar(dist*0.55)); flyAnim={from:camera.position.clone(), to:pos, tfrom:controls.target.clone(), tto:p, t0:performance.now()}; }
+document.querySelectorAll('#fly button').forEach(b=>b.onclick=()=>{ const c=G.cfg; const f=b.dataset.f; if(f==='hub') flyTo(0,0,420); else if(f==='gate') flyTo(-c.wall_radius,0,300); else if(f==='reactor') flyTo(c.reactor_pos[0],c.reactor_pos[1],420); else if(f==='solar') flyTo(c.solar_pos[0],c.solar_pos[1],320); else if(f==='tower') flyTo(c.tower_pos[0],c.tower_pos[1],320); else if(f==='mine') flyTo(c.mine_pos[0],c.mine_pos[1],320); else if(f==='city') flyTo(0,0,1900); else flyAnim={from:camera.position.clone(), to:new THREE.Vector3(1200,RP+4200,3800), tfrom:controls.target.clone(), tto:new THREE.Vector3(0,RP,0), t0:performance.now()}; });
+const ray=new THREE.Raycaster(); const mouse=new THREE.Vector2(); ray.params.Points.threshold=8; const planetMesh=scene.children.find(o=>o.geometry&&o.geometry.type==='SphereGeometry');
+let downAt=null;
+renderer.domElement.addEventListener('pointerdown', ev=>{ downAt=[ev.clientX,ev.clientY]; });
+renderer.domElement.addEventListener('pointerup', ev=>{ if(!downAt) return; const moved=Math.hypot(ev.clientX-downAt[0], ev.clientY-downAt[1]); downAt=null; if(moved>4) return; pick(ev, true); });
+renderer.domElement.addEventListener('dblclick', ev=>{ setMouse(ev); ray.setFromCamera(mouse,camera); const hit=ray.intersectObject(planetMesh,false)[0]; if(hit){ const d=camera.position.distanceTo(controls.target); const to=camera.position.clone().sub(controls.target).add(hit.point); flyAnim={from:camera.position.clone(), to, tfrom:controls.target.clone(), tto:hit.point, t0:performance.now()}; } });
+renderer.domElement.addEventListener('mousemove', ev=>{ pick(ev, false); });
+function setMouse(ev){ const r=renderer.domElement.getBoundingClientRect(); mouse.set(((ev.clientX-r.left)/r.width)*2-1, -((ev.clientY-r.top)/r.height)*2+1); return [ev.clientX-r.left, ev.clientY-r.top]; }
+let selected=null;
+function pick(ev, click){ const [mx,my]=setMouse(ev); const tip=document.getElementById('tip'); if(!housesMesh||!S){ tip.style.display='none'; return; } ray.setFromCamera(mouse,camera);
+  const hh=ray.intersectObject(housesMesh,false)[0]; if(hh){ const i=hh.instanceId; if(click){ selected={kind:'house', id:i}; renderInfo(); } tipHtml(tip,mx,my,houseInfo(i,true)); return; }
+  const hits=ray.intersectObjects(clickables,true); if(hits.length){ const cl=hits[0].object.userData.click||hits[0].object.parent?.userData.click; if(cl){ if(click){ selected={kind:cl.kind, id:cl.id, extra:cl.extra}; renderInfo(); } tipHtml(tip,mx,my,`<b>${cl.id}</b><br><span class="dim">click for live stats</span>`); return; } }
+  const pp=ray.intersectObject(markers.people,false)[0]; if(pp){ const i=pp.index; const per=S.people[i]; if(per){ if(click){ selected={kind:'person', id:i}; renderInfo(); } tipHtml(tip,mx,my,personInfo(per)); return; } }
+  tip.style.display='none'; }
+function tipHtml(tip,mx,my,html){ tip.innerHTML=html; tip.style.display='block'; tip.style.left=(mx+14)+'px'; tip.style.top=(my+14)+'px'; }
+function houseInfo(i, short){ const h=S.houses; return `<b>House ${i+1}</b> (Sector ${G.houses.sector[i]+1}, ${G.types[G.houses.type[i]]}, ${G.houses.residents[i]} residents)<br>indoor ${h.t[i]} C, heater ${h.heater[i]?'on':'off'}, draw ${h.draw[i]} W${h.limit[i]?' (limit '+h.limit[i]+' W)':''}<br>power ${h.power[i]?(h.ups[i]?'sector UPS':'grid'):'<span class="bad">none</span>'}, water ${h.water[i]?'ok':'<span class="bad">no</span>'}${h.burst[i]?', <span class="bad">pipes burst</span>':''}<br>internet ${h.net[i]?'online':'<span class="warn">offline</span>'}, aeration sludge ${Math.round(h.sludge[i]*100)}%`+(short?'':`<br>pole ${G.houses.pole[i]}`); }
+function personInfo(per){ const st=['at home','walking to the hub','at the hub','walking home'][per[2]]; return `<b>Colonist</b> from house ${per[3]+1}, ${st}`; }
+function rows(pairs){ return '<table>'+pairs.map(([k,v])=>`<tr><td class="dim">${k}</td><td><b>${v}</b></td></tr>`).join('')+'</table>'; }
+function renderInfo(){ const box=document.getElementById('info'); if(!selected||!S){ box.style.display='none'; return; } const s=S, c=G.cfg; let title='', body='';
+  const k=selected.kind, x=selected.extra;
+  if(k==='house'){ title=`House ${selected.id+1}`; body=houseInfo(selected.id,false); }
+  else if(k==='person'){ const per=s.people[selected.id]; title='Colonist'; body=per?personInfo(per):'went home'; }
+  else if(k==='substation'){ title='Main substation'; body=rows([['available',s.power.available_kw+' kW'],['load',s.power.demand_kw+' kW'],['deficit',s.power.deficit_kw+' kW'],['shedding level',s.power.shedding],['trunk line',s.power.trunk?'ok':'CUT'],['feeders online',s.power.feeder.filter(Boolean).length+'/6'],['solar in',s.power.solar_kw+' kW'],['mine',s.power.infra.mine+' kW'],['road heating',s.power.infra.road_heating+' kW'],['lamps',s.power.infra.lamps+' kW'],['ups charging',s.power.infra.ups_charge+' kW']]); }
+  else if(k==='upsc'){ title='UPS center'; body=rows([['state',s.power.ups_center],['charge',s.power.ups_center_kwh+' / 800 kWh'],['feeds','ops center, comms node, pump station']]); }
+  else if(k==='ups'){ const sec=s.sectors[x]; title=`Sector ${x+1} UPS`; body=rows([['state',sec.ups],['charge',sec.ups_kwh+' / 400 kWh'],['sector load',sec.demand_kw+' kW'],['houses on power',sec.power_ok+'/50']]); }
+  else if(k==='rp'){ const sec=s.sectors[x]; title=`Sector ${x+1} distribution point`; body=rows([['feeder',sec.feeder_ok?'ok':'BROKEN'],['distribution point',sec.rp_ok?'ok':'DAMAGED'],['sector fed',sec.online?'yes':'no (shed or cut)'],['load',sec.demand_kw+' kW'],['lamps on',sec.lamps_on]]); }
+  else if(k==='cabinet'){ const sec=s.sectors[x]; title=`Sector ${x+1} internet cabinet`; body=rows([['online',sec.cabinet?'yes':'no'],['cabinet ups',sec.cabinet_ups_h+' h'],['houses online',sec.net_ok+'/50']]); }
+  else if(k==='comms'){ title='Comms node'; body=rows([['houses online',s.net.houses_online+'/300'],['traffic',s.net.packets_per_min+' packets/min'],['uplink',s.net.uplink?'OK':'LOST'],['reactor link',s.net.reactor_link?'ok':'lost'],['tower line power',s.power.tower_line?'ok':'cut']]); }
+  else if(k==='ops'){ title='Operations center'; body=rows([['time',s.time],['open issues',s.issues_total],['colony budget',s.finance.colony+' cr'],['month income',s.finance.month_income+' cr'],['month expense',s.finance.month_expense+' cr']]); }
+  else if(k==='pump'||k==='tank'){ title=k==='pump'?'Pump station':'Water tank'; body=rows([['tank',s.water.tank_m3+' / '+s.water.tank_cap+' m3'],['flow to houses',s.water.flow_m3_h+' m3/h'],['from the plant',s.water.plant_m3_h+' m3/h'],['pump power',s.water.pump?'ok':'NONE'],['houses with water',s.water.houses_ok+'/300'],['frozen / burst',s.water.frozen+' / '+s.water.burst]].concat(s.water.sector_m3_h.map((v,i)=>['sector '+(i+1), v+' m3/h']))); }
+  else if(k==='reactor'){ const r=s.reactor; title='Reactor, atmosphere processor'; body=rows([['mode',r.mode],['electric',r.power_mw+' MW (setpoint '+r.setpoint_mw+')'],['thermal',r.thermal_mw+' MW'],['to grid',r.available_mw+' MW'],['core',r.core_temp+' C'],['coolant',r.coolant_temp+' C, flow '+Math.round(r.flow*100)+'%'],['decay heat',r.decay_mw+' MW'],['pumps A / B',r.pump_a+' / '+r.pump_b],['heat exchanger',r.hx],['pump batteries',r.battery_h+' h'],['control link',r.link?'ok':'LOST'],['faults',r.faults.join(', ')||'none'],['marines',r.marines?'in the sublevels':'no']]); }
+  else if(k==='solar'){ title='Solar field'; body=rows([['output',s.power.solar_kw+' kW'],['daylight',Math.round(s.env.daylight/0.3*100)+'% of a clear day'],['dust',Math.round(s.env.dust*100)+'%']]); }
+  else if(k==='wplant'){ title='Water plant'; body=rows([['state',s.water.plant?'melting ice':'stopped'],['reactor heat',s.water.heat?'available':'none'],['output',s.water.plant_m3_h+' m3/h'],['tank in the city',s.water.tank_m3+' m3']]); }
+  else if(k==='rad'){ title='Radioactive waste storage'; body=rows([['load',s.power.infra.waste_storage+' kW'],['state','sealed'],['upkeep','3000 cr/month, colony']]); }
+  else if(k==='mine'){ title='Mine'; body=rows([['load',s.power.infra.mine+' kW'],['state',s.power.mine?(s.power.mine_frac<1?'curtailed to '+Math.round(s.power.mine_frac*100)+'%':'working'):'stopped'],['income','3 cr/min to the colony while powered']]); }
+  else if(k==='wproc'){ title='Waste processing'; body=rows([['loads received',s.finance.waste_station],['sector bins',s.sectors.map(x=>Math.round(x.waste*100)+'%').join(' ')]]); }
+  else if(k==='tower'){ title='Radio tower'; body=rows([['uplink',s.net.uplink?'OK':'LOST'],['line power',s.power.tower_line?'ok':'cut'],['comms node',s.net.comms?'ok':'down'],['traffic',s.net.packets_per_min+' packets/min']]); }
+  else if(k==='gate'){ const sec=s.sectors[x]; title=`Gate ${x+1}`; body=rows([['state',sec.gate],['open',Math.round(sec.gate_open*100)+'%'],['hardware',sec.gate_ok?'ok':'DAMAGED'],['lockdown left',sec.lockdown?sec.lockdown+' min':'none']]); }
+  else if(k==='rover'){ const r=s.rovers.find(r=>r.name===x); title=x; body=r?rows([['state',r.state.toLowerCase().replace(/_/g,' ')],['load',Math.round(r.load*100)+'%'],['job',r.job||'none'],['position',r.x+', '+r.y]]):''; }
+  document.getElementById('infotitle').textContent=title; document.getElementById('infobody').innerHTML=body; box.style.display='block'; }
+document.getElementById('infoclose').onclick=()=>{ selected=null; renderInfo(); };
+window.addEventListener('keydown', e=>{ if(e.key==='Escape'){ selected=null; renderInfo(); } });
 
 // ---------- render loop ----------
 function resize(){ const w=mapEl.clientWidth, h=mapEl.clientHeight; renderer.setSize(w,h,false); renderer.domElement.style.width=w+'px'; renderer.domElement.style.height=h+'px'; camera.aspect=w/h; camera.updateProjectionMatrix(); }
@@ -1428,10 +1565,11 @@ function frame(){ const now=performance.now(); const t=(now-t0)/1000;
   if(flyAnim){ const u=Math.min(1,(now-flyAnim.t0)/1200); const k=u*u*(3-2*u); camera.position.lerpVectors(flyAnim.from, flyAnim.to, k); controls.target.lerpVectors(flyAnim.tfrom, flyAnim.tto, k); if(u>=1) flyAnim=null; }
   controls.update();
   if(housesMesh){ flowPower.update(t); flowWater.update(t); updatePackets();
-    for(const rv of Object.values(rovers)){ if(rv.target){ rv.g.position.lerp(rv.target, 0.08); rv.g.quaternion.slerp(rv.q, 0.15); } }
-    const d=camera.position.distanceTo(controls.target); lod.near.forEach(s=>s.visible=layers.labels&&d<520); lod.mid.forEach(s=>s.visible=layers.labels&&d<2600);
+    for(const rv of Object.values(rovers)){ if(rv.to){ const u=Math.min(1,(now-rv.t0)/Math.max(200,pollGap)); rv.g.position.lerpVectors(rv.from, rv.to, u); rv.g.quaternion.slerp(rv.q, 0.2); } }
+    const d=camera.position.distanceTo(controls.target); lod.near.forEach(s=>s.visible=layers.labels&&d<900); lod.mid.forEach(s=>s.visible=layers.labels&&d<5000);
     complex.rings.forEach((r,k)=>{ const u=((t*0.8)+k/3)%1; r.scale.setScalar(0.5+u*1.5); r.material.opacity=0.6*(1-u); });
-    if(S) complex.rings.forEach(r=>r.visible=!!S.net.uplink); }
+    complex.towerLight.material.opacity=0.5+0.5*Math.sin(t*4); if(complex.wheel) complex.wheel.rotation.z+= (S&&S.power.mine)?0.05:0;
+    if(complex.steamOn!==undefined){ const c=G.cfg; const pts=[]; for(let k=0;k<12;k++){ const u=((t*0.25)+k/12)%1; for(const [tx,ty] of [[c.reactor_pos[0]-90,c.reactor_pos[1]-60],[c.reactor_pos[0]-90,c.reactor_pos[1]+60]]) pts.push(sph(tx+Math.sin(k*3+t)*6*u, ty+Math.cos(k*2)*6*u, 95+u*60)); } const a=complex.steam.geometry.attributes.position; for(let i=0;i<a.count;i++){ if(complex.steamOn&&i<pts.length) a.setXYZ(i,pts[i].x,pts[i].y,pts[i].z); else a.setXYZ(i,0,-99999,0);} a.needsUpdate=true; } }
   renderer.render(scene,camera); requestAnimationFrame(frame); }
 
 // ---------- side panel ----------
@@ -1454,12 +1592,12 @@ function renderSide(s){
   ];
   document.getElementById('kpi').innerHTML=kp.map(([l,v,c])=>`<div class="card"><div class="v ${c}">${v}</div><div class="l">${l}</div></div>`).join('');
   const inf=p.infra;
-  document.getElementById('reactor').innerHTML=`<div><b class="${r.mode==='ONLINE'?'ok':(r.mode==='RUNBACK'||r.mode==='STARTING'?'warn':'bad')}">${r.mode}</b> &nbsp; ${r.power_mw} MW gross, ${r.available_mw} MW to grid, core ${r.core_temp} C${r.decay_mw?`, decay ${r.decay_mw} MW`:''}${r.marines?' <span class="bad">marines in the sublevels</span>':''}</div>
-    <div class="dim">pumps A ${r.pump_a} B ${r.pump_b}, heat exchanger ${r.hx}, batteries ${r.battery_h} h, link ${r.link?'ok':'<span class="bad">lost</span>'}${r.faults.length?', faults: '+r.faults.join(', '):''}</div>
-    <div class="dim">solar ${p.solar_kw} kW (dim sun, ${Math.round(s.env.daylight*100/0.3)} % of a clear day); loads: mine ${inf.mine}, houses ${Math.round(p.demand_kw-Object.values(inf).reduce((a,b)=>a+b,0))}, water plant ${inf.water_plant}, radioactive waste storage ${inf.waste_storage}, road heating ${inf.road_heating}, lamps ${inf.lamps}, comms ${inf.comms}, ups charge ${inf.ups_charge} kW</div>
-    <div class="dim">trunk ${p.trunk?'ok':'<span class="bad">CUT</span>'}, substation ${p.substation?'ok':'<span class="bad">DOWN</span>'}, UPS center ${p.ups_center} ${p.ups_center_kwh} kWh, garbage delivered to processing ${f.waste_station} loads</div>`;
+  document.getElementById('reactor').innerHTML=`<div><b class="${r.mode==='ONLINE'?'ok':(r.mode==='RUNBACK'||r.mode==='STARTING'?'warn':'bad')}">${r.mode}</b> &nbsp; ${r.power_mw} MW el (setpoint ${r.setpoint_mw}), ${r.thermal_mw} MW th, ${r.available_mw} MW to grid, core ${r.core_temp} C, coolant ${r.coolant_temp} C${r.decay_mw?`, decay ${r.decay_mw} MW`:''}${r.marines?' <span class="bad">marines in the sublevels</span>':''}</div>
+    <div class="dim">pumps A ${r.pump_a} B ${r.pump_b}, flow ${Math.round(r.flow*100)} %, heat exchanger ${r.hx}, batteries ${r.battery_h} h, link ${r.link?'ok':'<span class="bad">lost</span>'}${r.faults.length?', faults: '+r.faults.join(', '):''}</div>
+    <div class="dim">solar ${p.solar_kw} kW (${Math.round(s.env.daylight*100/0.3)} % of a clear day); loads: mine ${inf.mine}, houses ${Math.round(p.demand_kw-Object.values(inf).reduce((a,b)=>a+b,0))}, water plant ${inf.water_plant}, radioactive waste storage ${inf.waste_storage}, road heating ${inf.road_heating}, lamps ${inf.lamps}, comms ${inf.comms}, ups charge ${inf.ups_charge} kW</div>
+    <div class="dim">trunk ${p.trunk?'ok':'<span class="bad">CUT</span>'}, substation ${p.substation?'ok':'<span class="bad">DOWN</span>'}, UPS center ${p.ups_center} ${p.ups_center_kwh} kWh, water plant ${w.plant_m3_h} m3/h, city draws ${w.flow_m3_h} m3/h</div>`;
   document.querySelector('#sectors tbody').innerHTML=s.sectors.map((x,i)=>`<tr class="sec" data-s="${i}"><td>${x.id}${x.dark?' <span class="warn">dark</span>':''}</td><td>${x.budget}</td><td>${x.demand_kw}</td><td class="${x.avg_t>15?'ok':(x.avg_t>4?'warn':'bad')}">${x.avg_t}</td><td class="${x.min_t>4?'ok':'bad'}">${x.min_t}</td><td class="${cls(x.power_ok===50,x.power_ok>30)}">${x.power_ok}</td><td class="${cls(x.water_ok===50,x.water_ok>30)}">${x.water_ok}</td><td class="${cls(x.net_ok===50,x.net_ok>30)}">${x.net_ok}</td><td class="${x.ups==='DISCHARGING'?'warn':(x.ups==='DEPLETED'?'bad':'dim')}">${x.ups.slice(0,4)} ${x.ups_kwh}</td><td class="${x.waste>=1?'bad':(x.waste>=0.9?'warn':'dim')}">${Math.round(x.waste*100)}%</td><td class="${x.sanitary>70?'ok':'bad'}">${x.sanitary}</td><td class="${x.gate==='OPEN'?'ok':(x.gate==='LOCKDOWN'?'bad':'warn')}">${x.gate.slice(0,4)}</td><td class="${x.road>20?'dim':'bad'}">${x.road}%</td></tr>`).join('');
-  document.querySelectorAll('#sectors tr.sec').forEach(tr=>tr.onclick=()=>{ const [x,y]=polar(+tr.dataset.s*60+30, 230); flyTo(x,y,330); });
+  document.querySelectorAll('#sectors tr.sec').forEach(tr=>tr.onclick=()=>{ const [x,y]=polar(+tr.dataset.s*60+30, 450); flyTo(x,y,520); });
   document.getElementById('nissues').textContent=`(${s.issues_total})`;
   document.getElementById('issues').innerHTML=s.issues.slice().reverse().map(i=>`<div><span class="${i.sev==='critical'?'bad':(i.sev==='warning'?'warn':'dim')}">${i.kind}</span> ${i.target} ${i.sector>0?'S'+i.sector:''} ${i.cause}, ${i.cost} cr (${i.payer}) <span class="dim">${i.status}, ${Math.round(i.age/60)} h</span></div>`).join('')||'<div>none</div>';
   document.getElementById('log').innerHTML=s.events.map(e=>`<div class="${e.level}">${String(e.t).padStart(6)} ${e.text}</div>`).join('');
@@ -1476,7 +1614,7 @@ loadGeom().then(()=>{ poll(); frame(); });
 def internet_step(w: World):
     c = w.cfg
     S = w.S
-    center_ok = w.comms_ok and getattr(w, "comms_powered", True)
+    center_ok = w.comms_ok and w.comms_powered
     w.uplink_ok = center_ok and w.tower_ok and w.tower_line_ok and w.trunk_ok and w.substation_ok
     for s in range(S):
         if w.sector_online[s] and w.rp_ok[s]:
@@ -1489,7 +1627,7 @@ def internet_step(w: World):
     w.net_sector_online = w.cabinet_online
     house_net = w.net_chain[w.h_pole] & w.h_terminal_ok & w.cabinet_online[w.h_sector] & w.h_power_ok
     w.h_net_online = house_net
-    # packets for the ui: telemetry from a few random houses, a control packet to the reactor
+    w.packets_per_min = int(house_net.sum()) * 2 + (12 if center_ok else 0)
     if w.t % 2 == 0:
         online = np.flatnonzero(house_net)
         if len(online):
@@ -1505,301 +1643,40 @@ def internet_step(w: World):
 
 
 # ------------------------------------------------------------------------------------
-# Roads, gates, rovers, waste, sewage
-# ------------------------------------------------------------------------------------
-
-def angle_diff(a, b):
-    """Signed shortest difference b - a in degrees."""
-    d = (b - a + 180.0) % 360.0 - 180.0
-    return d
-
-
-def road_segment_of(angle):
-    return int((angle % 360.0) // 60.0)
-
-
-def path_blocked(w: World, a0, a1, direction, rover: Rover):
-    """Walk from a0 to a1 in the given direction (+1 ccw / -1 cw); return True if a broken road or a locked gate is in the way."""
-    a = a0
-    steps = 0
-    while abs(angle_diff(a, a1)) > 1.0 and steps < 400:
-        seg = road_segment_of(a + direction * 0.5)
-        if w.road_integrity[seg] < 20 and rover.kind != "repair":
-            return True
-        # gate at multiples of 60
-        nxt = a + direction * 1.0
-        if int(a // 60) != int(nxt // 60):
-            g = int((nxt if direction > 0 else a) // 60) % 6
-            if w.gate_state[g] == "LOCKDOWN":
-                return True
-        a = nxt
-        steps += 1
-    return False
-
-
-def rover_move(w: World, r: Rover):
-    """Move rover toward its target: along the ring first, then radially."""
-    R = w.cfg["ring_road_radius"]
-    if r.wait > 0:
-        r.wait -= 1
-        return False
-    # radial move back to the ring if we are off it and the angle differs
-    if abs(angle_diff(r.angle, r.target_angle)) > 1.0:
-        if abs(r.radius - R) > 2:
-            r.radius += clamp(R - r.radius, -25, 25)
-            return False
-        d = angle_diff(r.angle, r.target_angle)
-        direction = 1 if d > 0 else -1
-        if path_blocked(w, r.angle, r.target_angle, direction, r):
-            if not path_blocked(w, r.angle, r.target_angle, -direction, r):
-                direction = -direction
-            else:
-                r.wait = 5
-                return False
-        step = min(abs(d), r.speed * (0.5 if w.road_icy and not w.road_heating_on else 1.0))
-        new_angle = r.angle + direction * step
-        # gate crossing costs a couple of ticks
-        if int(r.angle // 60) != int(new_angle // 60):
-            r.wait = 2
-        r.angle = new_angle % 360.0
-        return False
-    r.angle = r.target_angle
-    if abs(r.radius - r.target_radius) > 2:
-        r.radius += clamp(r.target_radius - r.radius, -25, 25)
-        return False
-    r.radius = r.target_radius
-    return True
-
-
-def rover_xy(w: World, r: Rover):
-    a = math.radians(r.angle)
-    return r.radius * math.cos(a), r.radius * math.sin(a)
-
-
-def sector_storage_angle(s):
-    return s * 60.0 + 30.0
-
-
-def roads_step(w: World):
-    c = w.cfg
-    S = w.S
-    # degradation: freeze-thaw-ish wear and traffic
-    wear = 0.0004 + (0.001 if w.road_icy and not w.road_heating_on else 0.0)
-    w.road_integrity = np.maximum(0.0, w.road_integrity - wear)
-    for s in range(S):
-        if w.road_integrity[s] < 20:
-            w.open_issue("road_blocked", f"road:{s}", s, "wear", "road",
-                         (c["ring_road_radius"] * math.cos(math.radians(s * 60 + 30)),
-                          c["ring_road_radius"] * math.sin(math.radians(s * 60 + 30))))
-    # gates
-    for s in range(S):
-        if w.lockdown_ticks[s] > 0:
-            w.lockdown_ticks[s] -= 1
-            w.gate_state[s] = "LOCKDOWN"
-            if w.lockdown_ticks[s] == 0:
-                w.gate_state[s] = "OPEN"
-                w.log("INFO", f"Sector {s + 1} lockdown lifted")
-        elif not w.gate_ok[s]:
-            w.gate_state[s] = "CLOSED"
-        elif not w.sector_online[s] and w.ups_state[s] in ("DEPLETED", "FAULT"):
-            pass  # unpowered: keep last state
-        else:
-            w.gate_state[s] = "OPEN"
-    # waste accumulation and sanitary index
-    residents = np.bincount(w.h_sector, weights=w.h_residents, minlength=S)
-    w.waste_level = np.minimum(1.2, w.waste_level + residents * c["waste_per_resident_per_tick"])
-    sludge_req = np.bincount(w.h_sector, weights=(w.h_sludge >= 0.95).astype(float), minlength=S)
-    overflow = w.waste_level >= 1.0
-    sewage_bad = (~w.h_aeration_ok) | (w.h_sludge >= 1.0)
-    sew_bad_frac = np.bincount(w.h_sector, weights=sewage_bad.astype(float), minlength=S) / c["houses_per_sector"]
-    w.sanitary = np.clip(w.sanitary - overflow * 0.05 - sew_bad_frac * 0.1 + (~overflow) * 0.02, 0, 100)
-    # rovers
-    garbage, sludge = w.rovers[0], w.rovers[1]
-    _garbage_rover(w, garbage)
-    _sludge_rover(w, sludge, sludge_req)
-    for r in w.rovers[2:]:
-        _repair_rover(w, r)
-
-
-def _garbage_rover(w: World, r: Rover):
-    c = w.cfg
-    R = c["ring_road_radius"]
-    if r.state == "IDLE":
-        need = np.flatnonzero(w.waste_level >= 0.9)
-        if len(need):
-            s = int(need[np.argmax(w.waste_level[need])])
-            r.job = s
-            r.state = "TO_BIN"
-            r.target_angle = sector_storage_angle(s)
-            r.target_radius = R + 20
-    elif r.state == "TO_BIN":
-        if rover_move(w, r):
-            r.state = "LOADING"
-            r.timer = 10
-    elif r.state == "LOADING":
-        r.timer -= 1
-        if r.timer <= 0:
-            s = r.job
-            take = min(1.0 - r.load, float(w.waste_level[s]))
-            w.waste_level[s] -= take
-            r.load += take
-            if finance_pay(w, "waste_trip", s, "normal_operation", f"waste collection sector {s + 1}"):
-                w.log("INFO", f"Garbage rover emptied sector {s + 1} bin")
-            else:
-                w.log("WARN", f"Sector {s + 1} could not pay for waste collection")
-            if r.load >= 0.99 or not np.any(w.waste_level >= 0.9):
-                r.state = "TO_STATION"
-                r.target_angle = 180.0
-                r.target_radius = 520.0
-            else:
-                r.state = "IDLE"
-    elif r.state == "TO_STATION":
-        if rover_move(w, r):
-            r.state = "UNLOADING"
-            r.timer = 15
-    elif r.state == "UNLOADING":
-        r.timer -= 1
-        if r.timer <= 0:
-            w.waste_station_level += r.load
-            r.load = 0.0
-            r.state = "IDLE"
-            r.target_angle = 195.0
-            r.target_radius = R
-
-
-def _sludge_rover(w: World, r: Rover, sludge_req):
-    c = w.cfg
-    R = c["ring_road_radius"]
-    if r.state == "IDLE":
-        full = np.flatnonzero(w.h_sludge >= 0.95)
-        if len(full):
-            i = int(full[0])
-            r.job = i
-            r.state = "TO_HOUSE"
-            r.target_angle = float(w.h_angle[i])
-            r.target_radius = float(w.h_radius[i]) + 12
-        elif r.load > 0.5:
-            r.state = "TO_STORE"
-            s = int(np.argmin(w.sludge_store))
-            r.job = s
-            r.target_angle = sector_storage_angle(s) + 8
-            r.target_radius = R + 20
-    elif r.state == "TO_HOUSE":
-        if rover_move(w, r):
-            r.state = "PUMPING"
-            r.timer = 8
-    elif r.state == "PUMPING":
-        r.timer -= 1
-        if r.timer <= 0:
-            i = r.job
-            r.load = min(1.0, r.load + float(w.h_sludge[i]) * 0.25)
-            w.h_sludge[i] = 0.05
-            finance_pay(w, "sludge_trip", int(w.h_sector[i]), "normal_operation", f"sludge collection house {i + 1}")
-            r.state = "IDLE"
-            if r.load >= 0.99:
-                r.state = "TO_STORE"
-                s = int(np.argmin(w.sludge_store))
-                r.job = s
-                r.target_angle = sector_storage_angle(s) + 8
-                r.target_radius = R + 20
-    elif r.state == "TO_STORE":
-        if rover_move(w, r):
-            s = r.job
-            w.sludge_store[s] = min(1.0, w.sludge_store[s] + r.load * 0.2)
-            r.load = 0.0
-            r.state = "IDLE"
-            r.target_radius = R
-    # sector storage slowly processed
-    w.sludge_store = np.maximum(0.0, w.sludge_store - 0.00005)
-
-
-HOUSE_TARGETS = ("house", "aeration", "terminal")
-REPAIR_PRIORITY = {"reactor": 0, "trunk": 1, "substation": 1, "feeder": 2, "rp": 2, "ups": 3, "pole": 3, "span": 4,
-                   "cabinet": 4, "tower_line": 5, "net_span": 5, "gate": 5, "road": 5, "lamp": 6, "solar": 6}
-
-
-def _repair_rover(w: World, r: Rover):
-    c = w.cfg
-    R = c["ring_road_radius"]
-    if r.state == "IDLE":
-        # engineer takes infrastructure, plumber takes house-level issues
-        cands = [i for i in w.issues if i.status == "funded"
-                 and ((i.target.split(":")[0] in HOUSE_TARGETS) == (r.kind == "plumber"))]
-        if cands:
-            cands.sort(key=lambda i: (REPAIR_PRIORITY.get(i.target.split(":")[0], 9), i.severity != "critical", i.opened_t))
-            iss = cands[0]
-            r.job = iss
-            iss.status = "in_progress"
-            iss.started_t = w.t
-            r.state = "TO_TARGET"
-            x, y = iss.pos
-            r.target_angle = math.degrees(math.atan2(y, x)) % 360.0
-            r.target_radius = max(90.0, min(560.0, math.hypot(x, y) + 15))
-            if iss.target.startswith("reactor") or iss.target.startswith("trunk") or iss.target.startswith("solar") \
-                    or iss.target.startswith("water_plant"):
-                r.target_angle = 180.0
-                r.target_radius = 560.0
-            if iss.target.startswith("tower"):
-                r.target_angle = 220.0
-                r.target_radius = 480.0
-            if iss.target.startswith("substation") or iss.target.startswith("feeder") or iss.target.startswith("hub"):
-                r.target_radius = 95.0
-    elif r.state == "TO_TARGET":
-        if rover_move(w, r):
-            r.state = "REPAIRING"
-            r.timer = r.job.duration
-            # xenomorph attack on a crew in a dark sector
-            s = r.job.sector
-            if s >= 0 and w.sector_dark[s] and w.rng.random() < 0.15:
-                w.log("ALARM", f"Repair crew attacked by xenomorphs in dark sector {s + 1}, repair aborted")
-                r.job.status = "funded"
-                r.job = None
-                r.state = "IDLE"
-                r.wait = 60
-                spawn_xeno(w, s)
-    elif r.state == "REPAIRING":
-        r.timer -= 1
-        if r.timer <= 0:
-            resolve_issue(w, r.job)
-            r.job = None
-            r.state = "IDLE"
-            r.target_radius = R
-
-
-# ------------------------------------------------------------------------------------
-# People: walkers between home and the hub, xenomorphs and marines on the map
+# People: walkers between home and the hub along the streets, xenomorphs
 # ------------------------------------------------------------------------------------
 
 def walker_path_point(w: World, i, p):
-    """Position along the path house -> arc street to the sector radial -> radial street to the hub edge."""
+    """House -> along its row street to the boundary street of the sector -> down the boundary street to the hub."""
+    c = w.cfg
     h = w.w_home[i]
-    a0 = float(w.h_angle[h]); r0 = float(w.h_radius[h])
-    sa = float(w.h_sector[h]) * 60.0 + 30.0
-    arc = abs(sa - a0) * math.pi / 180.0 * r0
-    rad = r0 - 92.0
+    a0 = float(w.h_angle[h]); r_street = float(w.h_radius[h]) - 30.0
+    ba = float(w.h_sector[h]) * 60.0 + 3.0
+    arc = abs(a0 - ba) * math.pi / 180.0 * r_street
+    rad = r_street - (c["hub_radius"] + 10)
     L = arc + rad
     d = p * L
     if d <= arc:
-        a = a0 + (sa - a0) * (d / arc if arc > 0 else 1.0)
-        rr = r0
+        a = a0 + (ba - a0) * (d / arc if arc > 0 else 1.0)
+        rr = r_street
     else:
-        a = sa
-        rr = r0 - (d - arc)
+        a = ba
+        rr = r_street - (d - arc)
     return rr * math.cos(math.radians(a)), rr * math.sin(math.radians(a))
 
 
 def people_step(w: World):
-    c = w.cfg
     W = len(w.w_home)
     night = w.is_night()
     storm = w.storm_ticks > 0
-    speed = 1.2 / 250.0     # fraction of a ~250 unit path per tick
+    speed = 1.0 / 400.0
     for i in range(W):
         st = w.w_state[i]
+        h = w.w_home[i]
         if st == 0:
             w.w_timer[i] -= 1
             if w.w_timer[i] <= 0 and not storm and not (night and w.rng.random() < 0.9) \
-                    and not w.lockdown_ticks[w.h_sector[w.w_home[i]]] and w.h_power_ok[w.w_home[i]]:
+                    and not w.lockdown_ticks[w.h_sector[h]] and w.h_power_ok[h]:
                 w.w_state[i] = 1
                 w.w_prog[i] = 0.0
             else:
@@ -1820,7 +1697,6 @@ def people_step(w: World):
                 w.w_timer[i] = int(w.rng.integers(120, 900))
         x, y = walker_path_point(w, i, float(w.w_prog[i]))
         w.w_x[i], w.w_y[i] = x, y
-    # xenomorphs creep toward a house of their sector
     for m in w.xeno_markers:
         if "tx" not in m:
             hs = np.flatnonzero(w.h_sector == m["sector"])
@@ -1828,11 +1704,339 @@ def people_step(w: World):
             m["tx"], m["ty"] = float(w.h_x[j]), float(w.h_y[j])
         dx, dy = m["tx"] - m["x"], m["ty"] - m["y"]
         d = math.hypot(dx, dy)
-        if d > 2:
-            m["x"] += dx / d * 0.8
-            m["y"] += dy / d * 0.8
+        if d > 3:
+            m["x"] += dx / d * 1.6
+            m["y"] += dy / d * 1.6
         else:
             del m["tx"]
+
+
+# ------------------------------------------------------------------------------------
+# Roads, gates, rovers, waste, sewage
+# ------------------------------------------------------------------------------------
+
+def angle_diff(a, b):
+    return (b - a + 180.0) % 360.0 - 180.0
+
+
+def arc_waypoints(a0, a1, r, step=6.0):
+    """Points along an arc from a0 to a1 (shortest way, unless |a1-a0| given explicitly > 180)."""
+    d = a1 - a0
+    n = max(1, int(abs(d) / step))
+    return [polar(a0 + d * k / n, r) for k in range(1, n + 1)]
+
+
+def ring_blocked(w: World, a0, a1, rover: Rover):
+    """True if the ring road between a0 and a1 (in the direction of a1 - a0) crosses a broken segment."""
+    if rover.kind == "repair":
+        return False
+    d = a1 - a0
+    n = max(1, int(abs(d) / 5.0))
+    for k in range(n):
+        a = a0 + d * (k + 0.5) / n
+        if w.road_integrity[int((a % 360.0) // 60.0)] < 20:
+            return True
+    return False
+
+
+def ring_route(w: World, a0, a1, rover: Rover):
+    """Arc along the ring road from a0 to a1, picking a direction that is not blocked. None if both are."""
+    d = angle_diff(a0, a1)
+    for dd in (d, d - 360.0 if d > 0 else d + 360.0):
+        if not ring_blocked(w, a0, a0 + dd, rover):
+            return arc_waypoints(a0, a0 + dd, w.cfg["ring_road_radius"])
+    return None
+
+
+def rover_polar(r: Rover):
+    return math.degrees(math.atan2(r.y, r.x)) % 360.0, math.hypot(r.x, r.y)
+
+
+def plan_route(w: World, r: Rover, target):
+    """Build a road route from the rover to a target, expressed as a dict:
+       {"kind": "house", "i": idx} | {"kind": "bin", "s": sector} | {"kind": "outside", "x":, "y":}
+       | {"kind": "hub", "s": sector} | {"kind": "ring", "a": angle}. Returns False if blocked right now."""
+    c = w.cfg
+    R = c["ring_road_radius"]
+    a, rr = rover_polar(r)
+    route = []
+    # 1. get to the ring road first, along the nearest boundary street or the outside road
+    if rr > R + 10:                       # outside the wall: come back along the west road
+        route += [(-R - 60, 0.0)]
+        gate = 3
+        if w.gate_state[gate] != "OPEN":
+            return False
+        route += [polar(180.0, R)]
+        a = 180.0
+    elif rr < R - 10:                     # inside: along the row street to the boundary street, then out
+        s = int(a // 60.0)
+        ba = s * 60.0 + 3.0
+        street_r = c["house_radius_min"] - 30 + round((rr - (c["house_radius_min"] - 30)) / c["house_ring_step"]) * c["house_ring_step"]
+        street_r = clamp(street_r, c["hub_radius"] + 20, R)
+        if abs(rr - street_r) > 5 or rr < c["hub_radius"] + 30:
+            street_r = max(street_r, c["hub_radius"] + 30)
+        route += arc_waypoints(a, ba, street_r, 4.0)
+        route += [polar(ba, R)]
+        a = ba
+    kind = target["kind"]
+    if kind == "ring":
+        arc = ring_route(w, a, target["a"], r)
+        if arc is None:
+            return False
+        route += arc
+    elif kind == "bin":
+        arc = ring_route(w, a, target["s"] * 60.0 + 30.0, r)
+        if arc is None:
+            return False
+        route += arc + [polar(target["s"] * 60.0 + 30.0, R + 22)]
+    elif kind == "house":
+        i = target["i"]
+        s = int(w.h_sector[i])
+        ba = s * 60.0 + 3.0
+        arc = ring_route(w, a, ba, r)
+        if arc is None:
+            return False
+        street_r = float(w.h_radius[i]) - 30.0
+        route += arc + [polar(ba, street_r)] + arc_waypoints(ba, float(w.h_angle[i]), street_r, 4.0)
+    elif kind == "hub":
+        ba = target["s"] * 60.0 + 3.0
+        arc = ring_route(w, a, ba, r)
+        if arc is None:
+            return False
+        route += arc + [polar(ba, c["hub_radius"] + 30)]
+    elif kind == "outside":
+        arc = ring_route(w, a, 180.0, r)
+        if arc is None:
+            return False
+        if w.gate_state[3] != "OPEN":
+            return False
+        route += arc + [(-c["wall_radius"] - 30, 0.0), (target["x"], target["y"])]
+    r.route = route
+    return True
+
+
+def rover_move(w: World, r: Rover):
+    """Advance along the planned route. Returns True when the route is finished."""
+    if r.wait > 0:
+        r.wait -= 1
+        return False
+    if not r.route:
+        return True
+    budget = r.speed * (0.5 if (w.road_icy and not w.road_heating_on) else 1.0)
+    while budget > 0 and r.route:
+        tx, ty = r.route[0]
+        dx, dy = tx - r.x, ty - r.y
+        d = math.hypot(dx, dy)
+        if d <= budget:
+            r.x, r.y = tx, ty
+            r.route.pop(0)
+            budget -= d
+        else:
+            r.x += dx / d * budget
+            r.y += dy / d * budget
+            r.heading = math.atan2(dy, dx)
+            budget = 0
+    return not r.route
+
+
+def roads_step(w: World):
+    c = w.cfg
+    S = w.S
+    wear = 0.0004 + (0.001 if w.road_icy and not w.road_heating_on else 0.0)
+    w.road_integrity = np.maximum(0.0, w.road_integrity - wear)
+    for s in range(S):
+        if w.road_integrity[s] < 20:
+            w.open_issue("road_blocked", f"road:{s}", s, "wear", "road", polar(s * 60 + 30, c["ring_road_radius"]))
+    # gates: gate g sits at boundary g*60; sector s locks gates s and s+1
+    for s in range(S):
+        if w.lockdown_ticks[s] > 0:
+            w.lockdown_ticks[s] -= 1
+            if w.lockdown_ticks[s] == 0:
+                w.log("INFO", f"Sector {s + 1} lockdown lifted")
+    for g in range(S):
+        locked = w.lockdown_ticks[g] > 0 or w.lockdown_ticks[(g - 1) % S] > 0
+        if locked:
+            w.gate_state[g] = "LOCKDOWN"
+        elif not w.gate_ok[g]:
+            w.gate_state[g] = "CLOSED"
+        elif not (w.sector_online[g] or w.ups_state[g] not in ("DEPLETED", "FAULT")):
+            pass  # unpowered: keeps its last state
+        else:
+            w.gate_state[g] = "OPEN"
+        want = 1.0 if w.gate_state[g] == "OPEN" else 0.0
+        w.gate_open_frac[g] += clamp(want - w.gate_open_frac[g], -0.25, 0.25)
+    residents = np.bincount(w.h_sector, weights=w.h_residents, minlength=S)
+    w.waste_level = np.minimum(1.2, w.waste_level + residents * c["waste_per_resident_per_tick"])
+    overflow = w.waste_level >= 1.0
+    sewage_bad = (~w.h_aeration_ok) | (w.h_sludge >= 1.0)
+    sew_bad_frac = np.bincount(w.h_sector, weights=sewage_bad.astype(float), minlength=S) / c["houses_per_sector"]
+    w.sanitary = np.clip(w.sanitary - overflow * 0.05 - sew_bad_frac * 0.1 + (~overflow) * 0.02, 0, 100)
+    garbage, sludge = w.rovers[0], w.rovers[1]
+    _garbage_rover(w, garbage)
+    _sludge_rover(w, sludge)
+    for r in w.rovers[2:]:
+        _repair_rover(w, r)
+
+
+def _garbage_rover(w: World, r: Rover):
+    c = w.cfg
+    if r.state == "IDLE":
+        need = np.flatnonzero(w.waste_level >= 0.9)
+        if len(need):
+            s = int(need[np.argmax(w.waste_level[need])])
+            if plan_route(w, r, {"kind": "bin", "s": s}):
+                r.job = s
+                r.state = "TO_BIN"
+            else:
+                r.wait = 20
+    elif r.state == "TO_BIN":
+        if rover_move(w, r):
+            r.state = "LOADING"
+            r.timer = 10
+    elif r.state == "LOADING":
+        r.timer -= 1
+        if r.timer <= 0:
+            s = r.job
+            take = min(1.0 - r.load, float(w.waste_level[s]))
+            w.waste_level[s] -= take
+            r.load += take
+            if finance_pay(w, "waste_trip", s, "normal_operation", f"waste collection sector {s + 1}"):
+                w.log("INFO", f"Garbage rover emptied sector {s + 1} bin")
+            else:
+                w.log("WARN", f"Sector {s + 1} could not pay for waste collection")
+            if r.load >= 0.99 or not np.any(w.waste_level >= 0.9):
+                if plan_route(w, r, {"kind": "outside", "x": c["waste_station_pos"][0] + 40, "y": 20.0}):
+                    r.state = "TO_STATION"
+                else:
+                    r.state = "WAIT_GATE"
+                    r.wait = 30
+            else:
+                r.state = "IDLE"
+    elif r.state == "WAIT_GATE":
+        if plan_route(w, r, {"kind": "outside", "x": c["waste_station_pos"][0] + 40, "y": 20.0}):
+            r.state = "TO_STATION"
+        else:
+            r.wait = 30
+    elif r.state == "TO_STATION":
+        if rover_move(w, r):
+            r.state = "UNLOADING"
+            r.timer = 15
+    elif r.state == "UNLOADING":
+        r.timer -= 1
+        if r.timer <= 0:
+            w.waste_station_level += r.load
+            r.load = 0.0
+            if plan_route(w, r, {"kind": "ring", "a": 195.0}):
+                r.state = "RETURN"
+            else:
+                r.wait = 30
+    elif r.state == "RETURN":
+        if rover_move(w, r):
+            r.state = "IDLE"
+
+
+def _sludge_rover(w: World, r: Rover):
+    c = w.cfg
+    if r.state == "IDLE":
+        full = np.flatnonzero(w.h_sludge >= 0.95)
+        if len(full) and r.load < 0.99:
+            i = int(full[0])
+            if plan_route(w, r, {"kind": "house", "i": i}):
+                r.job = i
+                r.state = "TO_HOUSE"
+            else:
+                r.wait = 20
+        elif r.load > 0.5:
+            s = int(np.argmin(w.sludge_store))
+            if plan_route(w, r, {"kind": "bin", "s": s}):
+                r.job = s
+                r.state = "TO_STORE"
+            else:
+                r.wait = 20
+    elif r.state == "TO_HOUSE":
+        if rover_move(w, r):
+            r.state = "PUMPING"
+            r.timer = 8
+    elif r.state == "PUMPING":
+        r.timer -= 1
+        if r.timer <= 0:
+            i = r.job
+            r.load = min(1.0, r.load + float(w.h_sludge[i]) * 0.25)
+            w.h_sludge[i] = 0.05
+            finance_pay(w, "sludge_trip", int(w.h_sector[i]), "normal_operation", f"sludge collection house {i + 1}")
+            r.state = "IDLE"
+    elif r.state == "TO_STORE":
+        if rover_move(w, r):
+            s = r.job
+            w.sludge_store[s] = min(1.0, w.sludge_store[s] + r.load * 0.2)
+            r.load = 0.0
+            r.state = "IDLE"
+    w.sludge_store = np.maximum(0.0, w.sludge_store - 0.00005)
+
+
+HOUSE_TARGETS = ("house", "aeration", "terminal")
+REPAIR_PRIORITY = {"reactor": 0, "trunk": 1, "substation": 1, "feeder": 2, "rp": 2, "ups": 3, "pole": 3, "span": 4,
+                   "cabinet": 4, "tower_line": 5, "net_span": 5, "gate": 5, "road": 5, "lamp": 6, "solar": 6}
+OUTSIDE_TARGETS = ("reactor", "trunk", "solar", "water_plant", "tower", "tower_line")
+
+
+def issue_target_spec(w: World, iss: Issue):
+    kind, _, arg = iss.target.partition(":")
+    x, y = iss.pos
+    if kind in OUTSIDE_TARGETS:
+        return {"kind": "outside", "x": x + 40, "y": y + 30}
+    if kind in ("house", "aeration", "terminal"):
+        return {"kind": "house", "i": int(arg)}
+    if kind in ("pole", "span", "net_span", "lamp"):
+        i = int(arg)
+        # nearest house of that pole's row street, or the hub end for spine poles
+        if w.p_kind[i] == 1:
+            hs = np.flatnonzero(w.h_pole == i)
+            j = int(hs[0]) if len(hs) else int(np.argmin((w.h_x - x) ** 2 + (w.h_y - y) ** 2))
+            return {"kind": "house", "i": j}
+        return {"kind": "hub", "s": int(w.p_sector[i])}
+    if kind in ("cabinet", "rp", "feeder", "ups", "substation"):
+        return {"kind": "hub", "s": int(iss.sector if iss.sector >= 0 else 0)}
+    if kind == "gate":
+        g = int(arg)
+        return {"kind": "ring", "a": g * 60.0 + 1.0}
+    if kind == "road":
+        return {"kind": "ring", "a": int(arg) * 60.0 + 30.0}
+    return {"kind": "ring", "a": math.degrees(math.atan2(y, x)) % 360.0}
+
+
+def _repair_rover(w: World, r: Rover):
+    if r.state == "IDLE":
+        cands = [i for i in w.issues if i.status == "funded"
+                 and ((i.target.split(":")[0] in HOUSE_TARGETS) == (r.kind == "plumber"))]
+        if cands:
+            cands.sort(key=lambda i: (REPAIR_PRIORITY.get(i.target.split(":")[0], 9), i.severity != "critical", i.opened_t))
+            iss = cands[0]
+            if plan_route(w, r, issue_target_spec(w, iss)):
+                r.job = iss
+                iss.status = "in_progress"
+                iss.started_t = w.t
+                r.state = "TO_TARGET"
+            else:
+                r.wait = 20
+    elif r.state == "TO_TARGET":
+        if rover_move(w, r):
+            r.state = "REPAIRING"
+            r.timer = r.job.duration
+            s = r.job.sector
+            if s >= 0 and w.sector_dark[s] and w.rng.random() < 0.15:
+                w.log("ALARM", f"Repair crew attacked by xenomorphs in dark sector {s + 1}, repair aborted")
+                r.job.status = "funded"
+                r.job = None
+                r.state = "IDLE"
+                r.wait = 60
+                spawn_xeno(w, s)
+    elif r.state == "REPAIRING":
+        r.timer -= 1
+        if r.timer <= 0:
+            resolve_issue(w, r.job)
+            r.job = None
+            r.state = "IDLE"
 
 
 # ------------------------------------------------------------------------------------
@@ -1879,39 +2083,34 @@ def damage_target(w: World, target: str, cause: str, severity: float):
     elif kind == "cabinet":
         s = int(arg)
         w.cabinet_ok[s] = False
-        a = math.radians(s * 60 + 30)
-        w.open_issue("cabinet_damaged", target, s, cause, "cabinet", (95 * math.cos(a), 95 * math.sin(a)))
+        w.open_issue("cabinet_damaged", target, s, cause, "cabinet", polar(s * 60 + 3, c["hub_radius"] + 40))
     elif kind == "gate":
-        s = int(arg)
-        w.gate_ok[s] = False
-        a = math.radians(s * 60)
-        R = c["ring_road_radius"]
-        w.open_issue("gate_damaged", target, s, cause, "gate", (R * math.cos(a), R * math.sin(a)))
+        g = int(arg)
+        w.gate_ok[g] = False
+        w.open_issue("gate_damaged", target, g, cause, "gate", polar(g * 60, c["wall_radius"]))
     elif kind == "road":
         s = int(arg)
         w.road_integrity[s] = max(0.0, w.road_integrity[s] - severity * 100)
     elif kind == "feeder":
         s = int(arg)
         w.feeder_ok[s] = False
-        a = math.radians(s * 60 + 30)
-        w.open_issue("feeder_broken", target, s, cause, "feeder", (60 * math.cos(a), 60 * math.sin(a)), "critical")
+        w.open_issue("feeder_broken", target, s, cause, "feeder", polar(s * 60 + 3, c["hub_radius"] - 20), "critical")
     elif kind == "rp":
         s = int(arg)
         w.rp_ok[s] = False
-        a = math.radians(s * 60 + 30)
-        w.open_issue("rp_damaged", target, s, cause, "rp", (85 * math.cos(a), 85 * math.sin(a)), "critical")
+        w.open_issue("rp_damaged", target, s, cause, "rp", polar(s * 60 + 3, c["hub_radius"] + 30), "critical")
     elif kind == "trunk":
         w.trunk_ok = False
-        w.open_issue("trunk_broken", "trunk", -1, cause, "trunk", (-360, 0), "critical")
+        w.open_issue("trunk_broken", "trunk", -1, cause, "trunk", (-c["wall_radius"] - 200, 0), "critical")
     elif kind == "substation":
         w.substation_ok = False
-        w.open_issue("substation_damaged", "substation", -1, cause, "substation", (0, 0), "critical")
+        w.open_issue("substation_damaged", "substation", -1, cause, "substation", (0, -60), "critical")
     elif kind == "tower_line":
         w.tower_line_ok = False
-        w.open_issue("tower_line_broken", "tower_line", -1, cause, "tower_line", (-220, -190), "warning")
+        w.open_issue("tower_line_broken", "tower_line", -1, cause, "tower_line", (c["tower_junction"][0], c["tower_pos"][1] / 2), "warning")
     elif kind == "solar":
         w.solar_health = max(0.0, w.solar_health - severity)
-        w.open_issue("solar_damaged", "solar", -1, cause, "solar", (-640, -110), "info")
+        w.open_issue("solar_damaged", "solar", -1, cause, "solar", c["solar_pos"], "info")
     elif kind == "reactor":
         comp = arg
         if comp == "heat_exchanger":
@@ -1923,8 +2122,7 @@ def damage_target(w: World, target: str, cause: str, severity: float):
     elif kind == "ups":
         s = int(arg)
         w.ups_health[s] = 0.1
-        a = math.radians(s * 60 + 30)
-        w.open_issue("ups_damaged", target, s, cause, "ups", (100 * math.cos(a), 100 * math.sin(a)))
+        w.open_issue("ups_damaged", target, s, cause, "ups", polar(s * 60 + 3, c["hub_radius"] + 50))
 
 
 def resolve_issue(w: World, iss: Issue):
@@ -1937,12 +2135,6 @@ def resolve_issue(w: World, iss: Issue):
         i = int(arg)
         w.p_state[i] = 0
         w.p_lamp_ok[i] = True
-        # a fallen pole also cut the spans and the cable: they are fixed with it
-        w.s_health[i] = max(w.s_health[i], 1.0)
-        if w.p_k[i] + 1 < w.cfg["poles_per_sector"]:
-            w.s_health[i + 1] = 1.0
-            w.n_span_ok[i + 1] = True
-        w.n_span_ok[i] = True
     elif kind == "lamp":
         w.p_lamp_ok[int(arg)] = True
     elif kind == "house":
@@ -1976,11 +2168,10 @@ def resolve_issue(w: World, iss: Issue):
     elif kind == "solar":
         w.solar_health = 1.0
     elif kind == "reactor":
-        comp = arg
-        if comp == "heat_exchanger":
+        if arg == "heat_exchanger":
             w.r_hx = 1.0
         else:
-            setattr(w, "r_" + comp, 1.0)
+            setattr(w, "r_" + arg, 1.0)
     elif kind == "ups":
         w.ups_health[int(arg)] = 1.0
     iss.status = "resolved"
@@ -1991,8 +2182,8 @@ def resolve_issue(w: World, iss: Issue):
 
 def spawn_xeno(w: World, s):
     a = math.radians(s * 60 + w.rng.uniform(5, 55))
-    r = w.rng.uniform(140, 330)
-    w.xeno_markers.append({"x": r * math.cos(a), "y": r * math.sin(a), "until": w.t + 90, "sector": s})
+    r = w.rng.uniform(280, 640)
+    w.xeno_markers.append({"x": r * math.cos(a), "y": r * math.sin(a), "until": w.t + 120, "sector": s})
 
 
 def incidents_step(w: World):
@@ -2000,34 +2191,30 @@ def incidents_step(w: World):
     S = w.S
     rng = w.rng
     night = w.is_night()
-    # weather on spans: logistic in wind, ice, cold
     v = w.wind
     z = 0.35 * (v - 22.0) + 3.0 * w.s_ice + 0.03 * (-w.t_out - 40) - 10.0
-    p = 1.0 / (1.0 + np.exp(-z)) * 0.02
+    p = 1.0 / (1.0 + np.exp(-z)) * 0.02 * (36.0 / w.P)     # same colony-wide rate as with 36 spans
     p = p * np.where(w.p_state == 1, 2.0, 1.0)
     hit = rng.random(w.P) < p
     for i in np.flatnonzero(hit & (w.s_health >= 0.2)):
         damage_target(w, f"span:{i}", "weather", 1.0)
         if rng.random() < 0.5:
             damage_target(w, f"net_span:{i}", "weather", 1.0)
-    # xenomorphs
     pxeno = c["p_xeno"] * (3.0 if night else 1.0)
     for s in range(S):
         if rng.random() < pxeno * (2.0 if w.sector_dark[s] else 1.0):
             spawn_xeno(w, s)
             w.lockdown_ticks[s] = 120
-            w.gate_state[s] = "LOCKDOWN"
             w.log("ALARM", f"Xenomorphs in sector {s + 1}: LOCKDOWN")
             roll = rng.random()
-            base = s * c["poles_per_sector"]
+            ps = np.flatnonzero(w.p_sector == s)
             if roll < 0.4:
                 damage_target(w, f"cabinet:{s}", "xenomorph", 1.0)
             elif roll < 0.7:
-                damage_target(w, f"pole:{base + int(rng.integers(1, c['poles_per_sector']))}", "xenomorph", 0.9)
+                damage_target(w, f"pole:{int(rng.choice(ps))}", "xenomorph", 0.9)
             else:
                 hs = np.flatnonzero(w.h_sector == s)
                 damage_target(w, f"house:{int(rng.choice(hs))}", "xenomorph", 1.0)
-    # nest near the processor: marines show up and shoot the cooling
     if rng.random() < c["p_xeno"] * 0.5:
         w.nest_alert = 300
         w.marines_active = 300
@@ -2039,13 +2226,12 @@ def incidents_step(w: World):
             comp = "heat_exchanger" if rng.random() < 0.6 else ("pump_a" if rng.random() < 0.5 else "pump_b")
             damage_target(w, f"reactor:{comp}", "marines", 0.6)
             w.log("ALARM", f"Stray marine fire damaged reactor {comp}")
-    # vandals
     if rng.random() < c["p_vandal"] * (2.0 if night else 1.0):
         s = int(rng.integers(0, S))
         roll = rng.random()
-        base = s * c["poles_per_sector"]
+        ps = np.flatnonzero(w.p_sector == s)
         if roll < 0.4:
-            damage_target(w, f"lamp:{base + int(rng.integers(0, c['poles_per_sector']))}", "vandal", 1.0)
+            damage_target(w, f"lamp:{int(rng.choice(ps))}", "vandal", 1.0)
         elif roll < 0.6:
             damage_target(w, f"gate:{s}", "vandal", 1.0)
         elif roll < 0.8:
@@ -2054,22 +2240,15 @@ def incidents_step(w: World):
         else:
             hs = np.flatnonzero(w.h_sector == s)
             damage_target(w, f"aeration:{int(rng.choice(hs))}", "vandal", 1.0)
-    # animals
     if rng.random() < c["p_animal"]:
         i = int(rng.integers(0, w.N))
-        if rng.random() < 0.5:
-            damage_target(w, f"house:{i}", "wildlife", 1.0)
-        else:
-            damage_target(w, f"aeration:{i}", "wildlife", 1.0)
-    # rover collisions with poles in the dark
+        damage_target(w, f"house:{i}" if rng.random() < 0.5 else f"aeration:{i}", "wildlife", 1.0)
     for s in range(S):
         if w.sector_dark[s] and rng.random() < c["p_rover_hit"]:
-            base = s * c["poles_per_sector"]
-            damage_target(w, f"pole:{base + int(rng.integers(0, c['poles_per_sector']))}", "impact", 0.9)
+            ps = np.flatnonzero(w.p_sector == s)
+            damage_target(w, f"pole:{int(rng.choice(ps))}", "impact", 0.9)
             w.log("WARN", f"Rover hit a pole in dark sector {s + 1}")
-    # xeno marker expiry
     w.xeno_markers = [m for m in w.xeno_markers if m["until"] > w.t]
-    # funding of open issues
     for iss in w.issues:
         if iss.status in ("open", "unfunded") and (w.t - iss.opened_t) % 30 == 0:
             if finance_reserve(w, iss):
@@ -2085,7 +2264,6 @@ def incidents_step(w: World):
 # ------------------------------------------------------------------------------------
 
 def finance_reserve(w: World, iss: Issue):
-    """Sector-first funding rule. Returns True if the money is available (charged on completion)."""
     if iss.payer == "colony":
         return w.colony_budget >= iss.cost
     s = iss.sector if iss.sector >= 0 else 0
@@ -2106,7 +2284,6 @@ def finance_record(w: World, amount, payer, sector, cause, note):
         w.unfunded_total += amount
         src = "unpaid"
     if payer == "house":
-        # owner reimburses the sector at month end
         i = int(note.split("house:")[-1]) if "house:" in note else -1
         if 0 <= i < w.N:
             w.h_repairs_month[i] += amount
@@ -2127,7 +2304,6 @@ def finance_pay(w: World, cost_key, sector, cause, note):
 
 
 def finance_day_close(w: World):
-    """Owners pay energy and water daily, so sectors have cash flow during the month."""
     c = w.cfg
     bill = w.h_meter_day * c["tariff_kwh"] + w.h_water_day * c["tariff_water_m3"]
     income = np.bincount(w.h_sector, weights=bill, minlength=w.S)
@@ -2146,11 +2322,9 @@ def finance_month_close(w: World):
     internet = np.full(w.N, c["internet_fee"])
     repairs = w.h_repairs_month.copy()
     house_total = energy + water + sewage + internet + repairs
-    # energy and water were paid daily; fees and repair reimbursements are paid now
     income = np.bincount(w.h_sector, weights=sewage + internet + repairs, minlength=S)
     w.sector_budget += income
     w.month_income += income
-    # colony upkeep
     upkeep = c["reactor_upkeep_month"]
     w.colony_budget -= upkeep
     w.colony_month_expense += upkeep
@@ -2264,6 +2438,7 @@ def inject(w: World, cmd: str):
 
 def snapshot(w: World):
     S = w.S
+    c = w.cfg
     sec = []
     for s in range(S):
         m = w.h_sector == s
@@ -2282,11 +2457,13 @@ def snapshot(w: World):
             "waste": round(float(w.waste_level[s]), 2),
             "sludge": round(float(w.sludge_store[s]), 2),
             "sanitary": round(float(w.sanitary[s]), 0),
-            "gate": w.gate_state[s], "gate_ok": bool(w.gate_ok[s]),
+            "gate": w.gate_state[s], "gate_ok": bool(w.gate_ok[s]), "gate_open": round(float(w.gate_open_frac[s]), 2),
             "road": round(float(w.road_integrity[s]), 0),
-            "cabinet": bool(w.cabinet_online[s]),
+            "cabinet": bool(w.cabinet_online[s]), "cabinet_ups_h": round(float(w.cabinet_ups_h[s]), 1),
+            "rp_ok": bool(w.rp_ok[s]), "feeder_ok": bool(w.feeder_ok[s]),
             "dark": bool(w.sector_dark[s]),
             "lamps_on": int(w.p_lamp_on[w.p_sector == s].sum()),
+            "lockdown": int(w.lockdown_ticks[s]),
         })
     issues = [{"id": i.id, "kind": i.kind, "target": i.target, "sector": i.sector + 1, "cause": i.cause,
                "cost": i.cost, "payer": i.payer, "status": i.status, "sev": i.severity,
@@ -2296,23 +2473,29 @@ def snapshot(w: World):
         "t": w.t, "time": w.time_str(), "paused": w.paused, "speed": w.speed,
         "finished": w.finished, "finish_reason": w.finish_reason,
         "env": {"t_out": round(w.t_out, 1), "wind": round(w.wind, 1), "precip": w.precip,
-                "daylight": round(w.daylight, 2), "dust": round(w.dust, 2), "storm": w.storm_ticks > 0,
+                "daylight": round(w.daylight, 3), "dust": round(w.dust, 2), "storm": w.storm_ticks > 0,
                 "night": w.is_night(), "icy": w.road_icy, "visibility": w.visibility},
         "power": {"available_kw": round(w.available_kw), "demand_kw": round(w.demand_kw),
                   "deficit_kw": round(w.deficit_kw), "shedding": w.shedding, "solar_kw": round(w.solar_kw, 1),
                   "trunk": w.trunk_ok, "substation": w.substation_ok, "tower_line": w.tower_line_ok,
-                  "feeder": [bool(x) for x in w.feeder_online], "mine": w.mine_powered,
+                  "feeder": [bool(x) for x in w.feeder_online], "mine": w.mine_powered, "mine_frac": w.mine_frac,
                   "ups_center": w.ups_center_state, "ups_center_kwh": round(w.ups_center_kwh),
-                  "infra": w.infra_loads_kw, "road_heating": w.road_heating_on, "storm_lighting": w.storm_lighting},
-        "reactor": {"mode": w.r_mode, "power_mw": round(w.r_power_mw, 2), "available_mw": round(w.r_available_mw, 2),
-                    "core_temp": round(w.r_core_temp), "decay_mw": round(w.r_decay_mw, 2),
+                  "infra": w.infra_loads_kw, "road_heating": w.road_heating_on, "storm_lighting": w.storm_lighting,
+                  "sector_kw": [round(float(x), 1) for x in w.sector_demand_kw]},
+        "reactor": {"mode": w.r_mode, "power_mw": round(w.r_power_mw, 2), "setpoint_mw": round(w.r_setpoint_mw, 2),
+                    "available_mw": round(w.r_available_mw, 2),
+                    "core_temp": round(w.r_core_temp), "coolant_temp": round(w.r_coolant_temp), "flow": round(w.r_flow, 2),
+                    "decay_mw": round(w.r_decay_mw, 2),
                     "pump_a": round(w.r_pump_a, 2), "pump_b": round(w.r_pump_b, 2), "hx": round(w.r_hx, 2),
                     "battery_h": round(w.r_battery_h, 1), "faults": w.r_faults, "link": w.r_link_ok,
-                    "marines": w.marines_active > 0},
-        "water": {"tank_m3": round(w.water_tank_m3, 1), "plant": w.water_plant_ok, "heat": w.water_plant_heat,
+                    "marines": w.marines_active > 0, "thermal_mw": round(w.r_power_mw / 0.3, 1)},
+        "water": {"tank_m3": round(w.water_tank_m3, 1), "tank_cap": c["water_tank_m3"], "plant": w.water_plant_ok,
+                  "heat": w.water_plant_heat, "plant_m3_h": round(w.water_plant_m3_h, 2), "flow_m3_h": round(w.water_flow_m3_h, 2),
                   "pump": w.pump_station_ok, "houses_ok": int(w.h_water_ok.sum()),
-                  "burst": int(w.h_burst.sum()), "frozen": int((~w.h_pipes_ok).sum())},
+                  "burst": int(w.h_burst.sum()), "frozen": int((~w.h_pipes_ok).sum()),
+                  "sector_m3_h": [round(float(x) * 60, 2) for x in w.sector_water_m3]},
         "net": {"uplink": w.uplink_ok, "tower": w.tower_ok, "comms": w.comms_ok, "houses_online": int(w.h_net_online.sum()),
+                "packets_per_min": w.packets_per_min, "reactor_link": w.r_link_ok,
                 "packets": w.packets[-40:]},
         "finance": {"colony": round(w.colony_budget), "sectors": [round(float(x)) for x in w.sector_budget],
                     "unpaid": round(w.unfunded_total), "month": w.month,
@@ -2323,15 +2506,17 @@ def snapshot(w: World):
                    "ups": w.h_on_ups.astype(int).tolist(), "water": w.h_water_ok.astype(int).tolist(),
                    "net": w.h_net_online.astype(int).tolist(), "heater": w.h_heater_on.astype(int).tolist(),
                    "burst": w.h_burst.astype(int).tolist(), "sludge": [round(float(x), 2) for x in w.h_sludge],
-                   "limit": [int(x) for x in w.h_limit_w]},
+                   "limit": [int(x) for x in w.h_limit_w], "draw": [int(x) for x in w.h_draw_w]},
         "poles": {"state": w.p_state.tolist(), "lamp": w.p_lamp_on.astype(int).tolist(),
                   "span": w.s_online.astype(int).tolist(), "net": w.net_chain.astype(int).tolist(),
                   "ice": [round(float(x), 2) for x in w.s_ice]},
-        "rovers": [{"name": r.name, "state": r.state, "x": round(rover_xy(w, r)[0]), "y": round(rover_xy(w, r)[1]),
-                    "load": round(r.load, 2)} for r in w.rovers],
+        "rovers": [{"name": r.name, "kind": r.kind, "state": r.state, "x": round(r.x), "y": round(r.y),
+                    "heading": round(r.heading, 2), "load": round(r.load, 2),
+                    "job": (r.job.kind if isinstance(r.job, Issue) else (r.job + 1 if isinstance(r.job, (int, np.integer)) else None))}
+                   for r in w.rovers],
         "xenos": [{"x": round(m["x"]), "y": round(m["y"])} for m in w.xeno_markers],
-        "people": [[round(float(x)), round(float(y)), int(s)] for x, y, s in zip(w.w_x, w.w_y, w.w_state) if s != 0],
-        "marines": [[w.cfg["reactor_pos"][0] + 40 + 18 * k, w.cfg["reactor_pos"][1] - 30 + 14 * (k % 2)] for k in range(4)] if w.marines_active > 0 else [],
+        "people": [[round(float(x)), round(float(y)), int(s), int(h)] for x, y, s, h in zip(w.w_x, w.w_y, w.w_state, w.w_home) if s != 0],
+        "marines": [[c["reactor_pos"][0] + 60 + 24 * k, c["reactor_pos"][1] - 50 + 20 * (k % 2)] for k in range(4)] if w.marines_active > 0 else [],
         "issues": issues, "issues_total": len(w.open_issues()),
         "events": list(w.events)[:40],
         "report": w.last_report,
@@ -2339,17 +2524,20 @@ def snapshot(w: World):
 
 
 def house_geometry(w: World):
+    c = w.cfg
     return {
         "houses": {"x": [round(float(x)) for x in w.h_x], "y": [round(float(y)) for y in w.h_y],
-                   "sector": w.h_sector.tolist(), "type": w.h_type.tolist(), "pole": w.h_pole.tolist()},
-        "poles": {"x": [round(float(x)) for x in w.p_x], "y": [round(float(y)) for y in w.p_y],
-                  "sector": w.p_sector.tolist(), "k": w.p_k.tolist()},
-        "cfg": {"hub_radius": w.cfg["hub_radius"], "ring_road_radius": w.cfg["ring_road_radius"],
-                "reactor": w.cfg["reactor_pos"], "tower": w.cfg["tower_pos"], "tower_junction": w.cfg["tower_junction"],
-                "solar": w.cfg["solar_pos"], "water_plant": w.cfg["water_plant_pos"], "radwaste": w.cfg["radwaste_pos"],
-                "mine": w.cfg["mine_pos"], "waste_station": w.cfg["waste_station_pos"],
-                "house_radius_min": w.cfg["house_radius_min"], "house_ring_step": w.cfg["house_ring_step"],
-                "sectors": w.S, "poles_per_sector": w.cfg["poles_per_sector"]},
+                   "angle": [round(float(a), 2) for a in w.h_angle], "radius": [round(float(r)) for r in w.h_radius],
+                   "sector": w.h_sector.tolist(), "type": w.h_type.tolist(), "pole": w.h_pole.tolist(),
+                   "residents": w.h_residents.tolist()},
+        "poles": {"x": [round(float(x), 1) for x in w.p_x], "y": [round(float(y), 1) for y in w.p_y],
+                  "sector": w.p_sector.tolist(), "k": w.p_k.tolist(), "parent": w.p_parent.tolist(),
+                  "kind": w.p_kind.tolist(), "radius": [round(float(r)) for r in w.p_radius],
+                  "angle": [round(float(a), 2) for a in w.p_angle]},
+        "cfg": {k: c[k] for k in ("hub_radius", "house_radius_min", "house_ring_step", "house_rows", "ring_road_radius",
+                                  "wall_radius", "spine_radii", "reactor_pos", "solar_pos", "water_plant_pos",
+                                  "radwaste_pos", "mine_pos", "waste_station_pos", "tower_junction", "tower_pos",
+                                  "sectors", "water_tank_m3")},
         "types": TYPE_NAMES,
     }
 
@@ -2523,6 +2711,10 @@ def make_handler(w_holder: dict, html: str, geom_json: str, store: Optional[Stor
                 req = {}
             cmd = req.get("cmd", "")
             w = w_holder["w"]
+            if cmd == "auth":
+                ok = (not admin_token) or req.get("token", "") == admin_token
+                self._send(200, "application/json", json.dumps({"ok": ok, "protected": bool(admin_token)}).encode())
+                return
             if admin_token and req.get("token", "") != admin_token:
                 self._send(403, "application/json", b'{"ok": false, "error": "admin token required"}')
                 return
@@ -2541,8 +2733,6 @@ def make_handler(w_holder: dict, html: str, geom_json: str, store: Optional[Stor
                     v = req.get("value", "")
                     if v == "scram":
                         reactor_scram(w, "operator")
-                    elif v == "setpoint":
-                        w.r_setpoint_mw = float(clamp(float(req.get("mw", 5.0)), 1.2, 6.0))
             self._send(200, "application/json", b'{"ok": true}')
 
     return Handler
@@ -2581,7 +2771,6 @@ def main():
         return
     holder = {"w": w}
     threading.Thread(target=sim_loop, args=(holder, store), daemon=True).start()
-    # three.js is loaded from jsdelivr unless a local copy exists next to the script or in the data dir
     vendor_dir = ""
     for cand in (os.path.join(os.path.dirname(os.path.abspath(__file__)), "vendor"), os.path.join(args.data or ".", "vendor")):
         if os.path.isfile(os.path.join(cand, "three", "build", "three.module.js")):
