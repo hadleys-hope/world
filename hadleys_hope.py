@@ -451,7 +451,7 @@ class World:
 
     def open_issue(self, kind, target, sector, cause, cost_key, pos, severity="warning"):
         for i in self.issues:
-            if i.target == target and i.status != "resolved":
+            if i.target == target and i.kind == kind and i.status != "resolved":
                 return i
         cost, payer, dur = COSTS[cost_key]
         iss = Issue(self.next_issue_id, kind, target, sector, cause, float(cost), payer, dur, pos, self.t,
@@ -2960,6 +2960,13 @@ def _expense_by_cause(w: World):
     return out
 
 
+def pipes_audit(w: World):
+    """Reconcile: every burst house must have an open pipes_burst issue, or nobody will ever fix it."""
+    for i in np.flatnonzero(w.h_burst):
+        w.open_issue("pipes_burst", f"house:{i}", int(w.h_sector[i]), "freeze", "pipes",
+                     (float(w.h_x[i]), float(w.h_y[i])), "critical")
+
+
 # ------------------------------------------------------------------------------------
 # Tick
 # ------------------------------------------------------------------------------------
@@ -3009,6 +3016,8 @@ def world_tick(w: World):
     roads_step(w)
     people_step(w)
     house_events(w)
+    if w.t % 60 == 0:
+        pipes_audit(w)
     if w.t % w.cfg["ticks_per_day"] == 0:
         finance_day_close(w)
     if w.t % (w.cfg["ticks_per_day"] * w.cfg["days_per_month"]) == 0:
