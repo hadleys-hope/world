@@ -2592,18 +2592,34 @@ def issue_target_spec(w: World, iss: Issue):
     return {"kind": "ring", "a": math.degrees(math.atan2(y, x)) % 360.0}
 
 
+def _crew_fits(r: Rover, iss: Issue):
+    """Plumber takes house jobs; engineers take the colony network and, when free, house wiring (it is electrical,
+    and a house without wiring has no heat: leaving it to the one plumber let whole rows freeze)."""
+    house = iss.target.split(":")[0] in HOUSE_TARGETS
+    if r.kind == "plumber":
+        return house
+    return (not house) or iss.kind == "house_wiring"
+
+
+def _pipes_blocked(w: World, iss: Issue):
+    """Fixing pipes in a house that still has no wiring is wasted: it freezes and bursts again."""
+    if iss.kind != "pipes_burst":
+        return 0
+    return 0 if w.h_wiring_ok[int(iss.target.split(":")[1])] else 1
+
+
 def _repair_rover(w: World, r: Rover):
     if r.state == "TO_GARAGE":
         if rover_move(w, r):
             r.state = "IDLE"
         return
     if r.state == "IDLE":
-        cands = [i for i in w.issues if i.status == "funded"
-                 and ((i.target.split(":")[0] in HOUSE_TARGETS) == (r.kind == "plumber"))]
+        cands = [i for i in w.issues if i.status == "funded" and _crew_fits(r, i)]
         if not cands:
             _go_home(w, r)
         if cands:
-            cands.sort(key=lambda i: (REPAIR_PRIORITY.get(i.target.split(":")[0], 9), i.severity != "critical", i.opened_t))
+            cands.sort(key=lambda i: (_pipes_blocked(w, i), REPAIR_PRIORITY.get(i.target.split(":")[0], 9),
+                                      i.severity != "critical", i.opened_t))
             iss = cands[0]
             if plan_route(w, r, issue_target_spec(w, iss)):
                 r.job = iss
