@@ -1,0 +1,21 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install deps
+        run: pip install numpy paho-mqtt
+      - name: compile
+        run: python3 -m py_compile hadleys_hope.py houses_runtime.py
+      - name: one simulated day headless
+        run: python3 hadleys_hope.py --headless 1440 | tail -5
