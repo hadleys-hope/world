@@ -91,6 +91,11 @@ CFG = {
     "sector_budget": 10000.0, "colony_budget": 100000.0,
     "tariff_kwh": 0.25, "tariff_water_m3": 3.0, "sewage_fee": 20.0, "internet_fee": 15.0,
     "mine_income_per_tick": 3.0,
+    # economy feedback: without these the colony budget only grows and has no attractor
+    "colony_payroll_day": 2500.0,        # staff wages and supply shipments, paid every day even with the mine down
+    "company_reserve_target": 100000.0,  # reserve the company leaves in the colony
+    "company_levy_frac": 0.5,            # share of the surplus above the target the company takes at month close
+    "sector_budget_cap": 30000.0,        # sector money above this goes to the colony at month close
     "reactor_upkeep_month": 3000.0,
     # incidents: probability per tick
     "p_xeno": 0.00004, "p_vandal": 0.00025, "p_animal": 0.0002, "p_rover_hit": 0.0003,
@@ -422,6 +427,11 @@ class World:
         self.storm_ticks = 0
         self.synoptic = 0.0
         self.visibility = 100.0
+
+        # ---- economy feedback bookkeeping ----
+        self.last_levy = 0.0
+        self.levy_total = 0.0
+        self.last_sector_transfer = 0.0
 
     # ---- pickling: drop the lock, recreate it on load ----
     def __getstate__(self):
@@ -2917,6 +2927,9 @@ def finance_day_close(w: World):
     w.month_income += income
     w.h_meter_day[:] = 0
     w.h_water_day[:] = 0
+    payroll = c["colony_payroll_day"]
+    w.colony_budget -= payroll          # may go below zero: that is debt, and colony repairs stop being funded
+    w.colony_month_expense += payroll
 
 
 def finance_month_close(w: World):
@@ -2934,6 +2947,16 @@ def finance_month_close(w: World):
     upkeep = c["reactor_upkeep_month"]
     w.colony_budget -= upkeep
     w.colony_month_expense += upkeep
+    extra = np.maximum(0.0, w.sector_budget - c["sector_budget_cap"])
+    w.sector_budget -= extra
+    w.last_sector_transfer = float(extra.sum())
+    w.colony_budget += w.last_sector_transfer
+    w.colony_month_income += w.last_sector_transfer
+    w.last_levy = max(0.0, w.colony_budget - c["company_reserve_target"]) * c["company_levy_frac"]
+    w.colony_budget -= w.last_levy
+    w.levy_total += w.last_levy
+    if w.last_levy > 0:
+        w.log("INFO", f"Company took {w.last_levy:.0f} cr of the surplus, sectors passed {w.last_sector_transfer:.0f} cr up")
     common_share = (w.colony_month_expense - w.colony_month_income) / w.N
     top = np.argsort(-house_total)[:5]
     w.last_report = {
@@ -2950,6 +2973,7 @@ def finance_month_close(w: World):
         "colony_budget": round(w.colony_budget, 1),
         "common_share_per_house": round(float(common_share), 2),
         "unpaid": round(w.unfunded_total, 1),
+        "levy": round(w.last_levy, 1), "sector_transfer": round(w.last_sector_transfer, 1),
         "top_houses": [{"house": int(i) + 1, "sector": int(w.h_sector[i]) + 1, "energy": round(float(energy[i]), 1),
                         "water": round(float(water[i]), 1), "repairs": round(float(repairs[i]), 1),
                         "total": round(float(house_total[i]), 1)} for i in top],
@@ -3431,6 +3455,8 @@ class Store:
     @staticmethod
     def migrate(w: World):
         """Fill in attributes a newer version added since the world was saved, using a fresh world's defaults."""
+        for k, v in CFG.items():
+            w.cfg.setdefault(k, v)
         fresh = World(w.cfg)
         added = []
         for k, v in fresh.__dict__.items():
