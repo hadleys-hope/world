@@ -428,7 +428,9 @@ class World:
         self.synoptic = 0.0
         self.visibility = 100.0
 
-        # ---- economy feedback bookkeeping ----
+        # ---- attractor page: colony trajectory samples ----
+        self.attr_fast = []     # every 10 ticks, last 5 days
+        self.attr_slow = []     # every 6 hours, last 60 days
         self.last_levy = 0.0
         self.levy_total = 0.0
         self.last_sector_transfer = 0.0
@@ -1912,8 +1914,8 @@ NAV_CSS = r"""
   nav.hh a { color:#d9dde6; text-decoration:none; padding:4px 10px; border:1px solid #262b36; border-radius:6px; background:#1c212c; }
   nav.hh a.on { border-color:#5aa9ff; color:#5aa9ff; } nav.hh a:hover { background:#2d3444; } nav.hh .t { margin-left:auto; color:#8a93a6; }
 """
-NAV_HTML = r"""<nav class="hh"><a href="/" id="nav-3d">3D planet</a><a href="/flat" id="nav-flat">flat map</a><a href="/bus" id="nav-bus">bus and programs</a><a href="/house" id="nav-house">house</a><a href="/graph" id="nav-graph">system graph</a><span class="t" id="navtime"></span></nav>
-<script>(function(){ const p=location.pathname.replace(/\/$/,'')||'/'; const id={'/':'nav-3d','/flat':'nav-flat','/bus':'nav-bus','/house':'nav-house','/graph':'nav-graph'}[p]; if(id) document.getElementById(id).classList.add('on'); })();</script>"""
+NAV_HTML = r"""<nav class="hh"><a href="/" id="nav-3d">3D planet</a><a href="/flat" id="nav-flat">flat map</a><a href="/bus" id="nav-bus">bus and programs</a><a href="/house" id="nav-house">house</a><a href="/graph" id="nav-graph">system graph</a><a href="/attractors" id="nav-attr">attractors</a><span class="t" id="navtime"></span></nav>
+<script>(function(){ const p=location.pathname.replace(/\/$/,'')||'/'; const id={'/':'nav-3d','/flat':'nav-flat','/bus':'nav-bus','/house':'nav-house','/graph':'nav-graph','/attractors':'nav-attr'}[p]; if(id) document.getElementById(id).classList.add('on'); })();</script>"""
 
 HTMLHOUSE = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Hadley's Hope: house</title>
@@ -2062,6 +2064,141 @@ cv.addEventListener('wheel', ev=>{ ev.preventDefault(); const r=cv.getBoundingCl
 init();
 </script></body></html>
 """.replace("NAVCSS", NAV_CSS).replace("NAVHTML", NAV_HTML)
+
+HTMLATTR = r"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Hadley's Hope: attractors</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --text:#d9dde6; --dim:#8a93a6; --ok:#5ec07a; --warn:#e0b04a; --bad:#e2574d; }
+  * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--text); font:13px/1.35 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; display:flex; flex-direction:column; height:100vh; overflow:hidden; }
+  #body { flex:1; display:flex; min-height:0; }
+  #wrap { flex:1; position:relative; min-width:0; } #wrap canvas { position:absolute; left:0; top:0; width:100%; height:100%; display:block; }
+  #side { width:430px; flex:0 0 430px; border-left:1px solid var(--line); overflow-y:auto; padding:8px 10px; background:#12151c; }
+  .pn { background:#161a22; border:1px solid var(--line); border-radius:8px; padding:8px 10px; margin-bottom:8px; }
+  .pn h3 { margin:0 0 4px; font-size:12px; font-weight:600; display:flex; align-items:center; gap:8px; } .pn h3 .ax { margin-left:auto; color:var(--dim); font-weight:400; font-size:11px; }
+  .pn canvas { width:100%; height:170px; display:block; } .pn .v { font-size:11.5px; margin-top:4px; }
+  .pill { font-size:10.5px; padding:1px 7px; border-radius:9px; border:1px solid; } .pill.ok { color:var(--ok); border-color:var(--ok); } .pill.warn { color:var(--warn); border-color:var(--warn); } .pill.bad { color:var(--bad); border-color:var(--bad); }
+  #legend { position:absolute; left:56px; bottom:46px; background:rgba(18,21,28,.9); border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:11.5px; max-width:360px; z-index:3; }
+  #legend label { display:inline-flex; gap:4px; align-items:center; margin-right:8px; } .sw { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:4px; vertical-align:-1px; }
+  .dim { color:var(--dim); } .ok { color:var(--ok); } .warn { color:var(--warn); } .bad { color:var(--bad); }
+  #tip { position:absolute; display:none; background:rgba(18,21,28,.95); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font-size:11.5px; pointer-events:none; max-width:300px; z-index:4; }
+  @media (max-width:1100px){ #body { flex-direction:column; } #side { width:auto; flex:0 0 auto; max-height:45vh; border-left:0; border-top:1px solid var(--line); } }
+  NAVCSS
+</style></head>
+<body>
+NAVHTML
+<div id="body">
+<div id="wrap"><canvas id="trail"></canvas><canvas id="bg"></canvas><canvas id="top"></canvas>
+<div id="legend"><b>Attractors: phase space of the 300 houses</b><br>
+<span class="dim">x: indoor temperature, y: how fast it changes. Every house is a bright dot, the dust is the same physics run forward. Things flow to where they will end up.</span><br>
+<span class="sw" style="background:#5ec07a"></span>warm basin <span class="sw" style="background:#e0b04a"></span>cool, cannot reach target <span class="sw" style="background:#e2574d"></span>will freeze <span class="sw" style="background:#8a7aa6"></span>pipes burst<br>
+<span id="counts" class="dim"></span><br>
+<label><input type="checkbox" id="oDust" checked> flow</label><label><input type="checkbox" id="oCurves" checked> curves</label><label><input type="checkbox" id="oHouses" checked> houses</label>
+</div>
+<div id="tip"></div></div>
+<div id="side">
+  <div class="pn"><h3>Water tank <span class="pill" id="pw"></span><span class="ax">x tank m3, y net m3/h</span></h3><canvas id="cw"></canvas><div class="v" id="vw"></div></div>
+  <div class="pn"><h3>Power and UPS <span class="pill" id="pp"></span><span class="ax">x margin kW, y UPS %</span></h3><canvas id="cp"></canvas><div class="v" id="vp"></div></div>
+  <div class="pn"><h3>Repairs queue <span class="pill" id="pr"></span><span class="ax">x open issues, y burst houses</span></h3><canvas id="cr"></canvas><div class="v" id="vr"></div></div>
+  <div class="pn"><h3>Colony money <span class="pill" id="pm"></span><span class="ax">x budget k cr, y k cr/day</span></h3><canvas id="cm"></canvas><div class="v" id="vm"></div></div>
+</div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const BG=$('bg'), TR=$('trail'), TP=$('top'), bgc=BG.getContext('2d'), trc=TR.getContext('2d'), tpc=TP.getContext('2d'), tip=$('tip');
+const COL=['#5ec07a','#e0b04a','#e2574d','#8a7aa6'], DUST=['rgba(79,209,197,','rgba(224,176,74,','rgba(226,87,77,','rgba(138,122,166,'];
+const TMIN=-58, TMAX=35, RMIN=-3.2, RMAX=2.2, C0=21, SQ=1.5;
+let A=null, H=null, W=0, Hh=0, dpr=1, pad={l:46,r:18,t:18,b:34}, pollN=0, dirty=true;
+const opt={dust:true, curves:true, houses:true};
+[['oDust','dust'],['oCurves','curves'],['oHouses','houses']].forEach(([id,k])=>$(id).onchange=e=>{ opt[k]=e.target.checked; dirty=true; if(k==='dust'){ trc.fillStyle='#0f1115'; trc.fillRect(0,0,W,Hh); } });
+const asinh=Math.asinh, u0=asinh((TMIN-C0)/SQ), u1=asinh((TMAX-C0)/SQ);
+const X=T=>pad.l+(asinh((Math.max(TMIN,Math.min(TMAX,T))-C0)/SQ)-u0)/(u1-u0)*(W-pad.l-pad.r);
+const Y=r=>pad.t+(RMAX-Math.max(RMIN,Math.min(RMAX,r)))/(RMAX-RMIN)*(Hh-pad.t-pad.b);
+function resize(){ const r=$('wrap').getBoundingClientRect(); dpr=devicePixelRatio||1; W=r.width; Hh=r.height; for(const c of [BG,TR,TP]){ c.width=W*dpr; c.height=Hh*dpr; c.getContext('2d').setTransform(dpr,0,0,dpr,0,0); } dirty=true; }
+addEventListener('resize', resize);
+function med(a){ const s=[...a].sort((x,y)=>x-y); return s[s.length>>1]; }
+function drawBg(){ const c=bgc; c.clearRect(0,0,W,Hh); if(!A) return; const h=A.houses;
+  c.font='10.5px sans-serif'; c.lineWidth=1;
+  for(const T of [-50,-20,0,10,15,18,20,21,22,24,30]){ const x=X(T); c.strokeStyle=T===21?'#24402f':'#1a1f29'; c.beginPath(); c.moveTo(x,pad.t); c.lineTo(x,Hh-pad.b); c.stroke(); c.fillStyle='#5d6576'; c.textAlign='center'; c.fillText(T+'°',x,Hh-pad.b+14); }
+  for(let r=-3;r<=2;r++){ const y=Y(r); c.strokeStyle=r===0?'#39414f':'#1a1f29'; c.beginPath(); c.moveTo(pad.l,y); c.lineTo(W-pad.r,y); c.stroke(); c.fillStyle='#5d6576'; c.textAlign='right'; c.fillText((r>0?'+':'')+r,pad.l-6,y+3); }
+  c.fillStyle='#5d6576'; c.textAlign='left'; c.fillText('°C per hour',4,pad.t-4); c.textAlign='right'; c.fillText('indoor °C (stretched around the 21° target)',W-pad.r,Hh-6);
+  c.strokeStyle='rgba(226,87,77,.45)'; c.setLineDash([4,5]); c.beginPath(); c.moveTo(X(0),pad.t); c.lineTo(X(0),Hh-pad.b); c.stroke(); c.setLineDash([]); c.fillStyle='rgba(226,87,77,.7)'; c.textAlign='left'; c.fillText('pipes freeze below 0°',X(0)+5,pad.t+12);
+  if(opt.curves){ const eqOn=med(h.eq_on), eqOff=med(h.eq_off), tau=med(h.tau), t0=A.t_out;
+    const curve=(eq,col,lab)=>{ c.strokeStyle=col; c.lineWidth=1.5; c.beginPath(); let first=true, lx=0, ly=0; for(let T=TMIN;T<=TMAX;T+=0.25){ const r=(eq-T)/tau; const x=X(T), y=Y(r); if(r>RMAX||r<RMIN){ first=true; continue; } first?c.moveTo(x,y):c.lineTo(x,y); first=false; lx=x; ly=y; } c.stroke(); c.lineWidth=1; };
+    curve(eqOn,'rgba(255,122,48,.45)'); curve(eqOff,'rgba(79,209,197,.35)'); curve(t0+1,'rgba(226,87,77,.35)');
+    c.font='11px sans-serif'; c.textAlign='left'; c.fillStyle='rgba(255,122,48,.8)'; c.fillText('heater on',X(-35),Y((eqOn+35)/tau)-6); c.fillStyle='rgba(79,209,197,.75)'; c.fillText('heater off',X(26),Y((eqOff-26)/tau)+14); c.fillStyle='rgba(226,87,77,.75)'; c.fillText('no power',X(-10),Y((t0+1+10)/tau)+14); }
+  dirty=false; }
+let dust=[];
+function seedDust(n){ dust=[]; for(let i=0;i<n;i++) dust.push(spawn({})); }
+function spawn(p){ p.j=(Math.random()*300)|0; p.T=TMIN+Math.random()*(TMAX-TMIN); p.on=Math.random()<.5; p.age=0; p.life=200+Math.random()*500; p.x=null;
+  if(A){ const h=A.houses, j=p.j; if(h.eq_on[j]<h.target[j]) p.on=true; p.r=((p.on?h.eq_on[j]:h.eq_off[j])-p.T)/h.tau[j]+(Math.random()-.5)*0.6; } else p.r=0; return p; }
+function stepDust(){ if(!A) return; const h=A.houses, dt=0.07; const c=trc;
+  c.globalCompositeOperation='source-over'; c.fillStyle='rgba(15,17,21,0.085)'; c.fillRect(0,0,W,Hh); c.globalCompositeOperation='lighter';
+  if(!opt.dust) return;
+  for(const p of dust){ const j=p.j, tg=h.target[j], eqOn=h.eq_on[j], eqOff=h.eq_off[j], tau=h.tau[j];
+    if(p.T<tg-0.5) p.on=true; else if(p.T>tg+0.5) p.on=false; if(eqOn<tg) p.on=true;
+    const want=((p.on?eqOn:eqOff)-p.T)/tau; p.r+=(want-p.r)*0.18; p.T+=p.r*dt; p.age++;
+    const x=X(p.T), y=Y(p.r); if(p.x!==null){ const a=Math.min(1,p.age/40)*Math.min(1,(p.life-p.age)/60)*0.55; c.strokeStyle=DUST[h.basin[j]]+a+')'; c.beginPath(); c.moveTo(p.x,p.y); c.lineTo(x,y); c.stroke(); }
+    p.x=x; p.y=y; if(p.age>p.life) spawn(p); }
+  c.globalCompositeOperation='source-over'; }
+let hp=[], hover=-1, pulse=0;
+function drawTop(){ const c=tpc; c.clearRect(0,0,W,Hh); if(!A) return; const h=A.houses; pulse+=0.03;
+  const glow=(x,y,col,r0)=>{ for(let k=3;k>=1;k--){ c.beginPath(); c.arc(x,y,r0*k*(1+0.12*Math.sin(pulse*2)),0,7); c.fillStyle=col.replace('1)',(0.07*(4-k))+')'); c.fill(); } };
+  const tg=med(h.target); glow(X(tg),Y(0),'rgba(94,192,122,1)',14); c.strokeStyle='#5ec07a'; c.lineWidth=1.5; c.beginPath(); c.arc(X(tg),Y(0),6,0,7); c.stroke();
+  c.fillStyle='#5ec07a'; c.font='600 11.5px sans-serif'; c.textAlign='center'; c.textAlign='left'; c.fillText('comfort attractor '+tg+'°',X(tg)+62,Y(0)+4); c.textAlign='center';
+  glow(X(A.t_out+1),Y(0),'rgba(226,87,77,1)',14); c.strokeStyle='#e2574d'; c.beginPath(); c.arc(X(A.t_out+1),Y(0),6,0,7); c.stroke(); c.fillStyle='#e2574d'; c.textAlign='left'; c.fillText('freeze attractor '+Math.round(A.t_out)+'°',Math.max(4,X(A.t_out+1)-20),Y(0)+30);
+  c.lineWidth=1;
+  if(!opt.houses) return;
+  for(let i=0;i<h.t.length;i++){ const tx=X(h.t[i]), ty=Y(h.rate[i]); if(!hp[i]) hp[i]={x:tx,y:ty}; const q=hp[i]; q.x+=(tx-q.x)*0.12; q.y+=(ty-q.y)*0.12;
+    const col=COL[h.basin[i]]; c.beginPath(); c.arc(q.x,q.y,i===hover?6:3.2,0,7); c.fillStyle=col; c.globalAlpha=0.95; c.fill(); c.globalAlpha=0.18; c.beginPath(); c.arc(q.x,q.y,8,0,7); c.fill(); c.globalAlpha=1; }
+  if(hover>=0){ const q=hp[hover]; c.strokeStyle='#fff'; c.beginPath(); c.arc(q.x,q.y,7,0,7); c.stroke(); } }
+const BASIN=['warm: settles at its target','cool: heat is capped, settles below target','freezing: no heat to hold it above 0°','pipes burst, waiting for the plumber'];
+TP.addEventListener('pointermove', ev=>{ if(!A||!opt.houses) return; const r=TP.getBoundingClientRect(), mx=ev.clientX-r.left, my=ev.clientY-r.top; let best=-1, bd=10;
+  hp.forEach((q,i)=>{ const d=Math.hypot(q.x-mx,q.y-my); if(d<bd){ bd=d; best=i; } }); hover=best; TP.style.cursor=best>=0?'pointer':'default';
+  if(best<0){ tip.style.display='none'; return; } const h=A.houses, i=best;
+  tip.innerHTML=`<b>House ${i+1}</b>, sector ${h.sector[i]+1}<br>${h.t[i].toFixed(1)}° now, ${h.rate[i]>0?'+':''}${h.rate[i].toFixed(2)}°/h<br>heading to <b>${h.att[i]}°</b> (heater on ${h.eq_on[i]}°, off ${h.eq_off[i]}°, time constant ${h.tau[i]} h)<br><span style="color:${COL[h.basin[i]]}">${BASIN[h.basin[i]]}</span>${h.ttf[i]>0?`<br>reaches 0° in <b>${h.ttf[i]} h</b>`:''}`;
+  tip.style.display='block'; tip.style.left=Math.min(mx+14,W-310)+'px'; tip.style.top=(my+14)+'px'; });
+TP.addEventListener('pointerleave',()=>{ hover=-1; tip.style.display='none'; });
+TP.addEventListener('click',()=>{ if(hover>=0) window.open('/house?id='+(hover+1),'_blank'); });
+function panel(id){ const cv=$(id), r=cv.getBoundingClientRect(); const d=devicePixelRatio||1; if(cv.width!==Math.round(r.width*d)){ cv.width=Math.round(r.width*d); cv.height=Math.round(r.height*d); } const c=cv.getContext('2d'); c.setTransform(d,0,0,d,0,0); c.clearRect(0,0,r.width,r.height); return [c,r.width,r.height]; }
+function frame(c,w,h,xr,yr,xl,yl){ const P={l:34,r:8,t:8,b:16}; const sx=v=>P.l+(v-xr[0])/(xr[1]-xr[0])*(w-P.l-P.r), sy=v=>P.t+(yr[1]-v)/(yr[1]-yr[0])*(h-P.t-P.b);
+  c.strokeStyle='#222834'; c.lineWidth=1; c.strokeRect(P.l,P.t,w-P.l-P.r,h-P.t-P.b); c.fillStyle='#5d6576'; c.font='10px sans-serif'; c.textAlign='right';
+  c.fillText(yl(yr[1]),P.l-4,P.t+8); c.fillText(yl(yr[0]),P.l-4,h-P.b); c.textAlign='left'; c.fillText(xl(xr[0]),P.l,h-3); c.textAlign='right'; c.fillText(xl(xr[1]),w-P.r,h-3);
+  if(yr[0]<0&&yr[1]>0){ c.strokeStyle='#343b49'; c.beginPath(); c.moveTo(P.l,sy(0)); c.lineTo(w-P.r,sy(0)); c.stroke(); } return [sx,sy]; }
+function comet(c,pts,sx,sy,col){ if(pts.length<2) return; for(let k=1;k<pts.length;k++){ const a=k/pts.length; c.strokeStyle=col.replace('A',(0.08+0.8*a*a).toFixed(3)); c.lineWidth=0.6+1.6*a; c.beginPath(); c.moveTo(sx(pts[k-1][0]),sy(pts[k-1][1])); c.lineTo(sx(pts[k][0]),sy(pts[k][1])); c.stroke(); }
+  const [x,y]=pts[pts.length-1]; c.fillStyle=col.replace('A','0.25'); c.beginPath(); c.arc(sx(x),sy(y),7+2*Math.sin(pulse*3),0,7); c.fill(); c.fillStyle=col.replace('A','1'); c.beginPath(); c.arc(sx(x),sy(y),3,0,7); c.fill(); c.lineWidth=1; }
+function ring(c,x,y,col,lab){ c.strokeStyle=col; c.lineWidth=1.5; c.beginPath(); c.arc(x,y,6,0,7); c.stroke(); c.lineWidth=1; if(lab){ c.fillStyle=col; c.font='10px sans-serif'; c.textAlign='center'; c.fillText(lab,x,y-10); } }
+function zone(c,sx,sy,x0,x1,y0,y1,col){ c.fillStyle=col; c.fillRect(sx(x0),sy(y1),sx(x1)-sx(x0),sy(y0)-sy(y1)); }
+function setPill(id,v){ const e=$(id); e.className='pill '+v[0]; e.textContent={ok:'attractor',warn:'drifting',bad:'collapse basin'}[v[0]]; }
+function col(k){ return H && H.fast_keys ? H.fast_keys.indexOf(k) : -1; }
+function drawPanels(){ if(!A) return; const F=(H&&H.fast)||[], S=(H&&H.slow)||[];
+  { const [c,w,h]=panel('cw'); const wa=A.water, iT=col('tank'), iI=col('water_in'), iU=col('water_use'); const pts=F.map(r=>[r[iT], r[iI]-r[iU]]); const m=Math.max(3,...pts.map(p=>Math.abs(p[1])))*1.2;
+    const xsw=pts.map(p=>p[0]).concat([wa.v_star, wa.tank]); const wx0=Math.max(0,Math.min(...xsw)-15), wx1=Math.min(wa.cap,Math.max(...xsw)+8);
+    const [sx,sy]=frame(c,w,h,[wx0,wx1],[-m,m],v=>Math.round(v)+'',v=>v.toFixed(0));
+    c.strokeStyle='rgba(90,169,255,.35)'; c.beginPath(); for(let v=wx0;v<=wx1;v+=(wx1-wx0)/120){ const inflow=A.water.v_star>0||wa.in>0?12*Math.max(.15,Math.min(1,(wa.cap-v)/60)):0; const y=sy(Math.max(-m,Math.min(m,inflow-wa.use))); v>wx0?c.lineTo(sx(v),y):c.moveTo(sx(v),y); } c.stroke();
+    comet(c,pts,sx,sy,'rgba(90,169,255,A)'); if(wa.v_star>0) ring(c,sx(wa.v_star),sy(0),'#5ec07a','settles '+Math.round(wa.v_star)); else ring(c,sx(0),sy(0),'#e2574d','empty');
+    setPill('pw',wa.verdict); $('vw').textContent=wa.verdict[1]; }
+  { const [c,w,h]=panel('cp'); const iA=col('avail_kw'), iD=col('demand_kw'), iU=col('ups'); const pts=F.map(r=>[r[iA]-r[iD], r[iU]*100]); const m=Math.max(500,...pts.map(p=>Math.abs(p[0])))*1.15;
+    const [sx,sy]=frame(c,w,h,[-m,m],[0,105],v=>Math.round(v)+'',v=>Math.round(v)+'%');
+    zone(c,sx,sy,0,m,90,105,'rgba(94,192,122,.10)'); zone(c,sx,sy,-m,0,0,20,'rgba(226,87,77,.12)'); c.fillStyle='rgba(94,192,122,.7)'; c.font='10px sans-serif'; c.textAlign='right'; c.fillText('healthy',sx(m)-4,sy(95)); c.fillStyle='rgba(226,87,77,.7)'; c.textAlign='left'; c.fillText('blackout',sx(-m)+4,sy(8));
+    comet(c,pts,sx,sy,'rgba(242,193,78,A)'); setPill('pp',A.power.verdict); $('vp').textContent=A.power.verdict[1]; }
+  { const [c,w,h]=panel('cr'); const iO=col('open'), iB=col('burst'); const pts=F.map(r=>[r[iO], r[iB]]); const mx=Math.max(8,...pts.map(p=>p[0]))*1.15, my=Math.max(5,...pts.map(p=>p[1]))*1.15;
+    const [sx,sy]=frame(c,w,h,[0,mx],[0,my],v=>Math.round(v)+'',v=>Math.round(v)+'');
+    const rho=A.repairs.rho; if(rho<1){ const L=rho/(1-rho); ring(c,sx(Math.min(mx,L)),sy(0),'#5ec07a','queue settles'); }
+    comet(c,pts,sx,sy,'rgba(180,142,173,A)'); setPill('pr',A.repairs.verdict); $('vr').textContent=`${A.repairs.verdict[1]} (${A.repairs.lam} new a day, crews close about ${A.repairs.mu})`; }
+  { const [c,w,h]=panel('cm'); const pts=[], G=r=>r.length>3?r[3]:r[1]; for(let k=4;k<S.length;k++){ pts.push([S[k][1]/1000, (G(S[k])-G(S[k-4]))/1000]); } const mo=A.money;
+    const xs=pts.map(p=>p[0]).concat([mo.colony/1000, mo.target/1000].concat(mo.colony<30000?[0]:[])), ys=pts.map(p=>Math.abs(p[1])).concat([2]); const x0=Math.min(...xs)-10, x1=Math.max(...xs)+10, m=Math.max(...ys)*1.15;
+    const [sx,sy]=frame(c,w,h,[x0,x1],[-m,m],v=>Math.round(v)+'k',v=>v.toFixed(0));
+    if(x0<0) zone(c,sx,sy,x0,0,-m,m,'rgba(226,87,77,.12)'); c.strokeStyle='rgba(94,192,122,.35)'; c.setLineDash([3,4]); c.beginPath(); c.moveTo(sx(mo.target/1000),sy(m)); c.lineTo(sx(mo.target/1000),sy(-m)); c.stroke(); c.setLineDash([]);
+    comet(c,pts,sx,sy,'rgba(94,192,122,A)'); if(mo.b_star) ring(c,sx(mo.b_star/1000),sy(0),'#5ec07a','settles '+Math.round(mo.b_star/1000)+'k');
+    setPill('pm',mo.verdict); $('vm').textContent=mo.verdict[1]+(mo.last_levy?`, last levy ${Math.round(mo.last_levy/1000)}k`:''); } }
+function counts(){ const h=A.houses, k=h.counts; $('counts').innerHTML=`<span class="ok">${k[0]} warm</span>, <span class="warn">${k[1]} cool</span>, <span class="bad">${k[2]} freezing</span>, ${k[3]} burst${h.first_freeze_h>0?`; first pipes freeze in <b class="bad">${h.first_freeze_h} h</b>`:''}. Outside ${A.t_out}°, wind ${A.wind} m/s.`; $('navtime').textContent=A.time; }
+async function poll(){ try{ const want=(pollN++%10===0); const d=await (await fetch('/attractors.json'+(want?'?hist=1':''))).json(); if(want) H=d; const first=!A; A=d; if(first) seedDust(2600); dirty=true; counts(); }catch(e){} setTimeout(poll,1000); }
+let fr=0; function loop(){ if(dirty) drawBg(); stepDust(); drawTop(); if(fr++%6===0) drawPanels(); requestAnimationFrame(loop); }
+resize(); poll(); loop();
+</script></body></html>
+""".replace("NAVCSS", NAV_CSS).replace("NAVHTML", NAV_HTML)
+
 
 # ------------------------------------------------------------------------------------
 # Internet
@@ -3000,11 +3137,160 @@ def _expense_by_cause(w: World):
     return out
 
 
+# ------------------------------------------------------------------------------------
+# Attractors: where each subsystem is heading if nothing else happens
+# ------------------------------------------------------------------------------------
+
 def pipes_audit(w: World):
     """Reconcile: every burst house must have an open pipes_burst issue, or nobody will ever fix it."""
     for i in np.flatnonzero(w.h_burst):
         w.open_issue("pipes_burst", f"house:{i}", int(w.h_sector[i]), "freeze", "pipes",
                      (float(w.h_x[i]), float(w.h_y[i])), "critical")
+
+
+def attractor_sample(w: World):
+    c = w.cfg
+    ups_cap = c["ups_sector_kwh"] * w.S + c["ups_center_kwh"]
+    ups = (float(w.ups_kwh.sum()) + float(w.ups_center_kwh)) / ups_cap
+    opened = sum(1 for i in w.issues if i.status != "resolved")
+    frozen = int((~w.h_pipes_ok & ~w.h_burst).sum())
+    w.attr_fast.append((w.t, round(w.water_tank_m3, 1), round(w.water_plant_m3_h, 2), round(w.water_flow_m3_h, 2),
+                        round(w.available_kw), round(w.demand_kw), round(ups, 3), int(w.shedding), opened,
+                        int(w.h_burst.sum()), frozen, round(w.colony_budget), round(float(w.sector_budget.sum())),
+                        round(float(w.mine_frac), 2)))
+    if len(w.attr_fast) > 720:
+        del w.attr_fast[:len(w.attr_fast) - 720]
+    if w.t % 360 == 0:
+        w.attr_slow.append((w.t, round(w.colony_budget), round(float(w.sector_budget.sum())),
+                            round(w.colony_budget + w.levy_total)))
+        if len(w.attr_slow) > 240:
+            del w.attr_slow[:len(w.attr_slow) - 240]
+
+
+FAST_KEYS = ["t", "tank", "water_in", "water_use", "avail_kw", "demand_kw", "ups", "shedding", "open", "burst",
+             "frozen", "colony", "sectors", "mine"]
+
+
+def _houses_attractors(w: World):
+    ua = w.h_ua * (1.0 + 0.006 * w.wind)
+    q_now = (w.h_draw_w - w.h_heat_w) * 0.8 + w.h_residents * 80.0
+    rate = (w.h_heat_w + q_now - ua * (w.h_t_in - w.t_out)) / w.h_cap * 3600.0          # C per hour, same law as houses_step
+    q_int = w.h_residents * 80.0 + np.where(w.h_power_ok, w.h_base_w * 0.8, 0.0)
+    p_on = np.where(w.h_power_ok, np.where(w.h_limit_w > 0, np.clip(w.h_limit_w - w.h_base_w, 0, w.h_heater_w), w.h_heater_w), 0.0)
+    eq_on = w.t_out + (p_on + q_int) / ua        # where the house settles with the heater always on
+    eq_off = w.t_out + q_int / ua                # ... and with it always off
+    tau_h = w.h_cap / ua / 3600.0                # how fast it gets there, hours
+    target = w.h_target
+    att = np.where(eq_on >= target, target, eq_on)
+    basin = np.where(w.h_burst, 3, np.where(att >= target - 1.0, 0, np.where(att >= 0.0, 1, 2)))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ttf = np.where((basin == 2) & (w.h_t_in > 0), tau_h * np.log((w.h_t_in - eq_on) / (0.0 - eq_on)), -1.0)
+    return {
+        "t": np.round(w.h_t_in, 2).tolist(), "rate": np.round(rate, 3).tolist(),
+        "eq_on": np.round(eq_on, 1).tolist(), "eq_off": np.round(eq_off, 1).tolist(), "tau": np.round(tau_h, 1).tolist(),
+        "target": np.round(target, 1).tolist(), "att": np.round(att, 1).tolist(), "basin": basin.tolist(),
+        "ttf": np.round(np.nan_to_num(ttf, nan=-1.0), 1).tolist(), "sector": w.h_sector.tolist(),
+        "counts": [int((basin == k).sum()) for k in range(4)],
+        "first_freeze_h": round(float(ttf[ttf > 0].min()), 1) if (ttf > 0).any() else -1,
+    }
+
+
+def attractor_snapshot(w: World, with_hist: bool):
+    c = w.cfg
+    fast = w.attr_fast
+    day = [r for r in fast if r[0] > w.t - c["ticks_per_day"]] or fast[-1:]
+
+    # water: plant throttles as the tank fills, so inflow = use has one solution
+    use = sum(r[3] for r in day) / len(day) if day else w.water_flow_m3_h
+    vmax, cap = c["water_plant_m3_h"], c["water_tank_m3"]
+    if not w.water_plant_ok:
+        v_star = 0.0
+    elif use <= 0.15 * vmax:
+        v_star = cap
+    elif use < vmax:
+        v_star = cap - 60.0 * use / vmax
+    else:
+        v_star = 0.0
+    runway_w = w.water_tank_m3 / use if use > 0 else -1
+    if not w.water_plant_ok:
+        wv = ("bad", f"plant down: tank drains to zero, {runway_w:.0f} h left")
+    elif v_star < 0.3 * cap:
+        wv = ("warn", f"use {use:.1f} m3/h is close to plant capacity, tank settles low")
+    else:
+        wv = ("ok", f"settles at {v_star:.0f} m3 with a daily loop; {runway_w:.0f} h of water if the plant stops")
+
+    # power
+    margin = w.available_kw - w.demand_kw
+    ups_cap = c["ups_sector_kwh"] * w.S + c["ups_center_kwh"]
+    ups_kwh = float(w.ups_kwh.sum()) + float(w.ups_center_kwh)
+    if w.r_mode not in ("ONLINE",):
+        pv = ("bad" if w.r_mode != "RUNBACK" else "warn", f"reactor {w.r_mode}: UPS {ups_kwh:.0f} kWh is the only buffer")
+    elif w.shedding > 0:
+        pv = ("warn", f"shedding level {w.shedding}: the grid trades comfort for balance")
+    else:
+        pv = ("ok", f"margin {margin:.0f} kW, UPS {100 * ups_kwh / ups_cap:.0f}% full")
+
+    # repairs as a queue: arrivals vs what the crews can close
+    t0 = w.t - c["ticks_per_day"]
+    lam = sum(1 for i in w.issues if i.opened_t > t0)
+    done = [i for i in w.issues if i.status == "resolved" and i.started_t >= 0][-30:]
+    svc = (sum(i.resolved_t - i.started_t for i in done) / len(done)) if done else 180.0
+    crews = sum(1 for r in w.rovers if r.kind in ("repair", "plumber"))
+    mu = crews * c["ticks_per_day"] / (svc + 40.0)
+    rho = lam / mu if mu > 0 else 9.9
+    unfunded = sum(1 for i in w.issues if i.status == "unfunded")
+    backlog = len(w.open_issues())
+    if unfunded:
+        rv = ("bad", f"{unfunded} repairs wait for money: failures pile up")
+    elif rho >= 1:
+        rv = ("bad", f"load {rho:.2f}: failures arrive faster than crews close them")
+    elif rho > 0.7:
+        rv = ("warn", f"load {rho:.2f}: queue grows as 1/(1-load)")
+    else:
+        rv = ("ok", f"load {rho:.2f}: backlog returns to about {rho / (1 - rho):.1f}")
+
+    # money: the company levy pulls the budget toward a fixed point
+    slow = w.attr_slow
+    tgt, f = c["company_reserve_target"], c["company_levy_frac"]
+    net_month = None
+    if len(slow) >= 5:
+        # the budget as if the company never took anything: the formula needs the flow before the levy
+        old = slow[max(0, len(slow) - 121)]
+        span_days = (w.t - old[0]) / c["ticks_per_day"]
+        gross_old = old[3] if len(old) > 3 else old[1]
+        net_month = (w.colony_budget + w.levy_total - gross_old) / max(span_days, 0.25) * c["days_per_month"]
+    burn = c["colony_payroll_day"]
+    runway_m = w.colony_budget / burn if w.colony_budget > 0 else 0.0
+    b_star = None
+    if w.colony_budget < 0:
+        mv = ("bad", "in debt: colony repairs are not funded, the loop feeds itself")
+    elif net_month is None:
+        mv = ("ok", "collecting history")
+    elif net_month <= 0:
+        mv = ("warn", f"losing {-net_month:.0f} cr a month, {runway_m:.0f} days of payroll left")
+    else:
+        b_star = tgt + net_month / f - net_month
+        mv = ("ok", f"settles near {b_star / 1000:.0f}k cr; {runway_m:.0f} days of payroll if income stops")
+
+    out = {
+        "time": w.time_str(), "t": w.t, "t_out": round(w.t_out, 1), "wind": round(w.wind, 1),
+        "houses": _houses_attractors(w),
+        "water": {"tank": round(w.water_tank_m3, 1), "cap": cap, "in": round(w.water_plant_m3_h, 2), "use": round(use, 2),
+                  "v_star": round(v_star, 1), "runway_h": round(runway_w, 1), "verdict": wv},
+        "power": {"margin": round(margin), "ups": round(ups_kwh / ups_cap, 3), "shedding": w.shedding, "mode": w.r_mode,
+                  "verdict": pv},
+        "repairs": {"lam": lam, "mu": round(mu, 1), "rho": round(rho, 2), "backlog": backlog, "unfunded": unfunded,
+                    "burst": int(w.h_burst.sum()), "verdict": rv},
+        "money": {"colony": round(w.colony_budget), "sectors": round(float(w.sector_budget.sum())), "target": tgt,
+                  "levy_frac": f, "net_month": None if net_month is None else round(net_month),
+                  "b_star": None if b_star is None else round(b_star), "runway_days": round(runway_m, 1),
+                  "last_levy": round(w.last_levy), "verdict": mv},
+    }
+    if with_hist:
+        out["fast_keys"] = FAST_KEYS
+        out["fast"] = fast
+        out["slow"] = slow
+    return out
 
 
 # ------------------------------------------------------------------------------------
@@ -3058,6 +3344,8 @@ def world_tick(w: World):
     house_events(w)
     if w.t % 60 == 0:
         pipes_audit(w)
+    if w.t % 10 == 0:
+        attractor_sample(w)
     if w.t % w.cfg["ticks_per_day"] == 0:
         finance_day_close(w)
     if w.t % (w.cfg["ticks_per_day"] * w.cfg["days_per_month"]) == 0:
@@ -3613,6 +3901,13 @@ def make_handler(w_holder: dict, html: str, geom_json: str, store: Optional[Stor
                 self._send(200, "application/json", body)
             elif self.path.startswith("/house"):
                 self._send(200, "text/html; charset=utf-8", HTMLHOUSE.encode("utf-8"))
+            elif self.path.startswith("/attractors.json"):
+                w = w_holder["w"]
+                with w.lock:
+                    body = json.dumps(attractor_snapshot(w, "hist=1" in self.path)).encode("utf-8")
+                self._send(200, "application/json", body)
+            elif self.path.startswith("/attractors"):
+                self._send(200, "text/html; charset=utf-8", HTMLATTR.encode("utf-8"))
             elif self.path.startswith("/graph"):
                 self._send(200, "text/html; charset=utf-8", HTMLGRAPH.encode("utf-8"))
             elif self.path.startswith("/bus.json"):
