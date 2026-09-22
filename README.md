@@ -66,8 +66,25 @@ build or Node runtime is needed on the server.
 
 ## What you see
 
-The page at `/` is a 3D view: the colony wrapped onto a small planet. Drag to rotate, right-drag,
-shift-drag, WASD or arrows to move, wheel to zoom, double-click to centre on a point. Every building,
+The `/` page contains the colony on Acheron / LV-426 and three additional procedural
+worlds orbiting a bright white star. Use **0** for the system, **1–4** to select a
+world, and **Home** to return to the colony. Orbits use simulation time and pause
+with the colony. Distances and orbital periods are compressed for navigation;
+the other worlds have distinct surfaces and animated climates, not separate colonies.
+
+Drag any mouse button to orbit; wheel/pinch to approach. **Shift** toggles free
+flight: WASD/arrows, Q/E altitude, +/− speed. Drag to look, **L** to capture the
+pointer, **Esc** to release it. **F** or double-click focuses an inspected object.
+
+Click a vehicle, then **Enter · Drive vehicle** (or press Enter). W/S controls
+throttle, braking and reverse; A/D steers; Space is the handbrake. Drag rotates the
+third-person camera, and the wheel changes follow distance. Esc parks and exits.
+Driving uses real time even while the colony is paused and consumes no fuel.
+If ADMIN_TOKEN is configured, enter it under **M · Console → Operations** first.
+The simplified fixed-step chassis models engine torque, an automatic gearbox,
+four spring/damper contacts, tire grip, drag, spherical gravity and collisions.
+
+Every building,
 gate, rover and colonist is clickable and opens a panel with live numbers; hovering a house shows its
 state. "Fly to" buttons and sector rows move the camera. Layer checkboxes toggle issues, houses
 without internet, UPS charging icons, heaters, power and water flow, packets, people, xenomorphs and
