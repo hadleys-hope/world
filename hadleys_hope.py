@@ -6,7 +6,7 @@ Run `python3 hadleys_hope.py` and open http://localhost:8000.
 
 Modelling revision: shared SI utility graph, pressure-dependent domestic water,
 separate gravity drains and zoom-loaded prefab interiors. Viewer: "inspect a
-home", "roof / upper floor cutaway", and "underground utilities". Select pipes
+home", "roof transparency", and "underground utilities". Select pipes
 for live engineering data. Procedural assets need no downloaded texture packs.
 The Attractors navigation tab preserves the thermal phase portrait and water,
 power/UPS, repair and money history panels. Its optional 3D water-coupling view
@@ -24,6 +24,14 @@ uses the existing indoor thermal model. Glass reflections use a procedural
 prefiltered environment, not ray tracing. Detailed interiors load within 480 m for up to 32 homes plus an inspected home.
 Batched two/three-storey facades, windows and rooftop equipment remain visible
 at colony scale. Pipe cutaway jackets are slightly enlarged for legibility.
+Local controls: drag to pan, right-drag to orbit, wheel/trackpad to zoom at
+cursor, WASD/arrows to move, Q/E for altitude, Shift to accelerate, F to focus.
+Roofs remain visible at all distances (opacity 0.84; C toggles 0.62).
+The civic core has two towers; a separate 64 m paraboloid serves the space
+uplink, independently of the 5G site. Ocean intake conserves water/brine mass
+and caps ice-melting heat at the reactor's available heat recovery.
+Cargo cranes consume a finite stock of 24 containers; deliveries use the inner
+road and the same signal schedule as the visible traffic heads.
 Road vehicles use lane offsets, grade/ice speed reduction, acceleration,
 following gaps, timed signals and fuel bookkeeping; this is a kinematic model. Pressure is gauge kPa,
 flow is L/s, geometry metres. Surface-water precipitation is water-equivalent.
@@ -77,6 +85,15 @@ CFG = {
     "waste_station_pos": (-1000, 140),
     "tower_junction": (-1000, 0),
     "tower_pos": (-1000, -540),
+    "dish_pos": (-1680, -930),
+    "ocean_intake_pos": (-1710, 220),
+    "ocean_level_m": -8.0,
+    "ocean_center": (-2350, 550),
+    "ocean_radii": (900, 1150),
+    "water_heat_kw": 1900.0,
+    "water_recovery": 0.85,
+    "traffic_vehicles": 18,
+    "cargo_depot": (136.0, 210.0),
     "landing_pad_pos": (960, 0),
     "garage": (75.0, 210.0),          # polar: angle, radius; vehicle bay in sector 1
     "medlab": (195.0, 210.0),
@@ -168,6 +185,27 @@ def polar(angle_deg, radius):
 # Darcy-Weisbach / pressure-dependent demand: USEPA EPANET 2.2, chapter 12.
 # ------------------------------------------------------------------------------------
 
+RIVER_PROFILE = [(500,1550,46), (50,1490,34), (-410,1250,23), (-900,1060,12), (-1450,840,1), (-2050,740,-8)]
+
+
+def coast_height(x,y,height):
+    """Shared coastal basin and graded frozen river profile; keep colony terraces intact."""
+    if math.hypot(x,y)<900:return height
+    q=math.hypot((x+2350)/900,(y-550)/1150)
+    az=math.atan2((y-550)/1150,(x+2350)/900)
+    q/=1+.08*math.sin(3*az)+.05*math.sin(7*az)+.025*math.sin(11*az)
+    t=clamp((1.10-q)/.16,0,1);t=t*t*(3-2*t)
+    height=height*(1-t)+(-26-22*max(0,1-q*q))*t
+    for a,b in zip(RIVER_PROFILE,RIVER_PROFILE[1:]):
+        dx,dy=b[0]-a[0],b[1]-a[1]
+        u=clamp(((x-a[0])*dx+(y-a[1])*dy)/(dx*dx+dy*dy),0,1)
+        distance=math.hypot(x-a[0]-u*dx,y-a[1]-u*dy)
+        t=clamp((95-distance)/70,0,1);t=t*t*(3-2*t)
+        target=a[2]+(b[2]-a[2])*u-2
+        height=height*(1-t)+target*t
+    return height
+
+
 def site_elevation(x, y, c):
     """Same finished grades as terrainH in the viewer (metres above local datum)."""
     r = math.hypot(x, y)
@@ -191,7 +229,7 @@ def site_elevation(x, y, c):
     for px,py,height,width in [(1250,850,180,280),(-450,-1350,145,360),(-1640,980,220,310),(450,1650,190,330)]:
         natural += height*math.exp(-((x-px)**2+(y-py)**2)/(width*width))
     blend = smooth(c['wall_radius']+20, c['wall_radius']+320, r)
-    return h+blend*natural+.5*math.sin(x*.031)*math.cos(y*.027)
+    return coast_height(x,y,h+blend*natural+.5*math.sin(x*.031)*math.cos(y*.027))
 
 
 
@@ -202,7 +240,7 @@ class UtilityNetwork:
     decorative ring. Nodes/links are also the authoritative drawing coordinates.
     Sanitary and storm gravity networks run in separate corridors and outfalls.
     """
-    VERSION = 2
+    VERSION = 3
 
     def __init__(self, w):
         self.version = self.VERSION
@@ -221,7 +259,7 @@ class UtilityNetwork:
             xyz = [[float(x),float(y),site_elevation(x,y,c)+3.6] for x,y in pts]
             xyz[0] = [na['x'],na['y'],na['z']]
             xyz[-1] = [nb['x'],nb['y'],nb['z']]
-            if kind in ('main','district'):
+            if kind in ('main','district','header'):
                 # Keep this route above vehicle clearance; node endpoints are shared.
                 for v in xyz[1:-1]:v[2]=site_elevation(v[0],v[1],c)+7.2
             length = sum(math.dist(p,q) for p,q in zip(xyz,xyz[1:]))
@@ -233,33 +271,38 @@ class UtilityNetwork:
         root = node((-70,-45), 'tank', height=24)
         pump = node((-40,-40), 'pump')
         link(root,pump,.25,'pump')
-        for s in range(w.S):
-            a = s*60.0
-            prev = node(polar(a,c['hub_radius']+20), 'isolation', s, height=7.2)
-            link(pump,prev,.15,'district')
+        # A common header goes round the outside of the civic campus. Branch
+        # spines sit 12 m to the side of the road centre, beyond its sidewalk.
+        headers=[];rr=c['hub_radius']+24
+        start_angle=math.degrees(math.atan2(12,rr))
+        for sector in range(w.S):
+            angle=sector*60+start_angle
+            header=node(polar(angle,rr),'header',height=7.2)
+            if sector==0:
+                na=self.nodes[pump];nb=self.nodes[header]
+                link(pump,header,.22,'header',[(na['x'],na['y']),(-40,-130),(rr,-130),(nb['x'],nb['y'])])
+            else:
+                pts=[polar(v,rr) for v in np.linspace((sector-1)*60+start_angle,angle,33)]
+                link(headers[-1],header,.20,'header',pts)
+            headers.append(header)
+        for sector in range(w.S):
+            angle=sector*60.0;rad=math.radians(angle)
+            def shoulder(r):return (r*math.cos(rad)-12*math.sin(rad),r*math.sin(rad)+12*math.cos(rad))
+            prev=node(shoulder(c['hub_radius']+28),'isolation',sector,height=7.2)
+            link(headers[sector],prev,.15,'district')
             for row in range(c['house_rows']):
-                r = c['house_radius_min']-21+row*c['house_ring_step']
-                junction = node(polar(a,r), 'tee', s, height=7.2)
-                link(prev,junction,.125,'main')
-                prev = junction
-                last, angle = junction, a
-                ids = np.flatnonzero((w.h_sector==s)&(w.h_ring==row))
-                for i in ids:
-                    end_angle = float(w.h_angle[i])
-                    tap = node(polar(end_angle,r), 'tee', s)
-                    pts = [polar(v,r) for v in np.linspace(angle,end_angle,max(3,int((end_angle-angle)/1.0)+1))]
+                r=c['house_radius_min']-18+row*c['house_ring_step']
+                junction=node(shoulder(r),'tee',sector,height=7.2)
+                link(prev,junction,.125,'main');prev=junction
+                last=junction;previous_angle=angle+math.degrees(math.atan2(12,r))
+                for i in np.flatnonzero((w.h_sector==sector)&(w.h_ring==row)):
+                    end_angle=float(w.h_angle[i]);tap=node(polar(end_angle,r),'tee',sector)
+                    pts=[polar(v,r) for v in np.linspace(previous_angle,end_angle,max(3,int((end_angle-previous_angle)/.8)+1))]
                     link(last,tap,.08,'row',pts)
-                    if last == junction and len(self.links[-1]['points'])>2:
-                        pp=self.links[-1]['points']
-                        for v in pp[1:]:
-                            clearance=7.2 if math.hypot(v[0]-pp[0][0],v[1]-pp[0][1])<8 else 3.6
-                            v[2]=site_elevation(v[0],v[1],c)+clearance
-                        self.links[-1]['length_m']=sum(math.dist(p,q) for p,q in zip(pp,pp[1:]))
-                    # Entry at the wet-core riser inside the front wall.
-                    service = node(polar(end_angle,float(w.h_radius[i])-6), 'meter', s, int(i), .9)
-                    link(tap,service,.025,'service')
-                    self.house_nodes[i] = service
-                    last, angle = tap, end_angle
+                    # The last point is the exact common service inlet, under the wet core.
+                    service=node(polar(end_angle,float(w.h_radius[i])-6),'meter',sector,int(i),.9)
+                    link(tap,service,.025,'service');self.house_nodes[i]=service
+                    last,previous_angle=tap,end_angle
         self.a = np.array([e['a'] for e in self.links])
         self.b = np.array([e['b'] for e in self.links])
         self.length = np.array([e['length_m'] for e in self.links])
@@ -392,9 +435,15 @@ class UtilityNetwork:
 
     def geometry(self,w):
         c=w.cfg; plant=c['water_plant_pos']
-        feed_xy=[plant, [plant[0]+86,plant[1]], [plant[0]+86,16], [-70,16], [-70,-45]]
-        feed=[[x,y,site_elevation(x,y,c)+3.6] for x,y in feed_xy]
-        feed.append([-70,-45,self.z[0]])
+        feed_xy=[[plant[0]+30,plant[1]], [plant[0]+86,plant[1]], [plant[0]+86,18], [-164,18], [-164,-130], [-70,-130], [-70,-45]]
+        feed=[]
+        for a,b in zip(feed_xy,feed_xy[1:]):
+            count=max(1,math.ceil(math.dist(a,b)/12))
+            for j in range(count):
+                t=j/count;x=a[0]+(b[0]-a[0])*t;y=a[1]+(b[1]-a[1])*t
+                feed.append([x,y,site_elevation(x,y,c)+7.2])
+        feed.append([-70,-45,site_elevation(-70,-45,c)+7.2])
+        feed.append([-70,-45,self.z[0]+6.5])
         return dict(nodes=self.nodes,links=self.links,house_nodes=self.house_nodes.tolist(),
                     drainage=self.drainage,plant_feed=feed,version=self.VERSION)
 
@@ -676,6 +725,10 @@ class World:
         self.water_plant_ok = True
         self.water_plant_heat = True
         self.water_plant_m3_h = 0.0
+        self.intake_ok=True
+        self.raw_intake_m3_h=self.brine_m3_h=0.0
+        self.water_heat_available_kw=self.water_heat_used_kw=0.0
+        self.ocean_withdrawn_m3=self.brine_returned_m3=0.0
         self.pump_station_ok = True
         self.water_main_ok = np.ones(S, dtype=bool)
         self.sector_water_m3 = np.zeros(S)
@@ -711,6 +764,10 @@ class World:
             Rover("engineer-2", "repair", *polar(345.0, R), speed=cfg["rover_speed"] * 1.3),
             Rover("plumber", "plumber", *polar(285.0, R), speed=cfg["rover_speed"] * 1.3),
         ]
+        self.traffic = make_traffic(self.cfg)
+        self.cargo = {'phase':'WAIT','progress':0.0,'loaded':0,'completed':0,'truck':0}
+        self.dish_ok=True
+        self.mobile_online=True
         self.waste_station_level = 0.0
 
         # ---- people / threats ----
@@ -1194,18 +1251,26 @@ def houses_step(w: World):
 
 
 def water_step(w: World):
-    c = w.cfg
-    w.water_plant_ok = w.water_plant_heat and w.trunk_ok
-    if w.water_plant_ok:
-        need = c["water_tank_m3"] - w.water_tank_m3
-        rate = c["water_plant_m3_h"] * clamp(need / 60.0, 0.15, 1.0)     # throttles as the tank fills
-        produced = min(need, rate * c["tick_seconds"] / 3600.0)
-        w.water_plant_m3_h = produced * 3600.0 / c["tick_seconds"]
-        w.water_tank_m3 += produced
-    else:
-        w.water_plant_m3_h = 0.0
-    if w.water_tank_m3 <= 0 and w.t % 60 == 0:
-        w.log("ALARM", "Water tank empty")
+    c=w.cfg;dt=float(c['tick_seconds'])
+    electric=bool(w.trunk_ok and w.substation_ok and w.r_available_mw>0 and w.shedding<7)
+    w.water_plant_ok=bool(w.water_plant_heat and electric and w.intake_ok)
+    need=max(0,c['water_tank_m3']-w.water_tank_m3)
+    desired=c['water_plant_m3_h']*clamp(need/60,.15,1.0) if need>0 else 0.0
+    # kWh per m3: warm ice to 0 C, latent heat, then temper water to 5 C.
+    # Saline source is conservatively treated as frozen whenever ambient < -2 C.
+    ice=max(0,-w.t_out) if w.t_out<-2 else 0
+    melt_kwh_m3=(2.1*ice+(334 if ice else 0)+4.18*5)/3.6
+    w.water_heat_available_kw=min(c['water_heat_kw'],max(0,w.r_power_mw*(1/.3-1)*1000*.18)) if w.water_plant_ok else 0.0
+    raw_limit=w.water_heat_available_kw/max(melt_kwh_m3,1e-9)
+    clean_rate=min(desired,raw_limit*c['water_recovery']) if w.water_plant_ok else 0.0
+    produced=min(need,clean_rate*dt/3600)
+    raw=produced/c['water_recovery'];reject=raw-produced
+    w.water_plant_m3_h=produced*3600/dt
+    w.raw_intake_m3_h=raw*3600/dt;w.brine_m3_h=reject*3600/dt
+    w.water_heat_used_kw=w.raw_intake_m3_h*melt_kwh_m3
+    w.water_tank_m3+=produced;w.ocean_withdrawn_m3+=raw;w.brine_returned_m3+=reject
+    if w.water_tank_m3<=0 and w.t%60==0:w.log('ALARM','Water tank empty')
+
 
 # ------------------------------------------------------------------------------------
 # Browser UI (served at /). Plain canvas, polls /state four times per second.
@@ -1556,7 +1621,7 @@ body.panel-collapsed #side{display:none}.panel-tabs{display:grid;grid-template-c
 </header>
 <div id="map">
  <div id="banner" role="status">Connecting to colony…</div>
- <div id="hint">DRAG orbit · RMB / WASD pan · SCROLL zoom · CLICK inspect · C cutaway · M console</div>
+ <div id="hint">DRAG pan · RMB orbit · WASD / ↑↓←→ move · Q/E altitude · SHIFT fast · PINCH zoom · F focus · M console</div>
  <div id="tip"></div>
  <div id="info"><button class="close" id="infoclose" aria-label="Close inspector">Close</button><h3 id="infotitle"></h3><div id="infobody"></div></div>
  <div id="alerts" role="status"></div><div id="toast" role="status"></div><div id="finished"></div>
@@ -1575,7 +1640,7 @@ body.panel-collapsed #side{display:none}.panel-tabs{display:grid;grid-template-c
  <section id="panel-layers" class="hud-panel" role="tabpanel" aria-labelledby="tab-layers" hidden>
   <div class="section-kicker">Display controls</div><h2>Read the city</h2>
   <div id="layers">
-   <fieldset><legend>World</legend><div class="layer-grid"><label class="chk"><input type="checkbox" data-l="people" checked>Colonists</label><label class="chk"><input type="checkbox" data-l="threats" checked>Threats &amp; marines</label><label class="chk"><input type="checkbox" data-l="labels">Place labels</label><label class="chk"><input type="checkbox" data-l="cutaway">House cutaway</label></div></fieldset>
+   <fieldset><legend>World</legend><div class="layer-grid"><label class="chk"><input type="checkbox" data-l="people" checked>Colonists</label><label class="chk"><input type="checkbox" data-l="threats" checked>Threats &amp; marines</label><label class="chk"><input type="checkbox" data-l="labels">Place labels</label><label class="chk"><input type="checkbox" data-l="cutaway">Roof transparency</label></div></fieldset>
    <fieldset><legend>Infrastructure</legend><div class="layer-grid"><label class="chk"><input type="checkbox" data-l="underground">Buried utilities</label><label class="chk"><input type="checkbox" data-l="water" checked>Water flow</label><label class="chk"><input type="checkbox" data-l="power" checked>Power flow</label><label class="chk"><input type="checkbox" data-l="packets" checked>Data packets</label></div></fieldset>
    <fieldset><legend>Indicators</legend><div class="layer-grid"><label class="chk"><input type="checkbox" data-l="issues" checked>Faults</label><label class="chk"><input type="checkbox" data-l="nonet">Offline homes</label><label class="chk"><input type="checkbox" data-l="ups">UPS activity</label><label class="chk"><input type="checkbox" data-l="heater">Heating</label><label class="chk"><input type="checkbox" data-l="ctrl">House programs</label></div></fieldset>
    <fieldset><legend>Graphics</legend><div class="layer-grid"><label class="chk"><input type="checkbox" data-l="bloom" checked>Light bloom</label><label class="chk"><input type="checkbox" data-l="shadows" checked>Shadows</label></div></fieldset>
@@ -1583,8 +1648,8 @@ body.panel-collapsed #side{display:none}.panel-tabs{display:grid;grid-template-c
  </section>
  <section id="panel-places" class="hud-panel" role="tabpanel" aria-labelledby="tab-places" hidden>
   <div class="section-kicker">Camera navigation</div><h2>Explore the colony</h2>
-  <div id="fly"><button data-f="home" class="destination-primary">Inspect selected home</button><button data-f="city">Colony overview</button><button data-f="street">Residential street</button><button data-f="hub">Operations hub</button><button data-f="gate">West gate</button><button data-f="reactor">Reactor</button><button data-f="solar">Solar field</button><button data-f="tower">Comms tower</button><button data-f="mine">Mine</button><button data-f="planet">Planet</button></div>
-  <p class="muted-copy">Close views reveal furnished rooms and building services. Enable House cutaway in Layers to remove roofs and upper floors.</p>
+  <div id="fly"><button data-f="home" class="destination-primary">Inspect selected home</button><button data-f="city">Colony overview</button><button data-f="street">Residential street</button><button data-f="hub">Operations hub</button><button data-f="gate">West gate</button><button data-f="reactor">Reactor</button><button data-f="solar">Solar field</button><button data-f="dish">Space dish</button><button data-f="intake">Ocean intake</button><button data-f="cargo">Freight</button><button data-f="tower">Comms tower</button><button data-f="mine">Mine</button><button data-f="planet">Planet</button></div>
+  <p class="muted-copy">Close views reveal furnished rooms and building services. Enable Roof transparency in Layers to adjust roof translucency; roofs and equipment always remain present.</p>
   <h3>Research</h3><a href="/attractors" class="tab">Open attractor observatory →</a>
  </section>
  <section id="panel-operations" class="hud-panel" role="tabpanel" aria-labelledby="tab-operations" hidden>
@@ -1654,7 +1719,7 @@ function terrainH(x,y){ const r=Math.hypot(x,y); const T=TER; let h;
   if(r<T.hub) h=8.0; else if(r<T.row0-30) h=8.0-3.0*sstep(T.hub,T.row0-30,r);                                   // hub on a mound, sloping to the first street
   else if(r<T.ring){ const k=Math.floor((r-(T.row0-30))/T.step); const f=(r-(T.row0-30))/T.step-k; h=5.0+k*3.4+3.4*sstep(0.62,1.0,f); }   // terraces, one per row of houses
   else if(r<T.wall+20) h=5.0+T.rows*3.4; else h=(5.0+T.rows*3.4)*(1-sstep(T.wall+20,T.wall+260,r));                // outside the wall the ground eases down
-  let natural=22+24*Math.sin(x*.0018)*Math.cos(y*.0024)+14*Math.sin(x*.004+y*.001);for(const [px,py,height,width] of [[1250,850,180,280],[-450,-1350,145,360],[-1640,980,220,310],[450,1650,190,330]])natural+=height*Math.exp(-((x-px)**2+(y-py)**2)/(width*width));return h+sstep(T.wall+20,T.wall+320,r)*natural+0.5*Math.sin(x*0.031)*Math.cos(y*0.027); }
+  let natural=22+24*Math.sin(x*.0018)*Math.cos(y*.0024)+14*Math.sin(x*.004+y*.001);for(const [px,py,height,width] of [[1250,850,180,280],[-450,-1350,145,360],[-1640,980,220,310],[450,1650,190,330]])natural+=height*Math.exp(-((x-px)**2+(y-py)**2)/(width*width));return coastHeight(x,y,h+sstep(T.wall+20,T.wall+320,r)*natural+0.5*Math.sin(x*0.031)*Math.cos(y*0.027)); }
 function sph(x, y, h=0){ const d=Math.hypot(x,y), th=d/RP, ph=Math.atan2(y,x), r=RP+h+terrainH(x,y); return new THREE.Vector3(r*Math.sin(th)*Math.cos(ph), r*Math.cos(th), r*Math.sin(th)*Math.sin(ph)); }
 function quatAt(x, y, yaw=0){ const n=sph(x,y).normalize(); const q=new THREE.Quaternion().setFromUnitVectors(UP, n); if(yaw) q.multiply(new THREE.Quaternion().setFromAxisAngle(UP, yaw)); return q; }
 function polar(a, r){ const t=a*Math.PI/180; return [r*Math.cos(t), r*Math.sin(t)]; }
@@ -1724,11 +1789,41 @@ const mapEl=document.getElementById('map');
 const renderer=new THREE.WebGLRenderer({antialias:true}); renderer.setPixelRatio(Math.min(devicePixelRatio,2)); renderer.shadowMap.enabled=true; renderer.shadowMap.type=THREE.PCFSoftShadowMap; renderer.toneMapping=THREE.ACESFilmicToneMapping; renderer.toneMappingExposure=1.05; mapEl.appendChild(renderer.domElement);
 const scene=new THREE.Scene(); scene.background=new THREE.Color(0x05070b);
 const camera=new THREE.PerspectiveCamera(50,1,.15,80000); camera.position.set(360, RP+1050, 1180);
-const controls=new OrbitControls(camera, renderer.domElement); controls.target.set(0,RP,0); controls.minDistance=3; controls.maxDistance=RP*4; controls.enablePan=true; controls.screenSpacePanning=false; controls.panSpeed=2.2; controls.zoomSpeed=3.0; controls.enableDamping=true; controls.dampingFactor=0.1; controls.keyPanSpeed=40; controls.listenToKeyEvents(window);
-controls.mouseButtons={LEFT:THREE.MOUSE.ROTATE, MIDDLE:THREE.MOUSE.DOLLY, RIGHT:THREE.MOUSE.PAN};
+const controls=new OrbitControls(camera, renderer.domElement); controls.target.set(0,RP,0); controls.minDistance=.7; controls.maxDistance=RP*4; controls.enablePan=true; controls.screenSpacePanning=true; controls.panSpeed=1.35; controls.zoomSpeed=.65; controls.enableDamping=true; controls.dampingFactor=0.1; controls.keyPanSpeed=40; 
+controls.mouseButtons={LEFT:THREE.MOUSE.PAN,MIDDLE:THREE.MOUSE.PAN,RIGHT:THREE.MOUSE.ROTATE};controls.touches={ONE:THREE.TOUCH.PAN,TWO:THREE.TOUCH.DOLLY_ROTATE};
 const composer=new EffectComposer(renderer); composer.addPass(new RenderPass(scene,camera)); const bloomPass=new UnrealBloomPass(new THREE.Vector2(800,600), 0.45, 0.5, 0.86); composer.addPass(bloomPass);
-window.addEventListener('keydown', e=>{ if(e.shiftKey) controls.mouseButtons.LEFT=THREE.MOUSE.PAN; if(['w','a','s','d'].includes(e.key)){ const d=camera.position.distanceTo(controls.target)*0.06; const f=new THREE.Vector3().subVectors(controls.target,camera.position); const n=controls.target.clone().normalize(); f.projectOnPlane(n).normalize(); const r=new THREE.Vector3().crossVectors(f,n).normalize(); const m=e.key==='w'?f:e.key==='s'?f.clone().negate():e.key==='d'?r.clone().negate():r; m.multiplyScalar(d); controls.target.add(m); camera.position.add(m); } });
-window.addEventListener('keyup', e=>{ if(!e.shiftKey) controls.mouseButtons.LEFT=THREE.MOUSE.ROTATE; });
+const cameraKeys=new Set();let cameraLast=performance.now();
+function updateCameraMotion(now){
+ const dt=Math.min(.05,(now-cameraLast)/1000);cameraLast=now;if(!cameraKeys.size)return;
+ const distance=camera.position.distanceTo(controls.target),speed=Math.max(2.5,distance*.85)*(cameraKeys.has('shift')?4:1)*dt;
+ const right=new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld,0),up=new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld,1),vertical=camera.position.clone().normalize(),move=new THREE.Vector3();
+ if(cameraKeys.has('a')||cameraKeys.has('arrowleft'))move.addScaledVector(right,-1);
+ if(cameraKeys.has('d')||cameraKeys.has('arrowright'))move.add(right);
+ if(cameraKeys.has('w')||cameraKeys.has('arrowup'))move.add(up);
+ if(cameraKeys.has('s')||cameraKeys.has('arrowdown'))move.addScaledVector(up,-1);
+ if(cameraKeys.has('q'))move.addScaledVector(vertical,-1);if(cameraKeys.has('e'))move.add(vertical);
+ if(move.lengthSq()){move.normalize().multiplyScalar(speed);camera.position.add(move);controls.target.add(move);flyAnim=null;}
+}
+window.addEventListener('keydown',e=>{if(e.target.matches('input,textarea,select')||e.ctrlKey||e.metaKey)return;const key=e.key.toLowerCase();if(['w','a','s','d','q','e','shift','arrowleft','arrowright','arrowup','arrowdown'].includes(key)){e.preventDefault();cameraKeys.add(key);}if(key==='f')focusSelection();});
+window.addEventListener('keyup',e=>cameraKeys.delete(e.key.toLowerCase()));window.addEventListener('blur',()=>cameraKeys.clear());
+renderer.domElement.addEventListener('wheel',e=>{
+ e.preventDefault();e.stopImmediatePropagation();flyAnim=null;
+ const rect=renderer.domElement.getBoundingClientRect(),cursor=new THREE.Vector2((e.clientX-rect.left)/rect.width*2-1,-(e.clientY-rect.top)/rect.height*2+1),r=new THREE.Raycaster();r.setFromCamera(cursor,camera);
+ const direction=camera.getWorldDirection(new THREE.Vector3()),plane=new THREE.Plane().setFromNormalAndCoplanarPoint(direction,controls.target),anchor=r.ray.intersectPlane(plane,new THREE.Vector3())||controls.target.clone();
+ const delta=e.deltaY*(e.deltaMode===1?16:e.deltaMode===2?rect.height:1),distance=camera.position.distanceTo(controls.target),next=THREE.MathUtils.clamp(distance*Math.exp(THREE.MathUtils.clamp(delta,-180,180)*.0018),.7,RP*4),ratio=next/Math.max(distance,.001);
+ camera.position.sub(anchor).multiplyScalar(ratio).add(anchor);controls.target.sub(anchor).multiplyScalar(ratio).add(anchor);controls.update();
+},{passive:false,capture:true});
+function focusPoint(point,distance=12,normal=null){
+ const direction=normal?normal.clone().normalize():camera.position.clone().sub(controls.target).normalize();
+ flyAnim={from:camera.position.clone(),to:point.clone().addScaledVector(direction,distance),tfrom:controls.target.clone(),tto:point.clone(),t0:performance.now()};
+}
+function focusSelection(){
+ if(!selected)return;
+ if(selected.kind==='pole'){const meter=cabinetMeters[selected.id];focusPoint(meter.position,3,new THREE.Vector3(0,.15,1).applyQuaternion(meter.quaternion));return;}
+ if(selected.kind==='house'){const h=houseShells[selected.id],dim=DIM[G.houses.type[selected.id]];focusPoint(h.base.clone().addScaledVector(h.base.clone().normalize(),dim[1]/2),Math.max(dim[0],dim[2])*1.5);return;}
+ const obj=clickables.find(o=>o.userData.click?.id===selected.id);if(obj){const bounds=new THREE.Box3().setFromObject(obj),center=bounds.getCenter(new THREE.Vector3());focusPoint(center,Math.max(8,bounds.getSize(new THREE.Vector3()).length()*1.2));}
+}
+
 scene.add(new THREE.AmbientLight(0xa8b0c4, 1.35)); scene.add(new THREE.HemisphereLight(0x778ab0, 0x2a2118, 1.2));
 const sun=new THREE.DirectionalLight(0xffe0b0, 1.3); scene.add(sun); sun.castShadow=true; sun.shadow.mapSize.set(2048,2048); sun.shadow.camera.near=100; sun.shadow.camera.far=30000; sun.shadow.bias=-0.0008; sun.shadow.normalBias=.12;
 const sunTarget=new THREE.Object3D(); scene.add(sunTarget); sun.target=sunTarget; const sunSprite=new THREE.Sprite(new THREE.SpriteMaterial({map:TEX.glow, transparent:true, depthTest:false})); sunSprite.scale.set(1800,1800,1); scene.add(sunSprite);
@@ -1747,7 +1842,7 @@ function makePlanet(){
   for(let i=0;i<pos.count;i++){ const x=pos.getX(i),y=pos.getY(i),z=pos.getZ(i); const L=Math.hypot(x,y,z); const nx=x/L,ny=y/L,nz=z/L; const ang=Math.acos(Math.max(-1,Math.min(1,ny)));
     const mask=1-Math.min(1,Math.max(0,(ang-colonyAngle)/(colonyAngle*0.6))); const m=mask*mask*(3-2*mask);
     const h=(fbm(nx*3,ny*3,nz*3)*1.0 + (1-Math.abs(noise(nx*7,ny*7,nz*7)))*0.35 + craters(nx,ny,nz)*0.5 + fbm(nx*22,ny*22,nz*22,3)*0.08)*(1-m);
-    hArr[i]=h; const r=RP+h*AMP; pos.setXYZ(i,nx*r,ny*r,nz*r); }
+    const dist=ang*RP,az=Math.atan2(nz,nx),local=terrainH(dist*Math.cos(az),dist*Math.sin(az)),height=dist<3750?local-45:THREE.MathUtils.lerp(local-45,h*AMP,sstep(3750,4100,dist));hArr[i]=height/AMP; const r=RP+height; pos.setXYZ(i,nx*r,ny*r,nz*r); }
   geo.setAttribute('aH', new THREE.BufferAttribute(hArr,1)); geo.computeVertexNormals();
   const mat=new THREE.ShaderMaterial({
     uniforms:{ uSun:{value:new THREE.Vector3(1,0.3,0)}, uColony:{value:new THREE.Vector3(0,1,0)}, uCold:{value:0.6}, uStorm:{value:0.0}, uTime:{value:0}, uColonyAngle:{value:colonyAngle} },
@@ -1768,7 +1863,7 @@ function makePlanet(){
   });
   return new THREE.Mesh(geo, mat);
 }
-const planetMesh=makePlanet(); const planetMat=planetMesh.material; scene.add(planetMesh);
+const planetMesh=makePlanet(); const planetMat=planetMesh.material; scene.add(planetMesh);scene.add(new THREE.Mesh(new THREE.SphereGeometry(RP-10,256,192),new THREE.MeshStandardMaterial({color:0x749da8,roughness:.42,metalness:.18})));
 scene.add(new THREE.Mesh(new THREE.SphereGeometry(RP*1.035,64,48), new THREE.MeshBasicMaterial({color:0x4a6a9a, transparent:true, opacity:0.10, side:THREE.BackSide, depthWrite:false})));
 // weather: snow and blizzard particles around the camera target, fog, a rare tornado
 const weather={snow:null, snowVel:null, tornado:null, wind:8, precip:'none', storm:false, tornadoOn:false};
@@ -1803,6 +1898,7 @@ const UNIT={box:new THREE.BoxGeometry(1,1,1),cyl:new THREE.CylinderGeometry(1,1,
 const MAT={};
 function material(name,color,opts={}){ if(!MAT[name]) MAT[name]=new THREE.MeshStandardMaterial({color,roughness:.78,...opts}); return MAT[name]; }
 const M={
+  roof:material('roof-slab',0x6e7775,{transparent:true,opacity:.84,depthWrite:false,side:THREE.DoubleSide,metalness:.5,roughness:.48}),
   steel:material('steel',0x465052,{metalness:.72,roughness:.48}),
   trim:material('trim',0x929c98,{metalness:.65,roughness:.38}),
   panel:material('panel',0x918e7c,{metalness:.35}),
@@ -1913,7 +2009,7 @@ function makeHouse(i){
   wall(M.steel,0,h-.12,width+.3,.24,.4);
  }
  // Roof shell, parapets, access hatch, vents, HVAC louvers and service walk.
- r.box(M.steel,0,h,0,w+.55,.3,d+.55);
+ r.box(M.roof,0,h,0,w+.55,.3,d+.55);
  for(const z of [-d/2,d/2])r.box(M.trim,0,h+.35,z,w+.55,.65,.2);
  for(const x of [-w/2,w/2])r.box(M.trim,x,h+.35,0,.2,.65,d);
  r.box(M.dark,-w*.25,h+.2,0,2,.18,2.8);r.box(M.trim,-w*.25,h+.32,0,1.8,.13,2.6);
@@ -1969,7 +2065,7 @@ function makeHouse(i){
    k.pipe(M.steel,[end[0],-.55,end[2]],[0,-1,6],.055);k.pipe(M.steel,end,[end[0],-.55,end[2]],.055);
  }
  k.pipe(hot,[w*.36,2.1,-d*.36],[w/2-1.25,2.1,2.4],.023);k.pipe(hot,[w/2-1.25,2.1,2.4],[w/2-1.25,.95,2.4],.023);
- // Interior floor plates and stairs. Upper plate hides with roof in cutaway.
+ // Interior floor plates and stairs. Upper plates remain visible with the translucent roof.
  for(let level=0;level<floors;level++){
   const y=level*floorH; const f=level===0?interiorKit:r; const fk=f;
   if(level===0)fk.box(M.wood,0,y+.02,0,w-.35,.12,d-.35);
@@ -2046,7 +2142,7 @@ function updateDetail(){
    housesMesh.setMatrixAt(i,houseShells[i].matrix);roofProxies[i].mesh.setMatrixAt(i,roofProxies[i].matrix);
  }}
  let built=0;for(const i of wanted){if(!houseDetails.has(i)){if(built++>=2)continue;houseDetails.set(i,makeHouse(i));housesMesh.setMatrixAt(i,zero);roofProxies[i].mesh.setMatrixAt(i,zero);}
-  const v=houseDetails.get(i);v.roof.visible=!layers.cutaway;v.shell.visible=true;
+  const v=houseDetails.get(i);v.roof.visible=true;v.shell.visible=true;
   if(S){v.litMaterials[0].emissiveIntensity=S.houses.power[i]?.7:0;v.litMaterials[1].emissiveIntensity=S.houses.power[i]?.6:0;}
   // The roof and complete upper storey contents share a removable group.
  }
@@ -2070,7 +2166,7 @@ function buildUtilities(){
    return pts;
  }
  utilityPaths=U.links.map(e=>makePotable(e.points,e.diameter_m/2,{system:'water',id:e.id},potable));
- makePotable(U.plant_feed,.16,{system:'feed',id:-1},potable);
+ makePotable(U.plant_feed,.34,{system:'feed',id:-1},potable);
  for(const system of U.drainage){
    system.links.forEach((e,i)=>run(e.points,e.diameter_m/2,system.name==='sanitary'?sewerMat:stormMat,{system:system.name,id:i}));
    run(system.rising_main,.22,system.name==='sanitary'?sewerMat:stormMat,{system:system.name,id:-1});
@@ -2182,7 +2278,7 @@ let mediumBatches=[],mediumHidden=new Set(),potableGroup=new THREE.Group(),potab
 let netSpanPaths=[],houseNetDrops=[],cabinetMeters=[],phaseDrops=[],phaseDropFlow=null,roadSignals=[],vehicleModels=[];
 world.add(potableGroup);
 function buildLandscape(){
- const land=cap(2600,-.12,0xffffff,220,360,.08),positions=land.geometry.attributes.position,colors=[];
+ const land=cap(3850,-.12,0xffffff,290,420,.08),positions=land.geometry.attributes.position,colors=[];
  for(let i=0;i<positions.count;i++){
   const px=positions.getX(i),py=positions.getY(i),pz=positions.getZ(i),rr=RP*Math.atan2(Math.hypot(px,pz),py),angle=Math.atan2(pz,px),x=rr*Math.cos(angle),y=rr*Math.sin(angle),h=terrainH(x,y);
   const grain=.5+.25*Math.sin(x*.052+y*.043)*Math.cos(y*.081-x*.027)+.12*Math.sin(x*.29+y*.37);
@@ -2200,7 +2296,7 @@ function mediumHomes(){
   const {base,q}=houseShells[i],[w,h,d]=DIM[G.houses.type[i]],floors=Math.round((h-.45)/3.4);
   const put=(mat,p,scale,rot=null)=>kit.add('box',mat,base.clone().add(new THREE.Vector3(...p).applyQuaternion(q)).toArray(),scale,rot?q.clone().multiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(...rot))):q,null,i);
   put(M.concrete,[0,-.4,0],[w+.8,.8,d+.8]);put(M.panel,[0,h/2,0],[w,h,d]);
-  put(M.dark,[0,h+.05,0],[w+.3,.2,d+.3]);
+  put(M.roof,[0,h+.05,0],[w+.3,.2,d+.3]);
   for(const z of [-d/2,d/2]){
    put(M.trim,[0,h+.38,z],[w+.5,.7,.16]);
    for(let f=0;f<floors;f++){
@@ -2284,6 +2380,45 @@ function makePotable(points,r,tag,kit){
  for(const point of points){const p=utilityPoint(point);kit.add('ball',M.trim,p.toArray(),[radius*1.05,radius*1.05,radius*1.05],null,null,tag);}
  pts.cumulative=[0];for(let j=1;j<pts.length;j++)pts.cumulative.push(pts.cumulative[j-1]+pts[j].distanceTo(pts[j-1]));return pts;
 }
+let serviceWirePaths=[],serviceEntries=[],poleLoads=new Float32Array(0),polePickMesh=null,poleDisplays=[];
+function serviceEntry(i){
+ const {base,q}=houseShells[i],[w,h,d]=DIM[G.houses.type[i]],pole=G.houses.pole[i];
+ const direction=sph(G.poles.x[pole],G.poles.y[pole],10.7).sub(base).applyQuaternion(q.clone().invert());
+ const t=Math.min((w/2-.48)/Math.max(.001,Math.abs(direction.x)),(d/2-.48)/Math.max(.001,Math.abs(direction.z)));
+ const x=direction.x*t,z=direction.z*t,side=Math.abs(x)/(w/2)>Math.abs(z)/(d/2)?'x':'z',height=h+2.25+(i%3)*.3;
+ return {x,z,height,w,h,d,side,pole,base,q,world:new THREE.Vector3(x,height,z).applyQuaternion(q).add(base)};
+}
+function makeServiceDrops(kit,physical,anchor){
+ for(let i=0;i<G.houses.x.length;i++){
+  const e=serviceEntry(i);serviceEntries[i]=e;const {x,z,height,w,h,d,side,pole,base,q}=e;
+  const point=p=>new THREE.Vector3(...p).applyQuaternion(q).add(base),end=e.world;
+  kit.pipe(M.steel,point([x,h,z]).toArray(),end.toArray(),.085);
+  kit.add('box',M.trim,point([x,height-.3,z]).toArray(),[1.3,.12,.13],q);
+  kit.add('box',M.dark,point([x,h+.15,z]).toArray(),[.65,.3,.65],q);
+  for(let phase=-1;phase<=1;phase++){
+   const to=point([x+phase*.38,height,z]),from=anchor(pole,phase),line=catenary(from,to,.55);
+   // Every cable segment within the building footprint must clear the parapet.
+   for(const p of line){const v=p.clone().sub(base).applyQuaternion(q.clone().invert());if(Math.abs(v.x)<w/2+.1&&Math.abs(v.z)<d/2+.1&&v.y<h+.6)p.addScaledVector(p.clone().normalize(),h+.6-v.y);}
+   physical.push(line);serviceWirePaths.push({house:i,kind:'phase',points:line});for(let j=1;j<line.length;j++)kit.pipe(M.dark,line[j-1].toArray(),line[j].toArray(),.025);
+   for(let disc=0;disc<4;disc++)kit.add('cyl',M.white,point([x+phase*.38,height-.27+disc*.075,z]).toArray(),[.09,.038,.09],q);
+   if(phase===0)phaseDrops.push(line);
+  }
+  const neutral=catenary(anchor(pole,0,9.9),point([x,height-.22,z]),.4);physical.push(neutral);serviceWirePaths.push({house:i,kind:'neutral',points:neutral});for(let j=1;j<neutral.length;j++)kit.pipe(M.dark,neutral[j-1].toArray(),neutral[j].toArray(),.022);
+  const net=catenary(anchor(pole,0,8.7),point([x,height-.46,z]),.32);physical.push(net);serviceWirePaths.push({house:i,kind:'fiber',points:net});houseNetDrops[i]=net;
+  const exterior=side==='x'?[Math.sign(x)*(w/2+.26),h+.3,z]:[x,h+.3,Math.sign(z)*(d/2+.26)];
+  const meter=[exterior[0],1.9,exterior[2]],bend=[x,h+.3,z];
+  for(const [a,b] of [[[x,height-.2,z],bend],[bend,exterior],[exterior,meter]])kit.pipe(M.rubber,point(a).toArray(),point(b).toArray(),.047);
+  kit.add('box',M.trim,point(meter).toArray(),side==='x'?[.26,1,.66]:[.66,1,.26],q);
+  const led=meter.slice();led[side==='x'?0:2]+=Math.sign(side==='x'?x:z)*.15;
+  kit.add('box',M.screen,point([led[0],2.1,led[2]]).toArray(),side==='x'?[.035,.22,.4]:[.4,.22,.035],q);
+ }
+}
+function buildPolePicking(){
+ const count=G.poles.x.length;polePickMesh=new THREE.InstancedMesh(new THREE.BoxGeometry(1.2,11,1.2),new THREE.MeshBasicMaterial({transparent:true,opacity:0,depthWrite:false,colorWrite:false}),count);
+ const m=new THREE.Matrix4();for(let i=0;i<count;i++)polePickMesh.setMatrixAt(i,m.compose(sph(G.poles.x[i],G.poles.y[i],5.5),quatAt(G.poles.x[i],G.poles.y[i]),new THREE.Vector3(1,1,1)));world.add(polePickMesh);
+ cabinetMeters.forEach((m,i)=>{m.userData.pole=i;});
+}
+
 function detailedPower(){
  const kit=new Kit(world),physical=[],P=G.poles.x.length,phaseColors=[0xc5bfa7,0xbeb3a2,0xa9b8bf];
  const anchor=(i,phase,height=10.7)=>{const x=G.poles.x[i],y=G.poles.y[i],yaw=G.poles.kind[i]===0?-G.poles.angle[i]*Math.PI/180+Math.PI/2:-G.poles.angle[i]*Math.PI/180;
@@ -2291,7 +2426,7 @@ function detailedPower(){
  for(let i=0;i<P;i++){
   const x=G.poles.x[i],y=G.poles.y[i],parent=G.poles.parent[i],q=quatAt(x,y,-G.poles.angle[i]*Math.PI/180);
   for(let phase=-1;phase<=1;phase++){
-   const b=anchor(i,phase),a=parent>=0?anchor(parent,phase):spanCurves[i][0];const line=catenary(a,b,Math.min(1.5,a.distanceTo(b)*.025));physical.push(line);
+   const b=anchor(i,phase),a=parent>=0?anchor(parent,phase):spanCurves[i][0].clone().add(new THREE.Vector3(phase*1.4,0,0).applyQuaternion(quatAt(...polar(G.poles.sector[i]*60+1.6,G.cfg.hub_radius+20))));const line=catenary(a,b,Math.min(1.5,a.distanceTo(b)*.025));physical.push(line);
    for(let j=1;j<line.length;j++)kit.pipe(M.dark,line[j-1].toArray(),line[j].toArray(),.026);
    for(let ring=0;ring<4;ring++)kit.add('cyl',M.white,b.clone().addScaledVector(b.clone().normalize(),-.32+ring*.1).toArray(),[.13,.055,.13],quatAt(x,y));
   }
@@ -2304,19 +2439,10 @@ function detailedPower(){
   put(M.dark,[.65,1.49,.25],[.045,.16,.05]);
   kit.pipe(M.dark,sph(x,y,2.8).toArray(),sph(x,y,8.7).toArray(),.044);
   const led=new THREE.Mesh(UNIT.box,M.glow.clone());led.scale.set(.38,.07,.035);led.position.copy(base.clone().add(new THREE.Vector3(.42,1.14,.23).applyQuaternion(q)));led.quaternion.copy(q);world.add(led);cabinetMeters.push(led);
+  const canvas=document.createElement('canvas');canvas.width=192;canvas.height=96;const texture=new THREE.CanvasTexture(canvas),display=new THREE.Mesh(new THREE.PlaneGeometry(.38,.24),new THREE.MeshBasicMaterial({map:texture}));display.position.copy(base.clone().add(new THREE.Vector3(.42,1.74,.245).applyQuaternion(q)));display.quaternion.copy(q);world.add(display);poleDisplays.push({display,canvas,texture,last:''});
  }
- for(let i=0;i<G.houses.x.length;i++){
-  const pole=G.houses.pole[i],{base,q}=houseShells[i],[w,h,d]=DIM[G.houses.type[i]],end=base.clone().add(new THREE.Vector3(w/2+.18,h-.65,0).applyQuaternion(q));
-  for(let phase=-1;phase<=1;phase++){
-   const to=end.clone().add(new THREE.Vector3(0,phase*.16,0).applyQuaternion(q)),from=anchor(pole,phase);const line=catenary(from,to,Math.min(.8,from.distanceTo(to)*.025));physical.push(line);
-   for(let j=1;j<line.length;j++)kit.pipe(M.dark,line[j-1].toArray(),line[j].toArray(),.023);
-   if(phase===0)phaseDrops.push(line);
-  }
-  const neutral=catenary(anchor(pole,0,9.9),end.clone().addScaledVector(end.clone().normalize(),-.45),.65);physical.push(neutral);for(let j=1;j<neutral.length;j++)kit.pipe(M.dark,neutral[j-1].toArray(),neutral[j].toArray(),.025);
-  const meter=base.clone().add(new THREE.Vector3(w/2+.18,1.8,0).applyQuaternion(q));kit.pipe(M.dark,end.toArray(),meter.toArray(),.038);
-  const net=catenary(anchor(pole,0,8.7),end.clone().addScaledVector(end.clone().normalize(),-.65),.8);physical.push(net);houseNetDrops[i]=net;
- }
- kit.finish();new LineLayer(physical,0x8b9996);phaseDropFlow=new FlowLayer(phaseDrops,0xffd777,1.5,3,22);
+ makeServiceDrops(kit,physical,anchor);
+ kit.finish();new LineLayer(physical,0x8b9996);phaseDropFlow=new FlowLayer(phaseDrops,0xffd777,1.5,3,22);buildPolePicking();
 }
 function buildWaterTower(){
  const group=localGroup(-70,-45,0,0),k=new Kit(group),R=5.1,H=6.12;
@@ -2329,7 +2455,7 @@ function buildWaterTower(){
  for(let y=0;y<32;y+=.36)k.pipe(M.trim,[R+.4,y,-.32],[R+.4,y,.32],.034);
  for(const z of [-.36,.36])k.pipe(M.steel,[R+.4,0,z],[R+.4,32,z],.05);
  for(let i=0;i<36;i++){const a=i*Math.PI/18,x=Math.cos(a)*(R+.65),z=Math.sin(a)*(R+.65);k.pipe(M.trim,[x,30.5,z],[x,31.55,z],.025);}
- for(const y of [30.5,31.55])k.add('ring',M.trim,[0,y,0],[R+.65,R+.65,R+.65],[Math.PI/2,0,0]);
+ for(const y of [30.5,31.55])metalRing(k,M.trim,[0,y,0],R+.65,.035);
  for(let y=24;y<30;y+=.5)k.box(M.white,R+.18,y,0,.06,.04,.4);
  k.finish();const shell=new THREE.Mesh(new THREE.CylinderGeometry(R,R,H,40,1,true),M.glass);shell.position.y=24+H/2;group.add(shell);
  hub.tank=clickable(group,'tank','tank');hub.tankLevel=new THREE.Mesh(new THREE.CylinderGeometry(R-.12,R-.12,1,40),material('tankwater',0x3399b4,{transparent:true,opacity:.72,roughness:.1,metalness:.15}));hub.tankLevel.quaternion.copy(quatAt(-70,-45));world.add(hub.tankLevel);
@@ -2368,7 +2494,7 @@ function industrialDetails(){
  const spine=c.reactor_pos[0]+70;
  road([[spine,-c.wall_radius],[spine,c.mine_pos[1]+45]],10,.98,0x454b4d);
  for(const key of ['reactor_pos','water_plant_pos','mine_pos','solar_pos','radwaste_pos']){
-  const [x,y]=c[key];road([[spine,y],[x+Math.min(35,Math.abs(spine-x)/2),y]],8,1,0x454b4d);
+  const [x,y]=c[key],stand=key==='reactor_pos'?55:key==='solar_pos'?75:key==='radwaste_pos'?42:36;road([[spine,y],[x+stand,y]],8,1,0x454b4d);
  }
  road([c.tower_junction,[c.tower_junction[0],c.tower_pos[1]],[c.tower_pos[0],c.tower_pos[1]]],8,1,0x454b4d);
  for(let x=-c.wall_radius-30;x>spine;x-=32){
@@ -2387,14 +2513,6 @@ function industrialDetails(){
  for(const x of [-36,36])for(let z=-23;z<23;z+=3){yard.pipe(M.steel,[x,0,z],[x,3.3,z],.055);for(let h=.4;h<3;h+=.4)yard.pipe(M.trim,[x,h,z],[x,h,Math.min(23,z+3)],.018);}
  for(const z of [-23,23])for(let x=-36;x<36;x+=.9){yard.add('ring',M.steel,[x,3.4,z],[.32,.32,.32],[0,Math.PI/2,0]);}
  yard.finish();
- for(let sector=0;sector<c.sectors;sector++){
-  const a=sector*Math.PI/3,[x,y]=polar(sector*60,c.ring_road_radius),q=quatAt(x,y,-a),base=sph(x,y,1.1),signals=[];
-  for(let approach=0;approach<4;approach++){
-   const angle=approach*Math.PI/2,px=Math.cos(angle)*9,pz=Math.sin(angle)*9,sg=new THREE.Group();sg.position.copy(base.clone().add(new THREE.Vector3(px,0,pz).applyQuaternion(q)));sg.quaternion.copy(q).multiply(new THREE.Quaternion().setFromAxisAngle(UP,Math.PI/2-angle));world.add(sg);
-   const sk=new Kit(sg);sk.pipe(M.steel,[0,0,0],[0,4.7,0],.07);sk.box(M.dark,0,4.3,0,.42,1.2,.35);sk.finish();
-   const lights=[];for(let j=0;j<3;j++){const lamp=new THREE.Mesh(new THREE.SphereGeometry(.12,8,6),new THREE.MeshBasicMaterial({color:0x17201c}));lamp.position.set(0,4.65-j*.33,.2);sg.add(lamp);lights.push(lamp);}signals.push({lights,approach});
-  }roadSignals.push({sector,signals});
- }
  k.finish();
 }
 
@@ -2403,14 +2521,15 @@ function updatePhysicalState(s){
  for(let i=0;i<G.houses.x.length;i++){loads[G.houses.pole[i]]+=s.houses.draw[i];if(phaseDropFlow)phaseDropFlow.active[i]=!!s.houses.power[i];}
  for(let i=loads.length-1;i>=0;i--){const p=G.poles.parent[i];if(p>=0)loads[p]+=loads[i];}
  for(const m of mediumBatches){if(m.material!==M.glow)continue;const original=m.userData.original;m.userData.tags.forEach((id,j)=>{if(!s.houses.power[id]||houseDetails.has(id))m.instanceMatrix.array.fill(0,j*16,j*16+16);else m.instanceMatrix.array.set(original.subarray(j*16,j*16+16),j*16);});m.instanceMatrix.needsUpdate=true;}
- cabinetMeters.forEach((m,i)=>{const on=s.poles.span[i];m.material.emissiveIntensity=on?.3+Math.min(1.5,loads[i]/12000):0;m.material.color.setHex(on?(loads[i]>18000?0xff834a:0x9bce84):0x30393a);});
+ poleDisplays.forEach((v,i)=>{const value=s.poles.span[i]?(loads[i]/1000).toFixed(1):'OFF';if(v.last===value)return;v.last=value;const x=v.canvas.getContext('2d');x.fillStyle='#12231f';x.fillRect(0,0,192,96);x.fillStyle='#b7e6ba';x.font='bold 18px monospace';x.fillText('L1 L2 L3 / '+String(i+1).padStart(3,'0'),7,22);x.font='bold 35px monospace';x.fillText(value+' kW',7,65);x.font='13px monospace';x.fillText('WY / COLONY METER',7,88);v.texture.needsUpdate=true;});
+ poleLoads=loads;cabinetMeters.forEach((m,i)=>{const on=s.poles.span[i];m.material.emissiveIntensity=on?.3+Math.min(1.5,loads[i]/12000):0;m.material.color.setHex(on?(loads[i]>18000?0xff834a:0x9bce84):0x30393a);});
  for(const mesh of potableBatches){
   if(mesh.material!==MAT['water-core']&&mesh.material!==MAT['pipe-sightglass']&&mesh.material!==MAT['pipe-ice'])continue;
   mesh.userData.tags.forEach((tag,j)=>{const e=tag?.id>=0?G.utilities.links[tag.id]:null,house=e?G.utilities.nodes[e.b].house:-1;
    const frozen=house>=0&&!s.houses.pipes[house],burst=house>=0&&s.houses.burst[house];if(mesh.material===MAT['pipe-ice']){if(frozen)mesh.instanceMatrix.array.set(mesh.userData.iceOriginal.subarray(j*16,j*16+16),j*16);else mesh.instanceMatrix.array.fill(0,j*16,j*16+16);mesh.instanceMatrix.needsUpdate=true;}mesh.setColorAt(j,new THREE.Color(frozen?0xb6dfff:burst?0x817c6c:0xffffff));
   });if(mesh.instanceColor)mesh.instanceColor.needsUpdate=true;
  }
- for(const {sector,signals} of roadSignals){const phase=(s.t+sector*2)%12;signals.forEach(({lights,approach})=>{const green=approach%2===0?phase<5:phase>=6&&phase<11,amber=approach%2===0?phase===5:phase===11;lights[0].material.color.setHex(!green&&!amber?0xff392b:0x241e1b);lights[1].material.color.setHex(amber?0xffbc43:0x242119);lights[2].material.color.setHex(green?0x9be2b2:0x17251e);});}
+ for(const {offset,signals} of roadSignals){const phase=(s.t+offset)%12;signals.forEach(({lights,approach})=>{const green=approach%2===0?phase<5:phase>=6&&phase<11,amber=approach%2===0?phase===5:phase===11;lights[0].material.color.setHex(!green&&!amber?0xff392b:0x241e1b);lights[1].material.color.setHex(amber?0xffbc43:0x242119);lights[2].material.color.setHex(green?0x9be2b2:0x17251e);});}
 }
 
 function plantDetails(){
@@ -2448,13 +2567,367 @@ function plantDetails(){
  }
 }
 
+// Unified architectural kit: walls are assembled around openings, not decorated solid boxes.
+let campusObjects=[],cargoYard=null,cargoCrane=null,cargoContainers=[],cargoPayload=null,externalFiber=[],spaceFiberPath=[];
+function facility(name,x,y,w,h,d,opts={}){
+ const g=localGroup(x,y,.65,opts.yaw||0),k=new Kit(g),wall=material('facade-'+name,opts.color||0x8c9387,{metalness:.28,roughness:.68}),floors=Math.max(1,Math.round(h/4)),fh=h/floors;
+ g.material=wall;g.userData.facility=name;
+ k.box(M.concrete,0,-.35,0,w+2.6,.7,d+2.6);
+ for(let level=0;level<floors;level++){
+  const yy=level*fh;k.box(M.concrete,0,yy,0,w,.22,d);
+  for(let side=0;side<4;side++){
+   const width=side%2?d:w,depth=side%2?w:d,bays=Math.max(2,Math.round(width/4.2)),bw=width/bays;
+   const box=(mat,u,v,ww,hh,th=.2,off=0)=>k.box(mat,side===0?u:side===2?-u:(side===1?depth/2+off:-depth/2-off),v,side===0?depth/2+off:side===2?-depth/2-off:(side===1?-u:u),side%2?th:ww,hh,side%2?ww:th);
+   for(let bay=0;bay<bays;bay++){
+    const u=-width/2+(bay+.5)*bw,door=level===0&&side===(opts.front===-1?2:0)&&bay===Math.floor(bays/2);
+    box(M.steel,u-bw/2,yy+fh/2,.18,fh,.32,.12);
+    if(door){box(M.dark,u,1.55,bw-.25,3.1,.14);box(M.glass,u,1.7,bw-.55,2.35,.08,.13);box(M.trim,u,3.25,bw+.35,.18,.3,.24);box(M.trim,u,1.6,.08,2.8,.16,.22);}
+    else{
+     box(wall,u,yy+.65,bw-.16,1.3,.25);box(wall,u,yy+fh-.42,bw-.16,.84,.25);
+     box(M.glass,u,yy+(fh+.45)/2,bw-.35,fh-2.12,.055,.02);
+     box(M.trim,u,yy+1.32,bw-.1,.11,.35,.11);box(M.trim,u,yy+fh-.84,bw-.1,.09,.2,.12);
+     box(M.trim,u,yy+(fh+.45)/2,.075,fh-2.12,.12,.1);
+     if((bay+level)%3!==1)box(M.glow,u,yy+fh-.98,bw-.9,.08,.09,-.25);
+    }
+    for(const du of [-bw/2+.22,bw/2-.22])box(M.dark,u+du,yy+.4,.075,.075,.04,.17);
+    if(level===0&&!door)for(let rib=0;rib<6;rib++)box(M.trim,u-bw*.35+rib*bw*.14,.67,.035,.8,.04,.15);
+   }
+   box(M.steel,0,yy+fh-.06,width+.45,.17,.3,.1);
+  }
+ }
+ k.box(M.roof,0,h+.12,0,w+.8,.32,d+.8);
+ for(const z of [-d/2,d/2])k.box(M.trim,0,h+.7,z,w+.9,1.1,.18);
+ for(const x of [-w/2,w/2])k.box(M.trim,x,h+.7,0,.18,1.1,d);
+ const units=Math.max(2,Math.round(w/12));for(let n=0;n<units;n++){
+  const xx=(n-(units-1)/2)*8;k.box(M.trim,xx,h+1.35,-d*.18,5,2.1,3.4);k.box(M.steel,xx,h+.4,-d*.18,5.6,.25,4);
+  for(let l=0;l<13;l++)k.box(M.dark,xx,h+.48+l*.14,-d*.18+1.73,4.55,.065,.045);
+  for(const fx of [-1.2,1.2]){k.add('cyl',M.dark,[xx+fx,h+2.47,-d*.18],[.82,.1,.82]);for(let blade=0;blade<5;blade++)k.box(M.trim,xx+fx,h+2.56,-d*.18,1.45,.05,.12,[0,blade*Math.PI/5,0]);}
+  industrialPipe(k,[[xx,h+.9,-d*.18-1.7],[xx,h+.9,-d*.4],[xx,h+3,-d*.4]],.35,M.trim);
+ }
+ for(const x of [-w/2-.28,w/2+.28]){k.pipe(M.steel,[x,h,-d/2],[x,h,d/2],.12);k.pipe(M.steel,[x,h,d/2],[x,-.25,d/2],.09);for(let yy=1;yy<h;yy+=2)k.box(M.trim,x,yy,d/2,.32,.055,.2);}
+ const front=(opts.front===-1?-1:1)*d/2;k.box(M.steel,0,3.65,front+Math.sign(front)*1.5,9,.22,3.5);
+ for(let j=0;j<4;j++)k.box(M.concrete,0,-.25-j*.12,front+Math.sign(front)*(1+j*.45),8,.18,.48);
+ // Furnished ground floor / visible server hall, according to the facility's purpose.
+ for(let row=0;row<2;row++)for(let col=0;col<Math.min(6,Math.floor(w/4));col++){
+  const xx=-w/2+3+col*4,zz=-d*.25+row*d*.32;
+  if(opts.type==='network'||opts.type==='power'){
+   k.box(M.dark,xx,1.3,zz,1.4,2.6,1.1);for(let slot=0;slot<9;slot++){k.box(M.steel,xx,.3+slot*.25,zz+.57,1.3,.17,.04);k.box(M.screen,xx+.42,.3+slot*.25,zz+.61,.25,.05,.03);}
+   k.pipe(M.blue,[xx,2.8,zz],[xx,h-1,zz],.06);
+  }else{k.box(M.wood,xx,.95,zz,2.2,.14,1.2);k.box(M.fabric,xx,1,zz-.85,.72,.8,.65);k.box(M.screen,xx,1.42,zz+.1,.8,.5,.08);}
+ }
+ const gate=opts.type==='workshop';if(gate){for(let j=-1;j<=1;j++){const xx=j*w*.27;k.box(M.dark,xx,3.1,-d/2-.1,8,6.2,.1);for(let slat=0;slat<18;slat++)k.box(M.trim,xx,.25+slat*.32,-d/2-.18,7.7,.07,.07);k.box(M.amber,xx,6.45,-d/2-.26,8.5,.2,.18);}}
+ k.finish();const label=textSprite(name,'#e0d8b1',32);label.position.set(0,3.2,front+Math.sign(front)*.3);label.scale.set(Math.min(w*.7,18),1.25,1);label.material.depthTest=true;g.add(label);campusObjects.push(g);return g;
+}
+function industrialPipe(kit,points,r,mat=M.trim){
+ const path=[new THREE.Vector3(...points[0])];for(let i=1;i<points.length-1;i++){
+  const a=new THREE.Vector3(...points[i-1]),b=new THREE.Vector3(...points[i]),c=new THREE.Vector3(...points[i+1]),bend=Math.min(r*3,a.distanceTo(b)*.3,b.distanceTo(c)*.3),entry=b.clone().addScaledVector(a.clone().sub(b).normalize(),bend),exit=b.clone().addScaledVector(c.clone().sub(b).normalize(),bend);
+  path.push(entry);for(let step=1;step<=6;step++){const t=step/6;path.push(entry.clone().multiplyScalar((1-t)**2).addScaledVector(b,2*(1-t)*t).addScaledVector(exit,t*t));}
+ }path.push(new THREE.Vector3(...points.at(-1)));
+ for(let i=1;i<path.length;i++)kit.pipe(mat,path[i-1].toArray(),path[i].toArray(),r);
+ for(let i=1;i<points.length;i++){const p=new THREE.Vector3(...points[i-1]),v=new THREE.Vector3(...points[i]).sub(p).normalize();kit.pipe(M.steel,p.clone().addScaledVector(v,.2).toArray(),p.clone().addScaledVector(v,.2+r*.45).toArray(),r*1.18);}
+}
+function civicFurniture(k,x,y,width=24,depth=12,yaw=0){
+ const base=sph(x,y,1.12),q=quatAt(x,y,yaw),put=(mat,p,sz)=>k.add('box',mat,base.clone().add(new THREE.Vector3(...p).applyQuaternion(q)).toArray(),sz,q);
+ for(let px=-width/2;px<width/2;px+=1.2)for(let pz=-depth/2;pz<depth/2;pz+=1.2)put(M.concrete,[px,.025,pz],[1.17,.08,1.17]);
+ for(const xx of [-width/2+2,width/2-2]){
+  for(let slat=0;slat<5;slat++)put(M.wood,[xx,.65,-2+slat*.19],[3,.1,.16]);put(M.wood,[xx,1.1,-2.2],[3,.85,.12]);
+  for(const dx of [-1.1,1.1])put(M.steel,[xx+dx,.32,-1.6],[.12,.64,.85]);
+  put(M.steel,[xx,3.4,depth/2],[.12,6.8,.12]);put(M.trim,[xx,6.72,depth/2],[.75,.18,.75]);put(M.glow,[xx,6.62,depth/2],[.6,.07,.6]);
+  put(M.concrete,[xx,.45,2],[3.6,.9,2]);for(let twig=0;twig<8;twig++)put(M.fabric,[xx-1.4+twig*.4,1.15,2],[.13,.6+(twig%3)*.18,.13]);
+ }
+}
+function parkingLot(x,y,w,d,yaw=0,count=6){
+ const g=localGroup(x,y,.9,yaw),k=new Kit(g);k.box(M.dark,0,.04,0,w,.12,d);
+ for(let j=0;j<=count;j++)k.box(M.white,-w/2+j*w/count,.12,0,.1,.025,d*.64);
+ k.box(M.white,0,.12,d*.33,w,.025,.1);
+ for(let j=0;j<count;j++){k.box(M.concrete,-w/2+(j+.5)*w/count,.25,-d*.27,w/count*.68,.24,.32);}
+ for(const xx of [-w/2,w/2]){k.pipe(M.steel,[xx,.2,d/2],[xx,7,d/2],.07);k.box(M.glow,xx,6.95,d/2-1,.55,.1,2);}
+ k.finish();return g;
+}
+function equipmentCabinet(x,y,w,h,d,color,yaw=0){
+ const g=localGroup(x,y,.4,yaw),k=new Kit(g),paint=material('cabinet-'+color,color,{metalness:.5,roughness:.5});g.material=paint;
+ k.box(M.concrete,0,0,0,w+.8,.5,d+.8);k.box(paint,0,h/2,0,w,h,d);k.box(M.trim,0,h+.15,0,w+.3,.25,d+.3);
+ const n=Math.max(2,Math.round(w/2));for(let j=0;j<n;j++){const xx=-w/2+(j+.5)*w/n;k.box(M.steel,xx,h/2,d/2+.06,w/n-.15,h-.24,.08);k.box(M.trim,xx+w/n*.3,h*.45,d/2+.14,.08,.35,.09);for(let slot=0;slot<10;slot++)k.box(M.dark,xx,h*.2+slot*.11,d/2+.12,w/n*.75,.045,.045);k.box(M.screen,xx,h*.76,d/2+.15,.42,.26,.04);}
+ for(const side of [-1,1]){for(let fin=0;fin<12;fin++)k.box(M.trim,side*(w/2+.2),h*.5,-d*.4+fin*d*.07,.4,h*.65,.08);industrialPipe(k,[[side*w*.3,0,-d/2-.3],[side*w*.3,h*.7,-d/2-.3],[side*w*.3,h*.7,-d/2]],.11,M.trim);}
+ k.finish();return g;
+}
+
+function buildCampus(){
+ const k=new Kit(world);road(arcPts(0,360,118,120),12,1.03,0x454b4d);road([[-118,0],[118,0]],12,1.03,0x454b4d);road([[0,0],[0,55]],10,1.03,0x454b4d);
+ for(const x of [-53,53])road([[x,0],[x,-105]],9,1.03,0x454b4d);
+ // Traffic and cargo use this complete inner distributor, outside the civic campus.
+ road(arcPts(0,360,210,160),11,1.02,0x454b4d);
+ for(const r of [109,127])ribbon(arcPts(0,360,r,120),3.4,1.15,0x9d9e8c,{map:pavingTexture});
+ for(const path of [[[0,95],[0,109]],[[88,46],[88,69],[97,76]],[[-88,47],[-88,65],[-98,72]],[[-38,29],[-38,9]],[[43,47],[43,9]],[[-40,-31],[-40,-8]]])ribbon(path,3,1.16,0xa4a693,{map:pavingTexture});
+ for(const [x,y,w,d] of [[0,53,44,16],[44,20,25,16],[-43,18,23,14],[-84,58,24,10],[88,57,22,10]])civicFurniture(k,x,y,w,d);
+ parkingLot(-90,-12,28,12,0,7);parkingLot(90,-12,28,12,0,7);parkingLot(0,108,42,9,0,9);
+ facility('COLONY ADMINISTRATION',-38,43,27,76,25,{color:0x81948d,type:'office',front:-1});
+ facility('SCIENCE / HABITAT TOWER',43,60,25,92,24,{color:0x8d8f7e,type:'office',front:-1});
+ // Tower roof crowns and external bracing create a recognisable skyline.
+ for(const [x,y,h,w] of [[-38,43,76,27],[43,60,92,25]]){
+  const g=localGroup(x,y,.65,0),kk=new Kit(g);
+  for(const sx of [-1,1])for(const sz of [-1,1])kk.pipe(M.steel,[sx*(w/2+.3),0,sz*12.8],[sx*(w/2+.3),h+3,sz*12.8],.18);
+  kk.pipe(M.trim,[0,h,0],[0,h+16,0],.15);kk.add('ball',M.glow,[0,h+16,0],[.24,.24,.24]);kk.finish();
+ }
+ // Heated paving strips share the power domain, with joints and inspection panels.
+ for(let x=-110;x<=110;x+=8){const q=quatAt(x,9);k.add('box',M.amber,sph(x,9,1.25).toArray(),[5.8,.025,.045],q);}
+ for(const [x,y] of [[-58,-45],[55,-40],[110,0],[-110,0]]){const q=quatAt(x,y);k.add('box',M.steel,sph(x,y,2).toArray(),[1.2,1.8,.7],q);k.add('box',M.screen,sph(x,y+.36,2.4).toArray(),[.65,.22,.025],q);}
+ k.finish();
+}
+function containerModel(color=0x985139,code='WY-426',long=true){
+ const g=new THREE.Group(),k=new Kit(g),length=long?12.2:6.1,paint=material('container-'+color,color,{metalness:.65,roughness:.56});
+ k.box(M.steel,0,.12,0,length,.24,2.44);k.box(paint,0,1.5,0,length,2.65,2.4);k.box(paint,0,2.87,0,length,.12,2.44);
+ for(const side of [-1,1]){
+  for(let x=-length/2+.15;x<length/2;x+=.27)k.box(M.trim,x,1.48,side*1.22,.055,2.55,.045);
+  for(const yy of [.2,2.78])k.box(M.steel,0,yy,side*1.25,length,.14,.12);
+ }
+ for(const x of [-length/2,length/2]){
+  for(const z of [-1.16,1.16])k.box(M.trim,x,1.45,z,.16,2.9,.16);
+  for(const z of [-.62,.62]){k.box(paint,x+Math.sign(x)*.08,1.5,z,.11,2.5,1.08);k.pipe(M.trim,[x+Math.sign(x)*.17,.3,z],[x+Math.sign(x)*.17,2.65,z],.035);for(const yy of [.65,1.9])k.box(M.steel,x+Math.sign(x)*.2,yy,z,.08,.09,.3);}
+  for(const z of [-1.13,1.13])for(const yy of [.15,2.78])k.box(M.dark,x+Math.sign(x)*.11,yy,z,.07,.09,.11);
+ }
+ k.finish();const label=textSprite(code,'#e7d9b5',28);label.position.set(0,2,1.275);label.scale.set(3,.4,1);label.material.depthTest=true;g.add(label);return g;
+}
+function freightVehicle(){
+ const g=detailedVehicle(0xb79053,'freight-cab'),k=new Kit(g);g.scale.set(.95,.95,.95);
+ k.box(M.steel,-6,.82,0,14,.3,2.75);for(const x of [-10,-8.5,-7])for(const z of [-1.5,1.5]){
+  k.add('cyl',M.rubber,[x,.68,z],[.66,.38,.66],[Math.PI/2,0,0]);k.add('cyl',M.trim,[x,.68,z*1.12],[.35,.04,.35],[Math.PI/2,0,0]);
+ }
+ k.finish();const load=containerModel(0x995636,'WY / CARGO',false);load.position.set(-7,1.04,0);load.visible=false;g.add(load);g.userData.cargo=load;return g;
+}
+function buildCargoDepot(){
+ const [angle,radius]=G.cfg.cargo_depot,[x,y]=polar(angle,radius+22),yaw=-angle*Math.PI/180-Math.PI/2;cargoYard=localGroup(x,y,.9,yaw);const k=new Kit(cargoYard);
+ k.box(M.concrete,0,.05,0,68,.1,41);for(let n=0;n<24;n++){
+  const col=n%8,row=[2,0,1][Math.floor(n/8)],c=containerModel([0x975537,0xa56a39,0x737e75,0x47616b][n%4],'WY '+String(60400+n));c.position.set((col-3.5)*7.5,.14+Math.floor(row/2)*2.92,-8+(row%2)*3.1);if(n%2)c.rotation.y=Math.PI; c.scale.x=.5; cargoYard.add(c);cargoContainers.push(c);
+ }
+ for(const z of [-17,21]){k.box(M.steel,0,.21,z,68,.18,.18);for(let x=-33;x<34;x+=2)k.box(M.concrete,x,.08,z,1,.15,1.6);}
+ for(let x=-31;x<32;x+=4){k.box(M.white,x,.13,15,2,.03,.14);k.box(M.amber,x,.13,22,1.2,.03,.14);}
+ cargoCrane=new THREE.Group();const ck=new Kit(cargoCrane);
+ for(const z of [-17,21])for(const xx of [-3,3]){
+  ck.box(M.amber,xx,9.5,z,.7,19,.7);ck.pipe(M.steel,[xx,.5,z],[xx,12,z+(z<0?5:-5)],.2);ck.add('cyl',M.dark,[xx,.7,z],[.62,.5,.62],[Math.PI/2,0,0]);
+ }
+ for(const xx of [-3,3]){ck.box(M.amber,xx,19.5,2,.8,1.2,41);for(let z=-17;z<21;z+=3)ck.pipe(M.steel,[xx,19,z],[xx,20.1,z+3],.07);}
+ for(let z=-17;z<=21;z+=3){ck.box(M.amber,0,20.1,z,7,.3,.25);ck.pipe(M.trim,[-3,20.3,z],[3,20.3,Math.min(z+3,21)],.09);}for(const xx of [-3.5,3.5])ck.box(M.steel,xx,21,2,.35,.15,42);
+ ck.box(M.glass,3.5,18.6,15,3,2.1,3);ck.finish();cargoYard.add(cargoCrane);
+ const trolley=new THREE.Group(),tk=new Kit(trolley);tk.box(M.steel,0,20.6,0,4.5,1,3);tk.add('cyl',M.trim,[0,20.4,0],[.55,3,.55],[0,0,Math.PI/2]);tk.finish();cargoCrane.add(trolley);cargoCrane.userData.trolley=trolley;
+ const hook=new THREE.Group(),hk=new Kit(hook);hk.box(M.amber,0,0,0,6.4,.35,2.7);hk.pipe(M.trim,[0,.2,0],[0,1.1,0],.14);hk.finish();cargoCrane.add(hook);cargoCrane.userData.hook=hook;
+ const cables=new THREE.Mesh(new THREE.CylinderGeometry(.035,.035,1,5),M.dark);cargoCrane.add(cables);cargoCrane.userData.cable=cables;
+ cargoPayload=containerModel(0x975537,'WY / LIFT',false);cargoCrane.add(cargoPayload);cargoPayload.visible=false;
+ k.finish();facility('FREIGHT / DISPATCH',...polar(angle+11,radius+20),18,9,14,{yaw,color:0x968369,type:'office'});
+}
+function updateCargo(s){
+ if(!cargoCrane||!s.cargo)return;const c=s.cargo,on=c.phase!=='WAIT',t=c.progress,idx=c.loaded%cargoContainers.length,source=cargoContainers[idx],sx=source.position.x,sz=source.position.z,sy=source.position.y;
+ cargoContainers.forEach((g,i)=>g.visible=i>=c.loaded&&!(on&&i===idx));cargoPayload.visible=on;
+ const lifted=THREE.MathUtils.smoothstep(t,0,.25),travel=THREE.MathUtils.smoothstep(t,.25,.68),lower=THREE.MathUtils.smoothstep(t,.7,.98);
+ const r=s.rovers.find(v=>v.name===('freight-'+(c.truck-(s.rovers.filter(v=>v.name.startsWith('transit')).length)+1))),target=new THREE.Vector3(7,1.1,24.2);if(r){const q=quatAt(r.x,r.y,-r.heading),p=sph(r.x-Math.sin(r.heading)*2.2,r.y+Math.cos(r.heading)*2.2,1.08).add(new THREE.Vector3(-7*.95,1.04*.95,0).applyQuaternion(q));cargoYard.updateMatrixWorld(true);target.copy(cargoYard.worldToLocal(p));}
+ const xx=sx+(target.x-sx)*travel,zz=sz+(target.z-sz)*travel,yy=sy+(14-sy)*lifted-(14-target.y)*lower;
+ cargoCrane.position.x=xx;cargoPayload.position.set(0,yy,zz);cargoCrane.userData.hook.position.set(0,yy+3.05,zz);cargoCrane.userData.trolley.position.z=zz;
+ const cable=cargoCrane.userData.cable,hookY=yy+4.1;cable.position.set(0,(20.4+hookY)/2,zz);cable.scale.y=Math.max(.1,20.4-hookY);
+}
+
+function buildExternalGrid(){
+ const c=G.cfg,kit=new Kit(world),nodes=new Map(),physical=[];
+ function node(x,y,h=15.2,yaw=0){const key=[x.toFixed(4),y.toFixed(4),h.toFixed(3)].join('|');if(nodes.has(key))return nodes.get(key);const q=quatAt(x,y,yaw),p=sph(x,y,h),n={x,y,h,q,p};nodes.set(key,n);
+  const base=sph(x,y,.2),local=(mat,pos,size)=>kit.add('box',mat,base.clone().add(new THREE.Vector3(...pos).applyQuaternion(q)).toArray(),size,q);
+  kit.pipe(M.steel,base.toArray(),p.toArray(),.22);local(M.concrete,[0,.12,0],[.9,.24,.9]);local(M.trim,[0,h-.7,0],[3.6,.2,.25]);
+  local(M.steel,[.4,2.1,0],[.68,1.25,.4]);local(M.screen,[.4,2.36,.22],[.4,.22,.035]);local(M.amber,[.4,1.85,.23],[.4,.07,.04]);
+  for(let phase=-1;phase<=1;phase++)for(let disc=0;disc<5;disc++)kit.add('cyl',M.white,p.clone().add(new THREE.Vector3(phase*1.4,-.45+disc*.09,0).applyQuaternion(q)).toArray(),[.16,.055,.16],q);
+  local(M.steel,[0,h-2,1],[.14,.14,2.3]);local(M.glow,[0,h-2.1,2.1],[.8,.12,.4]);kit.pipe(M.trim,base.clone().add(new THREE.Vector3(.24,0,0).applyQuaternion(q)).toArray(),p.clone().add(new THREE.Vector3(.24,-1,0).applyQuaternion(q)).toArray(),.018);
+  return n;
+ }
+ const anchor=(n,phase,dh=0)=>n.p.clone().add(new THREE.Vector3(phase*1.4,dh,0).applyQuaternion(n.q));
+ function circuit(flat){const samples=[];for(let i=1;i<flat.length;i++){
+  const a=flat[i-1],b=flat[i],L=Math.hypot(b[0]-a[0],b[1]-a[1]),N=Math.max(1,Math.ceil(L/42)),yaw=-Math.atan2(b[1]-a[1],b[0]-a[0])+Math.PI/2;
+  for(let j=0;j<N;j++){const t=j/N;samples.push(node(a[0]+(b[0]-a[0])*t,a[1]+(b[1]-a[1])*t,(a[2]??15.2)+((b[2]??15.2)-(a[2]??15.2))*t,yaw));}
+ }const last=flat.at(-1);samples.push(node(last[0],last[1],last[2]??15.2));const center=[],fiber=[];
+ for(let i=1;i<samples.length;i++){
+  const a=samples[i-1],b=samples[i],sag=Math.min(1.8,a.p.distanceTo(b.p)*.035);
+  for(let phase=-1;phase<=1;phase++){const curve=catenary(anchor(a,phase),anchor(b,phase),sag);physical.push(curve);for(let j=1;j<curve.length;j++)kit.pipe(M.dark,curve[j-1].toArray(),curve[j].toArray(),.045);if(!phase)center.push(curve);}
+  const n=catenary(anchor(a,0,-.8),anchor(b,0,-.8),sag);physical.push(n);const f=catenary(anchor(a,0,-2),anchor(b,0,-2),sag);physical.push(f);fiber.push(f);
+ }return {center,fiber};}
+ const main=circuit([[c.reactor_pos[0]+60,-60,16.5],[c.reactor_pos[0]+86,-12,15.2],[-988,-12,15.2],[-c.wall_radius-40,-12,15.2],[-164,-12,14],[0,-70,16.5]]);
+ trunkCurves=main.center;hub.trunkLayer=new LineLayer(trunkCurves,0xf2c14e);
+ const mobile=circuit([[-988,-12,15.2],[-988,c.tower_pos[1]+40,15.2],[c.tower_pos[0]+12,c.tower_pos[1],12]]);
+ const space=circuit([[-988,c.tower_pos[1]+40,15.2],[-988,c.dish_pos[1]+105,15.2],[c.dish_pos[0]+88,c.dish_pos[1]+105,15.2],[c.dish_pos[0]+88,c.dish_pos[1],15.2],[c.dish_pos[0]+44,c.dish_pos[1],12]]);
+ towerCurves=[...mobile.center,...space.center];hub.towerLayer=new LineLayer(towerCurves,0xf2c14e);
+ cableTowerCurves=[...main.fiber,...mobile.fiber,...space.fiber];hub.cableTowerLayer=new LineLayer(cableTowerCurves,0x4fd1c5);externalFiber=cableTowerCurves;
+ const solar=circuit([[c.solar_pos[0]+70,c.solar_pos[1]+30,10],[c.reactor_pos[0]+86,-40,15.2],[c.reactor_pos[0]+60,-60,16.5]]);solarCurves=[solar.center.flat()];hub.solarLayer=new LineLayer(solarCurves,0xf2c14e);
+ feederCurves=[];for(let sector=0;sector<c.sectors;sector++){
+  const [x,y]=polar(sector*60+1.6,c.hub_radius+20);node(x,y,10.7,0);const way=circuit([[0,-70,16.5],...arcPts(270,sector*60+1.6+(sector<4?360:0),c.hub_radius+20,Math.max(2,sector*6+8)).map(p=>[...p,10.7]),[x,y,10.7]]);feederCurves.push(way.center.flat());
+ }
+ hub.feederLayer=new LineLayer(feederCurves,0xf2c14e);
+ // The public fibre backbone leaves the network building through a roof termination.
+ const comms=circuit([[88,34,20],[164,12,15.2],[-164,-12,14],[-c.wall_radius-40,-12,15.2],[-988,-12,15.2]]);
+ spaceFiberPath=[...comms.fiber.flat(),...mobile.fiber.slice(0,Math.ceil(Math.abs(c.tower_pos[1]+52)/42)).flat(),...space.fiber.flat()];new LineLayer(comms.fiber,0x4fd1c5);
+ for(let sector=0;sector<c.sectors;sector++){const rp=polar(sector*60+1.6,c.hub_radius+20),cab=polar(sector*60+4.5,c.hub_radius+20),fiber=[sph(88,34,18),sph(164,12,13.2),...arcPts(Math.atan2(12,164)*180/Math.PI,sector*60+4.5,164,Math.max(4,sector*16)).map(p=>sph(...p,8.7)),sph(...cab,8.7),sph(...rp,8.7)];new LineLayer([fiber],0x4fd1c5);for(let j=1;j<fiber.length;j++)kit.pipe(M.dark,fiber[j-1].toArray(),fiber[j].toArray(),.028);}
+ kit.finish();new LineLayer(physical,0x88958d);
+}
+function secureCompound(x,y,w,d,entrance=1){
+ const g=localGroup(x,y,.5,0),k=new Kit(g);k.box(M.concrete,0,.08,0,w,.16,d);
+ for(const z of [-d/2,d/2])for(let xx=-w/2;xx<w/2;xx+=5){k.pipe(M.steel,[xx,0,z],[xx,3.1,z],.055);for(let yy=.4;yy<3;yy+=.42)k.pipe(M.trim,[xx,yy,z],[Math.min(w/2,xx+5),yy,z],.014);k.pipe(M.steel,[xx,3.1,z],[Math.min(w/2,xx+5),3.1,z],.025);}
+ for(const xx of [-w/2,w/2])for(let z=-d/2;z<d/2;z+=5){if(xx>0&&Math.abs(z)<9)continue;k.pipe(M.steel,[xx,0,z],[xx,3.1,z],.055);for(let yy=.4;yy<3;yy+=.42)k.pipe(M.trim,[xx,yy,z],[xx,yy,Math.min(d/2,z+5)],.014);}
+ for(let j=0;j<12;j++)k.box(j%2?M.white:M.amber,w/2,1.8,-6+j,.16,.16,1);
+ for(const z of [-7,7]){k.box(M.amber,w/2,1,z,.65,1.5,.65);k.box(M.glow,w/2,2,z,.26,.22,.26);}
+ k.finish();facility('SECURITY / ACCESS',x+w/2-5,y+13,7,4,6,{color:0x8d947f});parkingLot(x+w/2-21,y-18,26,13,0,6);
+ return g;
+}
+function buildSpaceDish(){
+ const [x,y]=G.cfg.dish_pos;secureCompound(x,y,160,128);const base=localGroup(x,y,0,0),k=new Kit(base);
+ k.add('cyl',M.concrete,[0,1,0],[17,2,17]);k.add('cyl',M.steel,[0,3,0],[12,4,12]);
+ for(let n=0;n<48;n++){const a=n*Math.PI/24;k.add('box',M.trim,[Math.cos(a)*12.2,3,Math.sin(a)*12.2],[.55,2.5,.55],[0,-a,0]);}
+ const az=new THREE.Group();base.add(az);const yoke=new Kit(az);
+ for(const side of [-1,1]){yoke.box(M.trim,side*12,18,0,4,30,8);yoke.pipe(M.steel,[side*12,5,-7],[side*12,31,0],.75);yoke.pipe(M.steel,[side*12,5,7],[side*12,31,0],.75);yoke.add('cyl',M.dark,[side*12,32,0],[2.8,4.5,2.8],[0,0,Math.PI/2]);}
+ yoke.box(M.steel,0,10,0,28,2,12);yoke.finish();const dish=new THREE.Group();dish.position.y=34;dish.rotation.x=-.55;az.add(dish);
+ const R=32,F=23.68,pos=[],idx=[],rings=20,segs=96;
+ for(let ring=0;ring<=rings;ring++)for(let j=0;j<segs;j++){const r=R*ring/rings,a=j*Math.PI*2/segs;pos.push(r*Math.cos(a),r*r/(4*F),r*Math.sin(a));}
+ for(let r=0;r<rings;r++)for(let j=0;j<segs;j++){const a=r*segs+j,b=r*segs+(j+1)%segs,c=(r+1)*segs+j,d=(r+1)*segs+(j+1)%segs;idx.push(a,b,c,b,d,c);}
+ const geo=new THREE.BufferGeometry();geo.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));geo.setIndex(idx);geo.computeVertexNormals();dish.add(new THREE.Mesh(geo,new THREE.MeshStandardMaterial({color:0xc5ceca,metalness:.63,roughness:.33,side:THREE.DoubleSide})));
+ const frame=new Kit(dish);for(let radial=0;radial<48;radial++){
+  const a=radial*Math.PI/24;for(let j=1;j<=12;j++){const r0=R*(j-1)/12,r1=R*j/12;frame.pipe(M.steel,[r0*Math.cos(a),r0*r0/(4*F)-.65,r0*Math.sin(a)],[r1*Math.cos(a),r1*r1/(4*F)-.65,r1*Math.sin(a)],.1);}
+ }
+ for(let ring=1;ring<=8;ring++){const r=ring*4,height=r*r/(4*F);metalRing(frame,M.trim,[0,height-.3,0],r,.085);}
+ for(let n=0;n<4;n++){const a=n*Math.PI/2+Math.PI/4;frame.pipe(M.trim,[Math.cos(a)*29,29*29/(4*F),Math.sin(a)*29],[Math.cos(a)*2.5,F-2,Math.sin(a)*2.5],.19);}
+ frame.add('cyl',M.steel,[0,F-1,0],[3,.55,3]);frame.add('cyl',M.trim,[0,F-2,0],[1.2,2,1.2]);frame.box(M.dark,0,-2,0,8,3.5,7);frame.finish();
+ for(let h=4;h<31;h+=.4)k.pipe(M.trim,[14,h,-.5],[14,h,.5],.035);for(const z of [-.55,.55])k.pipe(M.steel,[14,3,z],[14,32,z],.055);
+ k.finish();complex.dishGroup=clickable(base,'dish','dish');complex.dishAzimuth=az;facility('DEEP SPACE / TRACKING',x+48,y+30,26,10,18,{type:'network',color:0x85938e});
+ addLabel('DEEP-SPACE ARRAY / 64 m',x,y,82,'#b5cec5','mid');
+ const c=G.cfg;road([[c.tower_pos[0]+30,c.tower_pos[1]+40],[c.tower_pos[0]+30,y+105],[x+88,y+105],[x+88,y],[x+68,y]],12,1.05,0x454b4d);
+}
+function reactorIndustry(){
+ const c=G.cfg,[rx,ry]=c.reactor_pos,g=localGroup(rx,ry,0,0),k=new Kit(g);
+ // Pressurised containment seams, access galleries and cable ladders.
+ for(const h of [4,18,34,49])metalRing(k,M.trim,[0,h,0],46.35,.16);
+ for(let n=0;n<24;n++){const a=n*Math.PI/12,x=Math.cos(a)*46.3,z=Math.sin(a)*46.3;k.pipe(M.trim,[x,0,z],[x,49,z],.13);if(n%3===0){k.box(M.steel,x,18,z,4,.25,3,[0,-a,0]);}}
+ for(let yy=5;yy<50;yy+=.36)k.pipe(M.trim,[47,yy,-.4],[47,yy,.4],.04);
+ for(const z of [-.45,.45])k.pipe(M.steel,[47,1,z],[47,52,z],.07);
+ for(const side of [-1,1]){
+  industrialPipe(k,[[-87,8,side*60],[-67,8,side*60],[-67,8,side*26],[-41,8,side*26]],1.7,M.trim);
+  industrialPipe(k,[[-84,13,side*60],[-60,13,side*60],[-60,13,side*18],[-41,13,side*18]],1.25,M.steel);
+  for(let x=-84;x<=-47;x+=9){k.box(M.concrete,x,2,side*30,3,4,3);k.box(M.steel,x,5,side*30,3.6,.6,5);}
+ }
+ industrialPipe(k,[[18,18,40],[18,18,63],[18,12,70]],1.4,M.trim);industrialPipe(k,[[26,14,38],[26,14,58],[26,7,70]],1,M.steel);
+ for(const xx of [45,60,75]){
+  k.box(M.concrete,xx,.4,-65,14,.8,12);k.box(M.steel,xx,4.8,-65,10,8,7);
+  for(const z of [-70,-60])for(let fin=0;fin<18;fin++)k.box(M.trim,xx-4.5+fin*.5,4.4,z,.11,6.5,2);
+  k.add('cyl',M.trim,[xx,9.7,-65],[1.3,8,1.3],[0,0,Math.PI/2]);
+  for(let phase=-1;phase<=1;phase++)for(let disc=0;disc<9;disc++)k.add('cyl',M.white,[xx+phase*3,10.5+disc*.45,-65],[.75,.16,.75]);
+  industrialPipe(k,[[xx,14.8,-65],[xx,16.5,-60],[60,16.5,-60]],.18,M.trim);
+ }
+ k.finish();complex.tw1.visible=false;complex.tw2.visible=false;
+ for(const z of [-60,60]){
+  const points=[];for(let i=0;i<=24;i++){const h=i/24*90,r=13+10*((h-55)/55)**2;points.push(new THREE.Vector2(r,h));}
+  const tower=new THREE.Mesh(new THREE.LatheGeometry(points,40),new THREE.MeshStandardMaterial({color:0x999b91,roughness:.93,side:THREE.DoubleSide}));tower.position.copy(sph(rx-90,ry+z));tower.quaternion.copy(quatAt(rx-90,ry+z));world.add(tower);
+  const tk=new Kit(world),q=quatAt(rx-90,ry+z);for(let n=0;n<20;n++){const a=n*Math.PI/10;tk.pipe(M.concrete,sph(rx-90+Math.cos(a)*23,ry+z+Math.sin(a)*23,0).toArray(),sph(rx-90+Math.cos(a)*21,ry+z+Math.sin(a)*21,8).toArray(),.6);}tk.finish();
+ }
+ const hall=facility('TURBINE / GENERATOR HALL',rx+10,ry+80,70,22,34,{type:'power',color:0x8d9389});complex.turbine.visible=false;
+ facility('HEAT RECOVERY / EXCHANGERS',rx+12,ry-120,52,15,27,{type:'power',color:0x7b8c86});
+ facility('REACTOR MAINTENANCE',rx+140,ry+70,58,17,38,{type:'workshop',color:0x9a9581});
+ road([[rx+70,-155],[rx+70,145]],18,1.07,0x454b4d);road([[rx-155,-120],[rx+70,-120],[rx+155,-120],[rx+155,145]],14,1.07,0x454b4d);
+ parkingLot(rx+140,-42,47,22,0,9);secureCompound(rx+48,-60,105,44);const furniture=new Kit(world);civicFurniture(furniture,rx+95,20,12,8);furniture.finish();
+}
+function streetSignals(){
+ // Geometry and vehicle logic consume the same junction list and phase offset.
+ for(const old of roadSignals)for(const s of old.signals){if(s.group)world.remove(s.group);}roadSignals=[];
+ const batch=new Kit(world),lampData=[];
+ for(const j of G.junctions){const a=j.angle*Math.PI/180,q=quatAt(j.x,j.y,-a),base=sph(j.x,j.y,1.1),signals=[];
+  for(let approach=0;approach<4;approach++){
+   const angle=approach*Math.PI/2,sg=new THREE.Group(),k=new Kit(sg),normal=new THREE.Vector3(Math.cos(angle),0,Math.sin(angle)),side=new THREE.Vector3(-Math.sin(angle),0,Math.cos(angle));
+   sg.position.copy(base.clone().add(normal.clone().multiplyScalar(11).addScaledVector(side,-5.9).applyQuaternion(q)));sg.quaternion.copy(q).multiply(new THREE.Quaternion().setFromAxisAngle(UP,Math.PI/2-angle));sg.updateMatrixWorld(true);
+   k.pipe(M.steel,[0,0,0],[0,5.3,0],.075);k.box(M.dark,0,4.6,0,.55,1.55,.4);k.box(M.white,0,4.6,-.22,.66,1.68,.045);
+   for(let i=0;i<3;i++){k.box(M.dark,0,5.12-i*.46,.2,.56,.055,.55);}
+   const lights=[];for(let i=0;i<3;i++){const m=new THREE.Matrix4().makeTranslation(0,5.04-i*.46,.23).premultiply(sg.matrixWorld),record={m,color:0x19221c,index:lampData.length};lampData.push(record);lights.push({material:{color:{setHex:value=>{record.color=value;if(record.mesh){record.mesh.setColorAt(record.index,new THREE.Color(value));record.mesh.instanceColor.needsUpdate=true;}}}}});}
+   for(const [key,bucket] of k.buckets){if(!batch.buckets.has(key))batch.buckets.set(key,{shape:bucket.shape,mat:bucket.mat,items:[]});for(const item of bucket.items){item.matrix.premultiply(sg.matrixWorld);batch.buckets.get(key).items.push(item);}}signals.push({lights,approach});
+   const stop=base.clone().add(normal.clone().multiplyScalar(12).applyQuaternion(q));batch.add('box',M.white,stop.toArray(),[.28,.045,4.2],q.clone().multiply(new THREE.Quaternion().setFromAxisAngle(UP,-angle)));
+  }roadSignals.push({...j,signals});
+ }
+
+ batch.finish();const lamps=new THREE.InstancedMesh(new THREE.CircleGeometry(.18,12),new THREE.MeshBasicMaterial({color:0xffffff,side:THREE.DoubleSide}),lampData.length);lampData.forEach(r=>{r.mesh=lamps;lamps.setMatrixAt(r.index,r.m);lamps.setColorAt(r.index,new THREE.Color(r.color));});lamps.instanceMatrix.needsUpdate=true;world.add(lamps);
+}
+
+let oceanFlow=null,intakePool=null,intakeHeaters=[],thermalFlow=null;
+function coastHeight(x,y,height){
+ if(Math.hypot(x,y)<900)return height;
+ const az=Math.atan2((y-550)/1150,(x+2350)/900),q=Math.hypot((x+2350)/900,(y-550)/1150)/(1+.08*Math.sin(3*az)+.05*Math.sin(7*az)+.025*Math.sin(11*az)),coast=sstep(0,1,Math.max(0,Math.min(1,(1.10-q)/.16)));height+=( -26-22*Math.max(0,1-q*q)-height)*coast;
+ const river=[[500,1550,46],[50,1490,34],[-410,1250,23],[-900,1060,12],[-1450,840,1],[-2050,740,-8]];
+ for(let i=1;i<river.length;i++){const a=river[i-1],b=river[i],dx=b[0]-a[0],dy=b[1]-a[1],t=THREE.MathUtils.clamp(((x-a[0])*dx+(y-a[1])*dy)/(dx*dx+dy*dy),0,1),dist=Math.hypot(x-a[0]-dx*t,y-a[1]-dy*t),blend=sstep(0,1,THREE.MathUtils.clamp((95-dist)/70,0,1));height+=(a[2]+(b[2]-a[2])*t-2-height)*blend;}
+ return height;
+}
+function seaPoint(x,y,level=-8){return sph(x,y,level-terrainH(x,y));}
+function metalRing(k,mat,center,radius,thickness=.09){
+ for(let i=0;i<64;i++){const a=i*Math.PI/32,b=(i+1)*Math.PI/32;k.pipe(mat,[center[0]+Math.cos(a)*radius,center[1],center[2]+Math.sin(a)*radius],[center[0]+Math.cos(b)*radius,center[1],center[2]+Math.sin(b)*radius],thickness);}
+}
+function buildOcean(){
+ const c=G.cfg,[cx,cy]=c.ocean_center,[rx,ry]=c.ocean_radii,level=c.ocean_level_m,pos=[],idx=[],rings=50,segs=160;
+ for(let r=0;r<=rings;r++)for(let j=0;j<segs;j++){const a=j*Math.PI*2/segs,x=cx+rx*1.2*r/rings*Math.cos(a),y=cy+ry*1.2*r/rings*Math.sin(a),p=seaPoint(x,y,level);pos.push(p.x,p.y,p.z);}
+ for(let r=0;r<rings;r++)for(let j=0;j<segs;j++){const a=r*segs+j,b=r*segs+(j+1)%segs,cc=(r+1)*segs+j,d=(r+1)*segs+(j+1)%segs;idx.push(a,cc,b,b,cc,d);}
+ const geom=new THREE.BufferGeometry();geom.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));geom.setIndex(idx);geom.computeVertexNormals();
+ const ice=new THREE.Mesh(geom,new THREE.MeshStandardMaterial({color:0x7cabb4,metalness:.18,roughness:.32,side:THREE.DoubleSide,envMapIntensity:.75}));world.add(ice);complex.ocean=ice;
+ // Pressure ridges and branching fractures in the frozen sea, grounded at sea level.
+ const cracks=[],k=new Kit(world);for(let n=0;n<110;n++){
+  const a=n*2.39996,r=Math.sqrt((n+.5)/110)*.92,x=cx+Math.cos(a)*rx*r,y=cy+Math.sin(a)*ry*r;
+  const path=[];for(let j=0;j<7;j++)path.push(seaPoint(x+j*13,y+Math.sin(n+j*1.7)*12,level+.11));cracks.push(path);
+  if(n%3===0)k.add('ball',M.white,seaPoint(x,y,level+.3).toArray(),[12,1.4,4],quatAt(x,y,a),0xb5ced0);
+ }new LineLayer(cracks,0x335f70);
+ // Frozen river follows an explicit descending hydraulic profile, from highlands to sea.
+ const points=G.river||[[500,1550,46],[50,1490,34],[-410,1250,23],[-900,1060,12],[-1450,840,1],[-2050,740,-8]],riverPos=[],riverIdx=[];
+ for(let segment=1;segment<points.length;segment++){
+  const a=points[segment-1],b=points[segment],dx=b[0]-a[0],dy=b[1]-a[1],L=Math.hypot(dx,dy),N=Math.ceil(L/14);
+  for(let j=0;j<=N;j++){const t=j/N,x=a[0]+dx*t,y=a[1]+dy*t,h=a[2]+(b[2]-a[2])*t+.08,width=12+segment*1.5,base=riverPos.length/3;
+   for(const sign of [-1,1]){const p=seaPoint(x-dy/L*width*sign,y+dx/L*width*sign,h);riverPos.push(p.x,p.y,p.z);}
+   if(j<N)riverIdx.push(base,base+2,base+1,base+1,base+2,base+3);
+  }
+ }
+ const rg=new THREE.BufferGeometry();rg.setAttribute('position',new THREE.Float32BufferAttribute(riverPos,3));rg.setIndex(riverIdx);rg.computeVertexNormals();world.add(new THREE.Mesh(rg,new THREE.MeshStandardMaterial({color:0x97c0c5,metalness:.22,roughness:.28,side:THREE.DoubleSide})));
+ // Sparse, frost-encrusted columnar organisms and low tundra; no temperate grass at -50 C.
+ for(let n=0;n<760;n++){
+  const a=n*2.39996,r=950+((n*137)%2200),x=Math.cos(a)*r,y=Math.sin(a)*r,h=terrainH(x,y);if(h<2||h>125||x< -750&&Math.abs(y)<700)continue;
+  const q=quatAt(x,y,a),base=sph(x,y),height=1.2+(n%7)*.4,tip=base.clone().add(new THREE.Vector3(0,height,0).applyQuaternion(q));
+  k.pipe(M.fabric,base.toArray(),tip.toArray(),.17);for(let branch=0;branch<3;branch++){const p=base.clone().add(new THREE.Vector3(Math.sin(branch*2.1)*.6,height*.7,Math.cos(branch*2.1)*.6).applyQuaternion(q));k.pipe(M.white,tip.toArray(),p.toArray(),.08);}
+  k.add('ball',M.fabric,base.toArray(),[1.8,.15,1.1],q,0x6e7969);
+ }k.finish();
+ buildIntake();
+}
+function buildIntake(){
+ const c=G.cfg,[ix,iy]=c.ocean_intake_pos,[wx,wy]=c.water_plant_pos,[rx,ry]=c.reactor_pos,level=c.ocean_level_m;
+ const head=localGroup(ix,iy,level-terrainH(ix,iy)+.7,0),k=new Kit(head);
+ k.box(M.steel,0,1.8,0,22,.55,18);for(const x of [-9,9])for(const z of [-7,7])k.pipe(M.concrete,[x,-14,z],[x,1.5,z],.65);
+ for(let x=-10;x<=10;x+=2)for(const z of [-8,8]){k.pipe(M.trim,[x,2,z],[x,3.3,z],.045);if(x<10)k.pipe(M.trim,[x,3.3,z],[x+2,3.3,z],.035);}
+ for(let n=-1;n<=1;n++){k.add('cyl',M.trim,[n*5,3.5,0],[1.2,3.1,1.2]);industrialPipe(k,[[n*5,3.5,0],[n*5,-4,0]],.45,M.blue);k.box(M.dark,n*5,-3.3,0,2.2,2.2,2.2);for(let grille=0;grille<10;grille++)k.box(M.trim,n*5-1+grille*.22,-3.3,1.13,.07,2.3,.08);}
+ for(const z of [-6,6]){industrialPipe(k,[[-11,-.1,z],[11,-.1,z]],.18,M.amber);for(let n=-4;n<=4;n++){const heater=new THREE.Mesh(new THREE.BoxGeometry(1.3,.12,.2),new THREE.MeshStandardMaterial({color:0xb77232,emissive:0xe25913,emissiveIntensity:.3}));heater.position.set(n*2.3,-.1,z);head.add(heater);intakeHeaters.push(heater);}}
+ k.finish();const pg=new THREE.CircleGeometry(21,64);intakePool=new THREE.Mesh(pg,new THREE.MeshPhysicalMaterial({color:0x245465,metalness:.35,roughness:.15,transparent:true,opacity:.96,side:THREE.DoubleSide}));intakePool.position.copy(seaPoint(ix,iy,level+.2));intakePool.quaternion.copy(quatAt(ix,iy));intakePool.rotateX(-Math.PI/2);world.add(intakePool);
+ // A piled service causeway terminates at the intake deck, not on the frozen water.
+ const pierPts=subdiv([[wx-40,wy+42],[ix+18,iy+42],[ix+18,iy]],12),pierKit=new Kit(world),flow=[];
+ for(let i=1;i<pierPts.length;i++){
+  const a=pierPts[i-1],b=pierPts[i],levelAt=p=>Math.max(level+2.6,terrainH(p[0],p[1])+1.1),pa=seaPoint(...a,levelAt(a)),pb=seaPoint(...b,levelAt(b)),mid=pa.clone().add(pb).multiplyScalar(.5),q=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(1,0,0),pb.clone().sub(pa).normalize());
+  pierKit.add('box',M.steel,mid.toArray(),[pa.distanceTo(pb)+.1,.28,4.5],q);
+  const [x,y]=b,deck=levelAt(b)-terrainH(x,y);for(const side of [-1,1])pierKit.pipe(M.concrete,sph(x,y+side*1.8,-1).toArray(),sph(x,y+side*1.8,deck).toArray(),.25);
+ }
+ pierKit.finish();
+ const source=seaPoint(ix,iy,level+4.1),plant=sph(wx-30,wy,3.8),line=[source,...subdiv([[ix+18,iy],[ix+18,iy+35],[wx-40,wy+35],[wx-40,wy],[wx-30,wy]],12).map(([x,y])=>seaPoint(x,y,Math.max(level+4.1,terrainH(x,y)+3.8))),plant];
+ const pipeKit=new Kit(world);for(let i=1;i<line.length;i++){pipeKit.pipe(M.blue,line[i-1].toArray(),line[i].toArray(),.75);if(i%3===0){const p=line[i],up=p.clone().normalize();pipeKit.pipe(M.steel,p.clone().addScaledVector(up,-4).toArray(),p.toArray(),.15);}}
+ for(let i=1;i<line.length;i++){const offset=new THREE.Vector3(0,0,1.7);pipeKit.pipe(M.steel,line[i-1].clone().add(offset).toArray(),line[i].clone().add(offset).toArray(),.32);}pipeKit.finish();oceanFlow=new FlowLayer([line],0x9bdeed,.8,20,8);
+ const hotPath=flat3([[rx+12,ry-120],[rx+95,ry-120],[rx+95,wy-32],[wx+15,wy-32],[wx+15,wy]],7.5),hotKit=new Kit(world);
+ for(let i=1;i<hotPath.length;i++){hotKit.pipe(M.trim,hotPath[i-1].toArray(),hotPath[i].toArray(),.7);const up=hotPath[i].clone().normalize();hotKit.pipe(M.steel,hotPath[i-1].clone().addScaledVector(up,-1.7).toArray(),hotPath[i].clone().addScaledVector(up,-1.7).toArray(),.62);if(i%3===0)hotKit.pipe(M.steel,hotPath[i].clone().addScaledVector(up,-7.5).toArray(),hotPath[i].toArray(),.16);}
+ hotKit.finish();thermalFlow=new FlowLayer([hotPath],0xeac47e,1,12,9);
+ // Membrane filters, pressure vessels and a real delivery main into the elevated city tank.
+ const plantKit=new Kit(world),plantG=localGroup(wx,wy,0,0),pk=new Kit(plantG);
+ for(let n=0;n<5;n++){const xx=-21+n*10;pk.add('cyl',M.trim,[xx,27,-6],[1.7,7,1.7],[Math.PI/2,0,0]);industrialPipe(pk,[[xx,27,-9.5],[xx,27,-15],[25,27,-15],[25,5,-15]],.2,M.blue);}
+ pk.finish();parkingLot(wx+8,wy+52,48,17,0,8);
+ const delivery=G.utilities.plant_feed.map(utilityPoint);complex.deliveryFlow=new FlowLayer([delivery],0x8dd4eb,.75,28,10);
+ addLabel('OCEAN INTAKE / HEATED ICE WELL',ix,iy,level-terrainH(ix,iy)+14,'#afd5da','mid');clickable(head,'intake','intake');
+}
+function updateOcean(s){
+ if(!oceanFlow)return;const on=s.water.plant&&s.water.raw_m3_h>0;oceanFlow.active[0]=on;thermalFlow.active[0]=s.water.heat_kw>0;complex.deliveryFlow.active[0]=on;
+ intakeHeaters.forEach(m=>m.material.emissiveIntensity=on?1.7:.05);intakePool.material.color.setHex(on?0x245465:0x88b5c3);intakePool.material.roughness=on?.15:.5;
+}
+
 function build(){
   const c=G.cfg, R=c.ring_road_radius, WR=c.wall_radius, ns=c.sectors, HR=c.hub_radius, rx=c.reactor_pos[0], ry=c.reactor_pos[1];
   // ground plate of the city, lighter than the terrain
   buildLandscape();cityPlate=cap(WR+6, 0.25, 0x827f73, 110, 256, 0.06);
   // ---- roads ----
   for(let s=0;s<ns;s++){ roadMeshes.ring.push(road(arcPts(s*60,(s+1)*60,R,30), 14, 1.0, 0x30343d));  }
-  for(let s=0;s<ns;s++){ road([polar(s*60,HR-4), polar(s*60,WR+70)], 10, 1.0, 0x30343d);  }   // boundary streets through the gate and out
+  for(let s=0;s<ns;s++){ road([polar(s*60,HR-22), polar(s*60,WR+70)], 10, 1.0, 0x30343d);  }   // boundary streets through the gate and out
   road([[WR+70,0],[c.landing_pad_pos[0]-100,0]], 10, 1.0, 0x30343d);                              // east road to the landing pad
   for(const [k,v] of [['garage',c.garage],['medlab',c.medlab],['school',c.school]]){ const s=Math.floor(v[0]/60); ribbon(arcPts(s*60,v[0]+12,v[1],10), 6, 0.9, 0x3a3e48); }   // service lanes off the boundary streets
   for(let s=0;s<ns;s++) for(let k=0;k<=c.house_rows;k++){ const r=c.house_radius_min-30+k*c.house_ring_step; road(arcPts(s*60,(s+1)*60,r,40), 10, 1.0, 0x3a3e48); }
@@ -2465,7 +2938,7 @@ function build(){
   road([c.tower_junction,[c.tower_pos[0],c.tower_pos[1]+40]], 8, 0.9, 0x30343d);
   road([[c.waste_station_pos[0]+40,0],[c.waste_station_pos[0]+40,c.waste_station_pos[1]-20]], 8, 0.9, 0x30343d);
   // hub plaza
-  cap(HR, 0.9, 0x6b7080, 8, 64); { const steps=new THREE.Mesh(new THREE.TorusGeometry(HR+2,1.6,4,64), new THREE.MeshStandardMaterial({color:0x9a9fa8})); steps.position.copy(sph(0,0,0.2)); steps.quaternion.copy(quatAt(0,0)); steps.rotateX(Math.PI/2); world.add(steps); }
+  {const plaza=cap(HR,.9,0x8a8d7e,26,128),v=plaza.geometry.attributes.position,uv=[];for(let i=0;i<v.count;i++)uv.push(v.getX(i)/7,v.getZ(i)/7);plaza.geometry.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));plaza.material.map=pavingTexture;}  { const steps=new THREE.Mesh(new THREE.TorusGeometry(HR+2,1.6,4,64), new THREE.MeshStandardMaterial({color:0x9a9fa8})); steps.position.copy(sph(0,0,0.2)); steps.quaternion.copy(quatAt(0,0)); steps.rotateX(Math.PI/2); world.add(steps); }
   for(let s=0;s<ns;s++) for(let k=1;k<=c.house_rows;k++){ const r=c.house_radius_min-30+k*c.house_ring_step-6; ribbon(arcPts(s*60+2.5,s*60+57.5,r,20), 1.2, -0.4, 0x6f6a62); }   // terrace edges
   // ---- wall: panels between posts, top rail, footing; gates: towers, floodlights, striped arm, booth ----
   { const segs=[]; const gap=Math.atan2(21,WR)*180/Math.PI; for(let s=0;s<ns;s++){ const a0=s*60+gap, a1=(s+1)*60-gap, n=22; for(let i=0;i<n;i++){ segs.push([a0+(a1-a0)*(i+0.5)/n, a0+(a1-a0)*i/n]); } }
@@ -2507,30 +2980,20 @@ function build(){
     const L=a.distanceTo(b); spanCurves.push(catenary(a,b,Math.min(1.5,L*.025))); const a2=a.clone().addScaledVector(a.clone().normalize(),-2), b2=b.clone().addScaledVector(b.clone().normalize(),-2); netCurves.push(catenary(a2,b2,Math.min(1.5,L*.025))); }
   netSpanPaths=netCurves;spanLines=new LineLayer(spanCurves, 0xf2c14e); netLines=new LineLayer(netCurves, 0x4fd1c5);detailedPower();
   // rp cabinets and internet cabinets at the start of each boundary street
-  for(let s=0;s<ns;s++){ const [qx,qy]=polar(s*60+1.6, HR+20); const rp=box(qx,qy,6,10,10,0x6a6d78,0xf2c14e,-(s*60)*Math.PI/180); clickable(rp,'rp'+s,'rp',s); rpBoxes.push(rp);
-    const [cx,cy]=polar(s*60+4.5, HR+20); const cab=box(cx,cy,5,9,7,0x3f6a6a,0x4fd1c5,-(s*60)*Math.PI/180); clickable(cab,'cab'+s,'cabinet',s); cabBoxes.push(cab);
-    const [ux,uy]=polar(s*60+8.5, HR+22); const ups=box(ux,uy,14,8,10,0x3f6a6a,0x4fd1c5,-(s*60)*Math.PI/180); clickable(ups,'ups'+s,'ups',s); hub['ups'+s]=ups; addLabel(`S${s+1} distribution, UPS, cabinet`, qx, qy, 24, '#9aa3b5', 'near'); }
-  // feeders: underground from the substation to each rp (drawn as ground lines)
-  feederCurves=[]; for(let s=0;s<ns;s++){ const [qx,qy]=polar(s*60+1.6, HR+20); feederCurves.push(flat3([[0,-40],[qx,qy]],1.2)); } const feederLayer=new LineLayer(feederCurves,0xf2c14e); hub.feederLayer=feederLayer;
-  // trunk poles along the trunk road, tower poles along the tower road, solar line
-  { const tp=[]; for(let x=-WR-40;x>=rx+90;x-=60) tp.push([x,8]); const tpolesGeom=new THREE.CylinderGeometry(1.0,1.3,28,8); const tm=new THREE.InstancedMesh(tpolesGeom, new THREE.MeshStandardMaterial({color:0x9a9a9a}), tp.length+10);
-    let idx=0; tp.forEach(([x,y])=>{ m4.compose(sph(x,y,14), quatAt(x,y,Math.PI/2), new THREE.Vector3(1,1,1)); tm.setMatrixAt(idx++,m4); });
-    const towerPoles=[]; for(let y=-60;y>=c.tower_pos[1]+60;y-=70) towerPoles.push([c.tower_junction[0]+7,y]); towerPoles.forEach(([x,y])=>{ m4.compose(sph(x,y,14), quatAt(x,y,0), new THREE.Vector3(1,1,1)); tm.setMatrixAt(idx++,m4); }); tm.count=idx; world.add(tm);
-    const trunkPts=[sph(rx+70,8,28), ...tp.map(([x,y])=>sph(x,y,28)), sph(-WR-40,8,28)]; trunkCurves=[]; for(let i=0;i<trunkPts.length-1;i++) trunkCurves.push(catenary(trunkPts[i],trunkPts[i+1],5));
-    trunkCurves.push(flat3([[-WR-40,8],[-HR+10,8]],24)); hub.trunkLayer=new LineLayer(trunkCurves,0xf2c14e);   // into the city the trunk goes on the boundary street poles
-    const tpts=[sph(c.tower_junction[0]+7,8,28), ...towerPoles.map(([x,y])=>sph(x,y,28)), sph(c.tower_pos[0]+7,c.tower_pos[1]+40,28)]; towerCurves=[]; for(let i=0;i<tpts.length-1;i++) towerCurves.push(catenary(tpts[i],tpts[i+1],5)); hub.towerLayer=new LineLayer(towerCurves,0xf2c14e);
-    const npts=tpts.map(p=>p.clone().addScaledVector(p.clone().normalize(),-3)); cableTowerCurves=[]; for(let i=0;i<npts.length-1;i++) cableTowerCurves.push(catenary(npts[i],npts[i+1],6)); cableTowerCurves.push(...trunkPts.map(p=>p.clone().addScaledVector(p.clone().normalize(),-3)).map((p,i,arr)=> i<arr.length-1? catenary(p,arr[i+1],6):null).filter(Boolean)); cableTowerCurves.push(flat3([[-WR-40,8],[-HR+10,8]],21)); hub.cableTowerLayer=new LineLayer(cableTowerCurves,0x4fd1c5);
-    solarCurves=[flat3([[c.solar_pos[0]+70,c.solar_pos[1]+30],[rx+40,-60]],1.2)]; hub.solarLayer=new LineLayer(solarCurves,0xf2c14e); }
+  for(let s=0;s<ns;s++){ const [qx,qy]=polar(s*60+1.6, HR+20); const rp=equipmentCabinet(qx,qy,6,4,6,0x899382,-(s*60)*Math.PI/180); clickable(rp,'rp'+s,'rp',s); rpBoxes.push(rp);
+    const [cx,cy]=polar(s*60+4.5, HR+20); const cab=equipmentCabinet(cx,cy,3,3.2,2.8,0x708c88,-(s*60)*Math.PI/180); clickable(cab,'cab'+s,'cabinet',s); cabBoxes.push(cab);
+    const [ux,uy]=polar(s*60+8.5, HR+22); const ups=equipmentCabinet(ux,uy,12,4,8,0x708c88,-(s*60)*Math.PI/180); clickable(ups,'ups'+s,'ups',s); hub['ups'+s]=ups; addLabel(`S${s+1} distribution, UPS, cabinet`, qx, qy, 24, '#9aa3b5', 'near'); }
+  buildExternalGrid();
   // Pipe rendering comes exclusively from /geometry utilities.
   waterMainPts=[]; waterSectorPts=[];
   // ---- hub: substation with transformers and a fenced yard, ups, comms, ops, pump station and tank ----
   { const yard=localGroup(0,-70,0,0); const fence=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(70,6,44)), new THREE.LineBasicMaterial({color:0x9aa3b5})); fence.position.y=3; yard.add(fence);
     for(let i=0;i<3;i++){ const tr=new THREE.Mesh(new THREE.BoxGeometry(12,10,9), new THREE.MeshStandardMaterial({color:0x6a6d78})); tr.position.set(-22+i*22,5,0); yard.add(tr); for(let j=0;j<3;j++){ const b=new THREE.Mesh(new THREE.CylinderGeometry(0.6,0.6,6,6), new THREE.MeshStandardMaterial({color:0xdddddd})); b.position.set(-22+i*22-3+j*3,13,0); yard.add(b); } }
     const bus=new THREE.Mesh(new THREE.BoxGeometry(60,0.6,0.6), new THREE.MeshStandardMaterial({color:0xf2c14e})); bus.position.set(0,16.5,0); yard.add(bus); hub.yard=yard; clickable(yard,'substation','substation'); addLabel('substation 6 kV', 0, -70, 26, '#f2c14e', 'near', true).userData.role='sub';
-    hub.ups=clickable(box(-88,10,26,12,20,0x3f6a6a,0x4fd1c5),'upsc','upsc'); addLabel('UPS center', -88, 10, 24, '#4fd1c5', 'near', true).userData.role='ups';
-    hub.comms=clickable(box(88,10,22,14,18,0x4a4f5c,0x4fd1c5),'comms','comms'); const mast=cyl(88,10,1.2,44,0x9aa3b5); const dish=new THREE.Mesh(new THREE.ConeGeometry(4,3,12,1,true), new THREE.MeshStandardMaterial({color:0xdddddd, side:THREE.DoubleSide})); dish.position.copy(sph(88,10,40)); dish.quaternion.copy(quatAt(88,10)); dish.rotateX(-1.2); world.add(dish); addLabel('comms node', 88, 10, 52, '#4fd1c5', 'near', true).userData.role='comms';
-    hub.ops=clickable(box(0,80,44,16,26,0x666a78,0xc9cfdb),'ops','ops'); addLabel('operations center', 0, 80, 26, '#c9cfdb', 'near');
-    hub.pump=clickable(box(-40,-40,18,9,14,0x2a4a6a,0x5aa9ff),'pump','pump'); buildWaterTower(); addLabel('pump station', -40, -40, 20, '#5aa9ff', 'near', true).userData.role='pump'; addLabel('water tank', -70, -45, 38, '#5aa9ff', 'near', true).userData.role='tank';
+    hub.ups=clickable(facility('UPS / BATTERY HALL',-88,36,26,12,20,{type:'power',color:0x829087}),'upsc','upsc'); addLabel('UPS center', -88, 10, 24, '#4fd1c5', 'near', true).userData.role='ups';
+    hub.comms=clickable(facility('NETWORK / DATA CENTRE',88,34,26,16,22,{type:'network',color:0x7d9293}),'comms','comms'); addLabel('network / data centre',88,34,28,'#4fd1c5','near',true).userData.role='comms';
+    hub.ops=clickable(facility('COLONY OPERATIONS',0,80,36,16,24,{color:0x93988b}),'ops','ops'); addLabel('operations center', 0, 80, 26, '#c9cfdb', 'near');
+    hub.pump=clickable(facility('PUMP / PRESSURE CONTROL',-40,-40,18,9,14,{type:'power',color:0x7b9694}),'pump','pump'); buildWaterTower(); addLabel('pump station', -40, -40, 20, '#5aa9ff', 'near', true).userData.role='pump'; addLabel('water tank', -70, -45, 38, '#5aa9ff', 'near', true).userData.role='tank';
 
     // water level inside the tank
  }
@@ -2543,10 +3006,10 @@ function build(){
   addLabel('REACTOR, atmosphere processor', rx, ry, 120, '#5ec07a', 'mid', true).userData.role='reactor';
   complex.panels=[]; for(let i=0;i<8;i++) for(let j=0;j<5;j++){ const px=c.solar_pos[0]-60+i*17, py=c.solar_pos[1]-40+j*20; const p=new THREE.Mesh(new THREE.BoxGeometry(14,0.8,10), new THREE.MeshStandardMaterial({color:0x1c2f5a, roughness:.3, metalness:.4, emissive:0x102040, emissiveIntensity:0.2})); p.position.copy(sph(px,py,4)); p.quaternion.copy(quatAt(px,py)); p.rotateX(-0.5); world.add(p); complex.panels.push(p); clickable(p,'solar','solar'); }
   addLabel('solar field', c.solar_pos[0], c.solar_pos[1], 26, '#e0b04a', 'mid', true).userData.role='solar';
-  complex.water=clickable(box(c.water_plant_pos[0],c.water_plant_pos[1],60,24,40,0x2a4a6a,0x5aa9ff),'wplant','wplant'); complex.waterTank=clickable(cyl(c.water_plant_pos[0]+52,c.water_plant_pos[1]-10,14,30,0x2a4a6a),'wplant','wplant'); tube(flat3([[c.water_plant_pos[0]-30,c.water_plant_pos[1]+30],[c.water_plant_pos[0]-60,c.water_plant_pos[1]+90]],1.5),2,0x7a8aa0); addLabel('water plant: melting ground ice', c.water_plant_pos[0], c.water_plant_pos[1], 36, '#5aa9ff', 'mid', true).userData.role='wplant';
-  complex.rad=clickable(box(c.radwaste_pos[0],c.radwaste_pos[1],70,12,50,0x5a5a2a,0xe8d34a),'rad','rad'); { const s=new THREE.Sprite(new THREE.SpriteMaterial({map:TEX.rad, transparent:true})); s.scale.set(16,16,1); s.position.copy(sph(c.radwaste_pos[0],c.radwaste_pos[1],20)); world.add(s); const f=localGroup(c.radwaste_pos[0],c.radwaste_pos[1],0,0); const fence=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(100,5,80)), new THREE.LineBasicMaterial({color:0xe8d34a})); fence.position.y=2.5; f.add(fence); } addLabel('radioactive waste storage', c.radwaste_pos[0], c.radwaste_pos[1], 30, '#e8d34a', 'mid');
-  complex.mine=clickable(box(c.mine_pos[0],c.mine_pos[1],60,20,44,0x4a3a2a,0xa08a2a),'mine','mine'); { const hf=localGroup(c.mine_pos[0]+50,c.mine_pos[1],0,0); const legs=new THREE.Mesh(new THREE.BoxGeometry(3,60,3), new THREE.MeshStandardMaterial({color:0x8a7a5a})); legs.position.set(-8,30,0); hf.add(legs); const legs2=legs.clone(); legs2.position.set(8,30,0); hf.add(legs2); const wheel=new THREE.Mesh(new THREE.TorusGeometry(8,1.2,8,24), new THREE.MeshStandardMaterial({color:0xaaaaaa})); wheel.position.set(0,62,0); hf.add(wheel); complex.wheel=wheel; } addLabel('mine', c.mine_pos[0], c.mine_pos[1], 34, '#a08a2a', 'mid', true).userData.role='mine';
-  complex.waste=clickable(box(c.waste_station_pos[0],c.waste_station_pos[1],40,14,30,0x3a4a2a,0x9bd36a),'wproc','wproc'); addLabel('waste processing', c.waste_station_pos[0], c.waste_station_pos[1], 24, '#9bd36a', 'near', true).userData.role='wproc';
+  complex.water=clickable(facility('OCEAN WATER / MELT · FILTER · DESALINATE',c.water_plant_pos[0],c.water_plant_pos[1],60,24,40,{type:'power',color:0x809698}),'wplant','wplant');complex.waterTank=clickable(cyl(c.water_plant_pos[0]+52,c.water_plant_pos[1]-10,14,30,0x879ba0),'wplant','wplant');addLabel('ocean water treatment',...c.water_plant_pos,38,'#5aa9ff','mid',true).userData.role='wplant';
+  complex.rad=clickable(facility('SHIELDED WASTE / TRANSFER',c.radwaste_pos[0],c.radwaste_pos[1],70,12,50,{type:'workshop',color:0x989276}),'rad','rad'); { const s=new THREE.Sprite(new THREE.SpriteMaterial({map:TEX.rad, transparent:true})); s.scale.set(16,16,1); s.position.copy(sph(c.radwaste_pos[0],c.radwaste_pos[1],20)); world.add(s); const f=localGroup(c.radwaste_pos[0],c.radwaste_pos[1],0,0); const fence=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(100,5,80)), new THREE.LineBasicMaterial({color:0xe8d34a})); fence.position.y=2.5; f.add(fence); } addLabel('radioactive waste storage', c.radwaste_pos[0], c.radwaste_pos[1], 30, '#e8d34a', 'mid');
+  complex.mine=clickable(facility('MINING / ORE PROCESSING',c.mine_pos[0],c.mine_pos[1],60,20,44,{type:'workshop',color:0x8d8978}),'mine','mine'); { const hf=localGroup(c.mine_pos[0]+50,c.mine_pos[1],0,0); const legs=new THREE.Mesh(new THREE.BoxGeometry(3,60,3), new THREE.MeshStandardMaterial({color:0x8a7a5a})); legs.position.set(-8,30,0); hf.add(legs); const legs2=legs.clone(); legs2.position.set(8,30,0); hf.add(legs2); const wheel=new THREE.Mesh(new THREE.TorusGeometry(8,1.2,8,24), new THREE.MeshStandardMaterial({color:0xaaaaaa})); wheel.position.set(0,62,0); hf.add(wheel); complex.wheel=wheel; } addLabel('mine', c.mine_pos[0], c.mine_pos[1], 34, '#a08a2a', 'mid', true).userData.role='mine';
+  complex.waste=clickable(facility('RESOURCE RECOVERY',c.waste_station_pos[0],c.waste_station_pos[1],40,14,30,{type:'workshop',color:0x879078}),'wproc','wproc'); addLabel('waste processing', c.waste_station_pos[0], c.waste_station_pos[1], 24, '#9bd36a', 'near', true).userData.role='wproc';
   // ---- radio tower: converging lattice mast with an omni antenna and a beacon; next to it a deep-space dish on a pedestal ----
   { const tx=c.tower_pos[0], ty=c.tower_pos[1]; const g=localGroup(tx,ty,0,0); const H=130; const legMat=new THREE.MeshStandardMaterial({color:0xc44a3a}); const whiteMat=new THREE.MeshStandardMaterial({color:0xe8e8e8});
     const wAt=l=>10-8.5*(l/12); const brace=[];
@@ -2558,12 +3021,11 @@ function build(){
     const omni=new THREE.Mesh(new THREE.CylinderGeometry(0.4,0.4,16,6), whiteMat); omni.position.set(0,H+8,0); g.add(omni);
     complex.towerLight=new THREE.Sprite(new THREE.SpriteMaterial({map:TEX.red, transparent:true, depthTest:false})); complex.towerLight.scale.set(14,14,1); complex.towerLight.position.set(0,H+17,0); g.add(complex.towerLight);
     complex.rings=[]; for(let k=0;k<3;k++){ const r=new THREE.Mesh(new THREE.TorusGeometry(8+k*7,0.5,6,32), new THREE.MeshBasicMaterial({color:0x4fd1c5, transparent:true, opacity:0.5})); r.position.set(0,H+8,0); r.rotation.x=Math.PI/2; g.add(r); complex.rings.push(r); }
-    clickable(g,'tower','tower'); complex.towerGroup=g; addLabel('radio mast: colony net', tx, ty, H+28, '#4fd1c5', 'mid');
-    // deep-space dish: pedestal, yoke, 40 m reflector aimed at the sky, feed on struts
-    const dg=localGroup(tx+70,ty+10,0,0); const ped=new THREE.Mesh(new THREE.CylinderGeometry(6,9,16,16), new THREE.MeshStandardMaterial({color:0x8a8f9a})); ped.position.y=8; dg.add(ped); const yoke=new THREE.Mesh(new THREE.BoxGeometry(6,10,14), new THREE.MeshStandardMaterial({color:0x777c88})); yoke.position.y=20; dg.add(yoke);
-    const dishG=new THREE.Group(); dishG.position.y=26; dishG.rotation.x=-0.95; dg.add(dishG); const dish=new THREE.Mesh(new THREE.SphereGeometry(24,32,12,0,Math.PI*2,0,0.75), new THREE.MeshStandardMaterial({color:0xf0f0f0, side:THREE.DoubleSide, roughness:.5})); dish.rotation.x=Math.PI; dish.position.y=22; dishG.add(dish);
-    for(let k=0;k<3;k++){ const a=k*2.094; const strut=new THREE.Mesh(new THREE.CylinderGeometry(0.3,0.3,22,5), whiteMat); strut.position.set(Math.cos(a)*10,-8,Math.sin(a)*10); strut.rotation.z=Math.cos(a)*0.45; strut.rotation.x=-Math.sin(a)*0.45; dishG.add(strut); } const feed=new THREE.Mesh(new THREE.CylinderGeometry(1.2,1.2,3,8), new THREE.MeshStandardMaterial({color:0x333})); feed.position.y=-18; dishG.add(feed);
-    complex.dishGroup=dishG; clickable(dg,'tower','tower'); addLabel('deep-space dish: uplink to Weyland-Yutani', tx+70, ty+10, 60, '#4fd1c5', 'mid', true).userData.role='tower'; }
+    clickable(g,'tower','tower'); complex.towerGroup=g; addLabel('CELLULAR / 5G COLONY COVERAGE', tx, ty, H+28, '#4fd1c5', 'mid');
+    const ant=new Kit(g);for(let level=0;level<2;level++)for(let n=0;n<3;n++){const a=n*Math.PI*2/3,xx=Math.cos(a)*3,zz=Math.sin(a)*3;ant.box(M.white,xx,H-7-level*6,zz,.75,3.8,.3,[0,-a,0]);ant.pipe(M.dark,[xx,H-9-level*6,zz],[xx,0,zz],.055);}ant.finish();
+    secureCompound(tx,ty,158,158);facility('CELLULAR / 5G BASEBAND',tx+30,ty+28,18,8,12,{type:'network'});road([[tx,ty+40],[tx+79,ty+40],[tx+79,ty],[tx+72,ty]],10,1.04,0x454b4d);
+  }
+  buildSpaceDish();
   // ---- flows, markers, rovers, sector labels ----
   flowPower=new FlowLayer([...spanCurves, ...feederCurves, ...trunkCurves, ...towerCurves, ...solarCurves], 0xfff2b0, 2, 3, 30);
   flowWater=new FlowLayer([], 0x9ad0ff, 7, 4, 30);
@@ -2575,13 +3037,13 @@ function build(){
     const lab=textSprite(l,'#fff',22); lab.position.y=5; lab.scale.multiplyScalar(0.22); g.add(lab); world.add(g); clickable(g,'rover:'+name,'rover',name); rovers[name]={g,lab,from:null,to:null,q:null,t0:0}; }
   for(let s=0;s<ns;s++){ const [x,y]=polar(s*60+30,R+70); addLabel(`Sector ${s+1}`,x,y,8,'#9aa3b5','mid'); }
   // ---- inner ring props: vehicle bay, med lab, school, containers, greenhouses, tanks ----
-  { const [ga,gr]=c.garage; const [gx,gy]=polar(ga,gr); complex.garage=clickable(box(gx,gy,44,14,30,0x5c6070,0xf2c14e,-ga*Math.PI/180),'garage','garage'); addLabel('vehicle bay', gx, gy, 24, '#f2c14e','near');
-    const [ma,mr]=c.medlab; const [mx,my]=polar(ma,mr); clickable(box(mx,my,36,12,26,0x6a7078,0xe2574d,-ma*Math.PI/180),'medlab','medlab'); addLabel('med lab', mx, my, 22, '#e2574d','near');
-    const [sa,sr]=c.school; const [sx,sy]=polar(sa,sr); clickable(box(sx,sy,40,10,26,0x6a7078,0x5aa9ff,-sa*Math.PI/180),'school','school'); addLabel('school', sx, sy, 20, '#5aa9ff','near');
-    const cont=new THREE.InstancedMesh(new THREE.BoxGeometry(12,5,5), new THREE.MeshStandardMaterial({color:0x9a5a3a, roughness:.7}), 24); let ci=0; for(let k=0;k<12;k++){ const a=128+k*3.2, r=200+(k%2)*8; const [x,y]=polar(a,r); m4.compose(sph(x,y,2.6), quatAt(x,y,-a*Math.PI/180), new THREE.Vector3(1,1,1)); cont.setMatrixAt(ci++,m4); if(k%3===0){ m4.compose(sph(x,y,7.8), quatAt(x,y,-a*Math.PI/180), new THREE.Vector3(1,1,1)); cont.setMatrixAt(ci++,m4); } } cont.count=ci; cont.castShadow=true; world.add(cont); addLabel('storage containers', ...polar(146,205), 16, '#9a5a3a','near');
+  { const [ga,gr]=c.garage; const [gx,gy]=polar(ga,gr); complex.garage=clickable(facility('VEHICLE SERVICE / DEPOT',gx,gy,44,14,30,{type:'workshop',yaw:-ga*Math.PI/180,color:0x929582}),'garage','garage'); addLabel('vehicle bay', gx, gy, 24, '#f2c14e','near');
+    const [ma,mr]=c.medlab; const [mx,my]=polar(ma,mr); clickable(facility('MEDICAL / RESEARCH',mx,my,36,12,26,{yaw:-ma*Math.PI/180,color:0x929c90}),'medlab','medlab'); addLabel('med lab', mx, my, 22, '#e2574d','near');
+    const [sa,sr]=c.school; const [sx,sy]=polar(sa,sr); clickable(facility('SCHOOL / COMMUNITY',sx,sy,40,10,26,{yaw:-sa*Math.PI/180,color:0x9c9b84}),'school','school'); addLabel('school', sx, sy, 20, '#5aa9ff','near');
+    buildCargoDepot();
     for(let k=0;k<3;k++){ const a=246+k*10; const [x,y]=polar(a,205); const dome=new THREE.Mesh(new THREE.SphereGeometry(11,20,10,0,Math.PI*2,0,Math.PI/2), new THREE.MeshPhysicalMaterial({color:0x9ad0ff, transparent:true, opacity:.35, roughness:.1, metalness:0})); dome.position.copy(sph(x,y,0.8)); dome.quaternion.copy(quatAt(x,y)); world.add(dome); } addLabel('hydroponics', ...polar(256,205), 18, '#9bd36a','near');
     for(let k=0;k<4;k++){ const a=8+k*9; const [x,y]=polar(a,205); const tk=cyl(x,y,6,16,0xb8bcc4); tk.castShadow=true; } addLabel('oxygen and fuel tanks', ...polar(22,205), 24, '#c9cfdb','near');
-    for(let k=0;k<2;k++){ const [x,y]=polar(ga-4+k*5, gr-18); const v=box(x,y,12,5,7,k?0x9bd36a:0x5aa9ff,null,-ga*Math.PI/180); v.castShadow=true; } }
+    for(let k=0;k<2;k++){ const [x,y]=polar(ga-4+k*5, gr-18); const v=detailedVehicle(k?0x829379:0x738c96,'parked-'+k);v.position.copy(sph(x,y,1.08));v.quaternion.copy(quatAt(x,y,-ga*Math.PI/180));world.add(v); } }
   // ---- landing pad east of the city ----
   { const [lx,ly]=c.landing_pad_pos; cap(90,0.9,0x4a4f5a,6,48,0,lx,ly); const ring=new THREE.Mesh(new THREE.TorusGeometry(88,1.2,6,64), new THREE.MeshBasicMaterial({color:0xf2c14e})); ring.position.copy(sph(lx,ly,1.6)); ring.quaternion.copy(quatAt(lx,ly)); ring.rotateX(Math.PI/2); world.add(ring);
     complex.padLights=pointsLayer(12, TEX.glow, 0xffb060, 30, true); setPoints(complex.padLights, Array.from({length:12},(_,k)=>{ const [px,py]=polar(k*30,86); return [lx+px, ly+py]; }), 2);
@@ -2602,9 +3064,9 @@ function build(){
   squadGroup=new THREE.Group(); const mMat=new THREE.MeshStandardMaterial({color:0x5a6a3a, roughness:.8}); for(let k=0;k<4;k++){ const m=new THREE.Group(); const body=new THREE.Mesh(new THREE.CapsuleGeometry(1.2,3,4,8), mMat); body.position.y=3.6; m.add(body); const helm=new THREE.Mesh(new THREE.SphereGeometry(1.3,8,8), new THREE.MeshStandardMaterial({color:0x3a4a2a})); helm.position.y=6.6; m.add(helm); const rifle=new THREE.Mesh(new THREE.BoxGeometry(0.6,0.6,4), new THREE.MeshStandardMaterial({color:0x222})); rifle.position.set(1.4,4,1); m.add(rifle); m.position.set((k%2)*5-2.5, 0, Math.floor(k/2)*5-2.5); squadGroup.add(m); }
   { const lab=textSprite('marine squad','#8be05a',22); lab.position.y=12; lab.scale.multiplyScalar(0.5); squadGroup.add(lab); squadGroup.userData.lab=lab; } squadGroup.visible=false; world.add(squadGroup); clickable(squadGroup,'squad','squad');
   markers.ctrl=(()=>{ const n=300; const g=new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(n*3).fill(-99999),3)); g.setAttribute('color', new THREE.Float32BufferAttribute(new Float32Array(n*3),3)); const m=new THREE.Points(g, new THREE.PointsMaterial({map:TEX.dot, vertexColors:true, size:9, transparent:true, depthWrite:false, sizeAttenuation:true})); m.frustumCulled=false; world.add(m); return m; })();
-  industrialDetails();plantDetails();applyLayers();
+  industrialDetails();buildCampus();reactorIndustry();buildOcean();streetSignals();applyLayers();
 }
-function applyLayers(){ updateMapKey();if(!markers.issues) return;spanLines.mesh.visible=true;netLines.mesh.visible=true;for(const key of ["feederLayer","trunkLayer","towerLayer","solarLayer"])if(hub[key])hub[key].mesh.visible=true;if(hub.cableTowerLayer)hub.cableTowerLayer.mesh.visible=true;utilityGroup.visible=!!layers.underground;if(utilityDrops)utilityDrops.visible=layers.water;for(const v of houseDetails.values())v.roof.visible=!layers.cutaway; markers.issues.visible=layers.issues; markers.nonet.visible=layers.nonet; markers.ups.visible=layers.ups; markers.heater.visible=layers.heater; flowPower.mesh.visible=layers.power;if(phaseDropFlow)phaseDropFlow.mesh.visible=layers.power; flowWater.mesh.visible=layers.water; packetsPts.visible=layers.packets; markers.packetsRed.visible=layers.packets; markers.people.visible=layers.people; markers.xenos.visible=layers.threats; markers.marines.visible=layers.threats; labelGroup.visible=layers.labels; if(markers.ctrl) markers.ctrl.visible=layers.ctrl; renderer.shadowMap.enabled=layers.shadows; sun.castShadow=layers.shadows; }
+function applyLayers(){ M.roof.opacity=layers.cutaway?.62:.84;updateMapKey();if(!markers.issues) return;spanLines.mesh.visible=true;netLines.mesh.visible=true;for(const key of ["feederLayer","trunkLayer","towerLayer","solarLayer"])if(hub[key])hub[key].mesh.visible=true;if(hub.cableTowerLayer)hub.cableTowerLayer.mesh.visible=true;utilityGroup.visible=!!layers.underground;if(utilityDrops)utilityDrops.visible=layers.water;for(const v of houseDetails.values())v.roof.visible=true; markers.issues.visible=layers.issues; markers.nonet.visible=layers.nonet; markers.ups.visible=layers.ups; markers.heater.visible=layers.heater; flowPower.mesh.visible=layers.power;if(phaseDropFlow)phaseDropFlow.mesh.visible=layers.power; flowWater.mesh.visible=layers.water; packetsPts.visible=layers.packets; markers.packetsRed.visible=layers.packets; markers.people.visible=layers.people; markers.xenos.visible=layers.threats; markers.marines.visible=layers.threats; labelGroup.visible=layers.labels; if(markers.ctrl) markers.ctrl.visible=layers.ctrl; renderer.shadowMap.enabled=layers.shadows; sun.castShadow=layers.shadows; }
 
 // ---------- per state update ----------
 const tmpC=new THREE.Color();
@@ -2612,7 +3074,7 @@ function tempColor(t){ const u=Math.max(0,Math.min(1,(t+40)/65)); if(u<0.6){ con
 const packetsSeen=new Map();
 function onState(s, first){
   if(!G) return; if(!housesMesh) build();
-  const now=performance.now();updatePhysicalState(s);
+  const now=performance.now();updatePhysicalState(s);updateCargo(s);updateOcean(s);
   const c=G.cfg, ns=c.sectors, hs=s.houses, P=G.poles.x.length, m4=new THREE.Matrix4();
   for(let i=0;i<flatHouses.length;i++){ const col=new THREE.Color([0x898674,0x999786,0x7e8c85,0xb0a48a][G.houses.type[i]]);if(!hs.power[i])col.multiplyScalar(.65);housesMesh.setColorAt(i,col); }
   housesMesh.instanceColor.needsUpdate=true;
@@ -2656,7 +3118,7 @@ function onState(s, first){
   for(let i=0;i<ns;i++){ cabBoxes[i].material.color.setHex(s.sectors[i].cabinet?0x3f6a6a:0x6a3030); rpBoxes[i].material.color.setHex(s.sectors[i].rp_ok?0x6a6d78:0x6a3030); }
   const mc={ONLINE:0x5ec07a,RUNBACK:0xe0b04a,STARTING:0x5aa9ff}[s.reactor.mode]||0xe2574d; complex.core.material.color.setHex(mc);
   const sol=Math.min(1, s.power.solar_kw/60); complex.panels.forEach(p=>{ p.material.emissiveIntensity=0.1+sol*1.2; p.material.emissive.setHex(0x2a5aff); });
-  complex.water.material.color.setHex(s.water.plant?0x2a4a6a:0x4a2a2a); complex.towerLight.material.color.setHex(s.net.uplink?0xff3b3b:0x553030); complex.rings.forEach(r=>r.visible=!!s.net.uplink);
+  complex.water.material.color.setHex(s.water.plant?0x2a4a6a:0x4a2a2a); complex.towerLight.material.color.setHex(s.net.mobile?0xff3b3b:0x553030); complex.rings.forEach(r=>r.visible=!!s.net.mobile);
   complex.mine.material.color.setHex(s.power.mine?0x4a3a2a:0x2a2a2a); complex.steamOn=s.reactor.mode==='ONLINE'||s.reactor.mode==='RUNBACK';
   for(let i=0;i<ns;i++){ const it=s.sectors[i].road; roadMeshes.ring[i].material.color.setHex(it<20?0x8a3a3a:(it<50?0x5a4a3a:0x30343d)); }
   // live labels
@@ -2666,9 +3128,9 @@ function onState(s, first){
     else if(r==='reactor') retext(l, `REACTOR ${s.reactor.mode}: ${s.reactor.power_mw} MW el, ${s.reactor.thermal_mw} MW th, core ${s.reactor.core_temp} C`, {ONLINE:'#5ec07a',RUNBACK:'#e0b04a',STARTING:'#5aa9ff'}[s.reactor.mode]||'#e2574d');
     else if(r==='solar') retext(l, `solar field ${s.power.solar_kw} kW`, '#e0b04a'); else if(r==='wplant') retext(l, `water plant ${s.water.plant?s.water.plant_m3_h+' m3/h':'no heat'}`, s.water.plant?'#5aa9ff':'#e2574d');
     else if(r==='mine') retext(l, `mine ${s.power.infra.mine} kW${s.power.mine_frac<1?' (curtailed)':''}`, s.power.mine?'#a08a2a':'#777'); else if(r==='wproc') retext(l, `waste processing, ${s.finance.waste_station} loads received`, '#9bd36a');
-    else if(r==='tower') retext(l, `deep-space dish: uplink ${s.net.uplink?'OK':'LOST'}, ${s.net.packets_per_min} pkt/min`, s.net.uplink?'#4fd1c5':'#e2574d'); }
+    else if(r==='tower') retext(l, `space uplink ${s.net.uplink?'OK':'LOST'}, ${s.net.packets_per_min} pkt/min`, s.net.uplink?'#4fd1c5':'#e2574d'); }
   // rovers: interpolate between the last two samples
-  for(const r of s.rovers){ const rv=rovers[r.name]; if(!rv) continue; const xx=r.x-Math.sin(r.heading)*2.2,yy=r.y+Math.cos(r.heading)*2.2;rv.from=rv.g.position.clone();rv.to=sph(xx,yy,1.08);rv.q=quatAt(xx,yy,-r.heading);const grade=Math.atan2(terrainH(r.x+Math.cos(r.heading)*3,r.y+Math.sin(r.heading)*3)-terrainH(r.x-Math.cos(r.heading)*3,r.y-Math.sin(r.heading)*3),6);rv.q.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,0,1),grade));rv.distanceFrom=rv.distance??r.distance_m;rv.distanceTo=r.distance_m; rv.t0=now; rv.state=r.state; if(first) rv.g.position.copy(rv.to); retext(rv.lab, `${r.name} ${r.state.toLowerCase().replace(/_/g,' ')}`, '#fff'); }
+  for(const r of s.rovers){ if(!rovers[r.name]){const g=r.name.startsWith('freight')?freightVehicle():detailedVehicle([0x74918b,0xaaa38b,0x93664f,0x6e818c][Number(r.name.split('-').at(-1))%4],r.name);const lab=textSprite(r.name,'#ddd',22);lab.position.y=4;lab.scale.multiplyScalar(.18);g.add(lab);world.add(g);clickable(g,'rover:'+r.name,'rover',r.name);rovers[r.name]={g,lab,t0:0};} const rv=rovers[r.name];if(rv.g.userData.cargo)rv.g.userData.cargo.visible=!!r.load; const lane=r.state==='IDLE'?8.5:2.2,xx=r.x-Math.sin(r.heading)*lane,yy=r.y+Math.cos(r.heading)*lane;rv.from=rv.g.position.clone();rv.to=sph(xx,yy,1.08);rv.q=quatAt(xx,yy,-r.heading);const grade=Math.atan2(terrainH(r.x+Math.cos(r.heading)*3,r.y+Math.sin(r.heading)*3)-terrainH(r.x-Math.cos(r.heading)*3,r.y-Math.sin(r.heading)*3),6);rv.q.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,0,1),grade));rv.distanceFrom=rv.distance??r.distance_m;rv.distanceTo=r.distance_m; rv.t0=now; rv.state=r.state; if(first||!rv.initialized){rv.g.position.copy(rv.to);rv.g.quaternion.copy(rv.q);rv.initialized=true;}rv.lab.visible=!r.name.startsWith('transit')&&camera.position.distanceTo(rv.g.position)<140; retext(rv.lab, `${r.name} ${r.state.toLowerCase().replace(/_/g,' ')}`, '#fff'); }
   for(const p of s.net.packets){ const key=p.t+':'+p.from+':'+p.id; if(!packetsSeen.has(key)) packetsSeen.set(key,{t0:now,p}); }
   const e=s.env; document.getElementById('banner').innerHTML=`<b>${s.time}</b> &nbsp; ${e.t_out} C, wind ${e.wind} m/s${e.storm?' <span class="bad">STORM</span>':''}${e.precip==='snow'?' snow':''}${e.night?' night':' day'}${s.paused?' <span class="warn">PAUSED</span>':''} &nbsp; ${s.speed} min/s`;
   const fin=document.getElementById('finished'); if(s.finished){ fin.style.display='flex'; fin.textContent='COLONY LOST: '+s.finish_reason+'. A new colony is founded in two minutes.'; } else fin.style.display='none';
@@ -2682,10 +3144,11 @@ const clock={hour:12, speed:20, at:0, night:false, daylight:0.1}; const sunDir=n
 
 // ---------- packets ----------
 function packetPath(pk){ const c=G.cfg, HR=c.hub_radius, WR=c.wall_radius; const path=[];
-  if(pk.from==='house'){ let i=pk.id, p=G.houses.pole[i]; path.push(...(houseNetDrops[i]||[]).slice().reverse());let guard=0;while(p>=0&&guard++<40){path.push(...netSpanPaths[p].slice().reverse());p=G.poles.parent[p];} const s=G.houses.sector[i]; const [cx,cy]=polar(s*60+4.5,HR+20); path.push(sph(cx,cy,10)); path.push(sph(88,10,20)); }
-  else path.push(sph(88,10,20));
+  if(pk.from==='house'){ let i=pk.id, p=G.houses.pole[i]; path.push(...(houseNetDrops[i]||[]).slice().reverse());let guard=0;while(p>=0&&guard++<40){path.push(...netSpanPaths[p].slice().reverse());p=G.poles.parent[p];} const s=G.houses.sector[i]; const [cx,cy]=polar(s*60+4.5,HR+20); path.push(sph(cx,cy,10)); path.push(sph(88,34,18)); }
+  else path.push(sph(88,34,18));
   if(pk.kind==='reactor'||pk.kind==='lost'){ path.push(sph(-HR+10,8,21)); path.push(sph(-WR-40,8,25)); path.push(sph(c.reactor_pos[0]+70,8,25)); path.push(sph(c.reactor_pos[0],c.reactor_pos[1],30)); }
-  else if(pk.uplink){ path.push(sph(-HR+10,8,21)); path.push(sph(-WR-40,8,25)); path.push(sph(c.tower_junction[0]+7,8,25)); path.push(sph(c.tower_pos[0]+7,c.tower_pos[1]+40,25)); path.push(sph(c.tower_pos[0],c.tower_pos[1],120)); }
+  else if(pk.uplink){path.push(...spaceFiberPath);path.push(sph(c.dish_pos[0]+44,c.dish_pos[1],12));}
+
   return path; }
 function updatePackets(){ const now=performance.now(); const good=[], bad=[]; for(const [key,v] of packetsSeen){ const u=(now-v.t0)/2200; if(u>=1){ packetsSeen.delete(key); continue; } if(!v.path){const pts=packetPath(v.p),cum=[0];for(let i=1;i<pts.length;i++)cum.push(cum[i-1]+pts[i].distanceTo(pts[i-1]));v.path={pts,cum,len:cum.at(-1)};}const q=sample(v.path,u); (v.p.uplink||v.p.kind==='reactor'?good:bad).push(q); }
   const put=(layer,arr)=>{ const a=layer.geometry.attributes.position; for(let i=0;i<a.count;i++){ if(i<arr.length) a.setXYZ(i,arr[i].x,arr[i].y,arr[i].z); else a.setXYZ(i,0,-99999,0);} a.needsUpdate=true; }; put(packetsPts, good); put(markers.packetsRed, bad); }
@@ -2693,22 +3156,31 @@ function updatePackets(){ const now=performance.now(); const good=[], bad=[]; fo
 // ---------- camera, picking, info panel ----------
 let flyAnim=null;
 function flyTo(x,y,dist){ const p=sph(x,y), n=p.clone().normalize(); const side=new THREE.Vector3().crossVectors(n, new THREE.Vector3(0,0,1)).normalize(); if(side.lengthSq()<1e-6) side.set(1,0,0); const back=new THREE.Vector3().crossVectors(side,n).normalize(); const pos=p.clone().add(n.multiplyScalar(dist*0.85)).add(back.multiplyScalar(dist*0.55)); flyAnim={from:camera.position.clone(), to:pos, tfrom:controls.target.clone(), tto:p, t0:performance.now()}; }
-document.querySelectorAll('#fly button').forEach(b=>b.onclick=()=>{ const c=G.cfg; const f=b.dataset.f; if(f==='home'){const i=selected?.kind==='house'?selected.id:0;selected={kind:'house',id:i};flyTo(G.houses.x[i],G.houses.y[i],42);renderInfo();} else if(f==='street') flyTo(...polar(17,270),90); else if(f==='hub') flyTo(0,0,420); else if(f==='gate') flyTo(-c.wall_radius,0,300); else if(f==='reactor') flyTo(c.reactor_pos[0],c.reactor_pos[1],420); else if(f==='solar') flyTo(c.solar_pos[0],c.solar_pos[1],320); else if(f==='tower') flyTo(c.tower_pos[0],c.tower_pos[1],320); else if(f==='mine') flyTo(c.mine_pos[0],c.mine_pos[1],320); else if(f==='city') flyTo(0,0,1500); else flyAnim={from:camera.position.clone(), to:new THREE.Vector3(1200,RP+4200,3800), tfrom:controls.target.clone(), tto:new THREE.Vector3(0,RP,0), t0:performance.now()}; });
+document.querySelectorAll('#fly button').forEach(b=>b.onclick=()=>{ const c=G.cfg; const f=b.dataset.f; if(f==='home'){const i=selected?.kind==='house'?selected.id:0;selected={kind:'house',id:i};flyTo(G.houses.x[i],G.houses.y[i],42);renderInfo();} else if(f==='street') flyTo(...polar(17,270),90); else if(f==='hub') flyTo(0,0,420); else if(f==='gate') flyTo(-c.wall_radius,0,300); else if(f==='reactor') flyTo(c.reactor_pos[0],c.reactor_pos[1],420); else if(f==='solar') flyTo(c.solar_pos[0],c.solar_pos[1],320); else if(f==='dish') flyTo(...c.dish_pos,210);else if(f==='intake') flyTo(...c.ocean_intake_pos,240);else if(f==='cargo')flyTo(...polar(...c.cargo_depot),140);else if(f==='tower') flyTo(c.tower_pos[0],c.tower_pos[1],320); else if(f==='mine') flyTo(c.mine_pos[0],c.mine_pos[1],320); else if(f==='city') flyTo(0,0,1500); else flyAnim={from:camera.position.clone(), to:new THREE.Vector3(1200,RP+4200,3800), tfrom:controls.target.clone(), tto:new THREE.Vector3(0,RP,0), t0:performance.now()}; });
 const ray=new THREE.Raycaster(); const mouse=new THREE.Vector2(); ray.params.Points.threshold=8; 
 let downAt=null;
 renderer.domElement.addEventListener('pointerdown', ev=>{ downAt=[ev.clientX,ev.clientY]; });
 renderer.domElement.addEventListener('pointerup', ev=>{ if(!downAt) return; const moved=Math.hypot(ev.clientX-downAt[0], ev.clientY-downAt[1]); downAt=null; if(moved>4) return; pick(ev, true); });
-renderer.domElement.addEventListener('dblclick', ev=>{ setMouse(ev); ray.setFromCamera(mouse,camera); const hit=ray.intersectObject(planetMesh,false)[0]; if(hit){ const d=camera.position.distanceTo(controls.target); const to=camera.position.clone().sub(controls.target).add(hit.point); flyAnim={from:camera.position.clone(), to, tfrom:controls.target.clone(), tto:hit.point, t0:performance.now()}; } });
-let lastHover=0;renderer.domElement.addEventListener('mousemove', ev=>{const now=performance.now();if(now-lastHover<80)return;lastHover=now;pick(ev,false);});
+renderer.domElement.addEventListener('dblclick',ev=>{pick(ev,true);if(selected)focusSelection();else{setMouse(ev);ray.setFromCamera(mouse,camera);const hit=ray.intersectObject(planetMesh,false)[0];if(hit)focusPoint(hit.point,Math.min(150,camera.position.distanceTo(hit.point)*.5));}});
+let lastHover=0;renderer.domElement.addEventListener('mousemove', ev=>{const now=performance.now();if(downAt||now-lastHover<200)return;lastHover=now;pick(ev,false);});
 function setMouse(ev){ const r=renderer.domElement.getBoundingClientRect(); mouse.set(((ev.clientX-r.left)/r.width)*2-1, -((ev.clientY-r.top)/r.height)*2+1); return [ev.clientX-r.left, ev.clientY-r.top]; }
 let selected=null;
-function pick(ev, click){ const [mx,my]=setMouse(ev); const tip=document.getElementById('tip'); if(!housesMesh||!S){ tip.style.display='none'; return; } ray.setFromCamera(mouse,camera);
-  {const hit=ray.intersectObjects(layers.underground?[...potableBatches,...utilityBatches]:potableBatches,false)[0];if(hit){const tag=hit.object.userData.tags[hit.instanceId];if(tag&&tag.id>=0){if(click){selected={kind:'pipe',id:tag.id,extra:tag.system};renderInfo();}tipHtml(tip,mx,my,`<b>${tag.system} pipe ${tag.id+1}</b><br>click for material, diameter and flow`);return;}}}
-  const detailHits=ray.intersectObjects([...houseDetails.values()].map(v=>v.g),true);if(detailHits.length){const i=detailHits[0].object.userData.house;if(i!==undefined){if(click){selected={kind:'house',id:i};renderInfo();}tipHtml(tip,mx,my,houseInfo(i,true));return;}}
-  const hh=ray.intersectObject(housesMesh,false)[0]; if(hh){ const i=hh.instanceId; if(click){ selected={kind:'house', id:i}; renderInfo(); } tipHtml(tip,mx,my,houseInfo(i,true)); return; }
-  const hits=ray.intersectObjects(clickables,true); if(hits.length){ const cl=hits[0].object.userData.click||hits[0].object.parent?.userData.click; if(cl){ if(click){ selected={kind:cl.kind, id:cl.id, extra:cl.extra}; renderInfo(); } tipHtml(tip,mx,my,`<b>${cl.id}</b><br><span class="dim">click for live stats</span>`); return; } }
-  const pp=ray.intersectObject(markers.people,false)[0]; if(pp){ const i=pp.index; const per=S.people[i]; if(per){ if(click){ selected={kind:'person', id:i}; renderInfo(); } tipHtml(tip,mx,my,personInfo(per)); return; } }
-  tip.style.display='none'; }
+function pick(ev,click){
+ const [mx,my]=setMouse(ev),tip=document.getElementById('tip');if(!housesMesh||!S)return;ray.setFromCamera(mouse,camera);const candidates=[];
+ const add=(hits,decode)=>{if(hits.length){const item=decode(hits[0]);if(item)candidates.push({...item,hit:hits[0]});}};
+ add(ray.intersectObjects([polePickMesh,...cabinetMeters].filter(Boolean),false),h=>({kind:'pole',id:h.object===polePickMesh?h.instanceId:h.object.userData.pole}));
+ add(ray.intersectObjects([...houseDetails.values()].map(v=>v.g),true),h=>({kind:'house',id:h.object.userData.house}));
+ add(ray.intersectObject(housesMesh,false),h=>({kind:'house',id:h.instanceId}));
+ add(ray.intersectObjects(clickables,true),h=>h.object.userData.click||h.object.parent?.userData.click);
+ if(click||document.querySelector('[data-view="water"]').getAttribute('aria-pressed')==='true'){
+  const meshes=potableBatches.filter(m=>m.material===MAT['pipe-steel']);if(layers.underground)meshes.push(...utilityBatches);
+  add(ray.intersectObjects(meshes,false),h=>{const tag=h.object.userData.tags[h.instanceId];return tag&&tag.id>=0?{kind:'pipe',id:tag.id,extra:tag.system}:null;});
+ }
+ candidates.sort((a,b)=>a.hit.distance-b.hit.distance);const result=candidates[0];if(!result){tip.style.display='none';return;}
+ if(click){selected={kind:result.kind,id:result.id,extra:result.extra};renderInfo();}
+ const html=result.kind==='house'?houseInfo(result.id,true):result.kind==='pole'?`<b>POLE ${String(result.id+1).padStart(3,'0')} · L1 / L2 / L3 / N</b><br>${((poleLoads[result.id]||0)/1000).toFixed(1)} kW · ${S.poles.span[result.id]?'energized':'isolated'}<br>F / double-click: inspect meter`:`<b>${result.kind} ${result.id}</b><br>F / double-click: focus`;
+ tipHtml(tip,mx,my,html);
+}
 function tipHtml(tip,mx,my,html){ tip.innerHTML=html; tip.style.display='block'; tip.style.left=(mx+14)+'px'; tip.style.top=(my+14)+'px'; }
 function houseInfo(i, short){ const h=S.houses, ctl=S.control; const prog=ctl.ext[i]?`${ctl.programs[i]}: ${ctl.reasons[i]} (target ${ctl.targets[i]} C)`:`built-in thermostat, target ${ctl.targets[i]} C`; return `<b>House ${i+1}</b> (Sector ${G.houses.sector[i]+1}, ${G.types[G.houses.type[i]]}, ${G.houses.residents[i]} residents)<br>indoor ${h.t[i]} C, heater ${h.heater[i]?'on':'off'}, draw ${h.draw[i]} W${h.limit[i]?' (limit '+h.limit[i]+' W)':''}<br>power ${h.power[i]?(h.ups[i]?'sector UPS':'grid'):'<span class="bad">none</span>'}, water ${h.water[i]?'ok':'<span class="bad">no</span>'}${h.burst[i]?', <span class="bad">pipes burst</span>':''}<br>pressure ${S.hydraulics.pressure_kpa[i]} kPa · delivered ${S.hydraulics.delivered_l[i]} L/tick · leak ${S.hydraulics.leak_l[i]} L/tick<br>internet ${h.net[i]?'online':'<span class="warn">offline</span>'}, aeration sludge ${Math.round(h.sludge[i]*100)}%<br><span class="dim">program:</span> ${prog}`+(short?'':`<br>pole ${G.houses.pole[i]}`); }
 function personInfo(per){ const st=['at home','walking to the hub','at the hub','walking home'][per[2]]; return `<b>Colonist</b> from house ${per[3]+1}, ${st}`; }
@@ -2716,6 +3188,7 @@ function rows(pairs){ return '<table>'+pairs.map(([k,v])=>`<tr><td class="dim">$
 function renderInfo(){ const box=document.getElementById('info'); if(!selected||!S){ box.style.display='none'; return; } const s=S, c=G.cfg; let title='', body='';
   const k=selected.kind, x=selected.extra;
   if(k==='house'){ title=`House ${selected.id+1}`; body=houseInfo(selected.id,false)+`<div style="margin-top:6px"><a href="/house?id=${selected.id+1}" target="_blank" style="color:#5aa9ff">open the house page: gauges, history, log</a></div>`; }
+  else if(k==='pole'){title=`Pole ${Number(selected.id)+1} · distribution board`;body=rows([['circuit','L1 / L2 / L3 + neutral'],['load',((poleLoads[selected.id]||0)/1000).toFixed(2)+' kW'],['grid',s.poles.span[selected.id]?'energized':'isolated'],['fibre',s.poles.net[selected.id]?'online':'offline'],['inspect','F / double-click to focus the meter']]);}
   else if(k==='pipe'){const e=x==='water'?G.utilities.links[selected.id]:G.utilities.drainage.find(d=>d.name===x)?.links[selected.id];title=`${x} / pipe ${selected.id+1}`;if(e){body=rows([['material',e.material],['internal diameter',Math.round(e.diameter_m*1000)+' mm'],['length',e.length_m.toFixed(2)+' m'],...(x==='water'?[['flow',s.hydraulics.flow_l_s[selected.id]+' L/s'],['velocity',s.hydraulics.velocity_m_s[selected.id]+' m/s'],['head loss',s.hydraulics.headloss_m[selected.id]+' m'],['insulation',e.insulation_mm+' mm / heat traced']]:[['inflow',(s.hydraulics.drainage_l_s[x==='sanitary'?0:1][selected.id])+' L/s'],['grade',(e.slope*100).toFixed(1)+' %'],['full-bore capacity',(e.capacity_m3_s*1000).toFixed(2)+' L/s']])]);}}
   else if(k==='person'){ const per=s.people[selected.id]; title='Colonist'; body=per?personInfo(per):'went home'; }
   else if(k==='substation'){ title='Main substation'; body=rows([['available',s.power.available_kw+' kW'],['load',s.power.demand_kw+' kW'],['deficit',s.power.deficit_kw+' kW'],['shedding level',s.power.shedding],['trunk line',s.power.trunk?'ok':'CUT'],['feeders online',s.power.feeder.filter(Boolean).length+'/6'],['solar in',s.power.solar_kw+' kW'],['mine',s.power.infra.mine+' kW'],['road heating',s.power.infra.road_heating+' kW'],['lamps',s.power.infra.lamps+' kW'],['ups charging',s.power.infra.ups_charge+' kW']]); }
@@ -2728,11 +3201,12 @@ function renderInfo(){ const box=document.getElementById('info'); if(!selected||
   else if(k==='pump'||k==='tank'){ title=k==='pump'?'Pump station':'Water tank'; body=rows([['tank',s.water.tank_m3+' / '+s.water.tank_cap+' m3'],['hydraulic solve',s.hydraulics.converged?'converged':'residual '+s.hydraulics.residual_m.toFixed(3)+' m'],['sewage held',s.hydraulics.sewer_storage_m3+' m3'],['storm water held',s.hydraulics.storm_storage_m3+' m3'],['overflow total',s.hydraulics.overflow_m3+' m3'],['flow to houses',s.water.flow_m3_h+' m3/h'],['from the plant',s.water.plant_m3_h+' m3/h'],['pump power',s.water.pump?'ok':'NONE'],['houses with water',s.water.houses_ok+'/300'],['frozen / burst',s.water.frozen+' / '+s.water.burst]].concat(s.water.sector_m3_h.map((v,i)=>['sector '+(i+1), v+' m3/h']))); }
   else if(k==='reactor'){ const r=s.reactor; title='Reactor, atmosphere processor'; body=rows([['mode',r.mode],['electric',r.power_mw+' MW (setpoint '+r.setpoint_mw+')'],['thermal',r.thermal_mw+' MW'],['to grid',r.available_mw+' MW'],['core',r.core_temp+' C'],['coolant',r.coolant_temp+' C, flow '+Math.round(r.flow*100)+'%'],['decay heat',r.decay_mw+' MW'],['pumps A / B',r.pump_a+' / '+r.pump_b],['heat exchanger',r.hx],['pump batteries',r.battery_h+' h'],['control link',r.link?'ok':'LOST'],['faults',r.faults.join(', ')||'none'],['marines',r.marines?'in the sublevels':'no']]); }
   else if(k==='solar'){ title='Solar field'; body=rows([['output',s.power.solar_kw+' kW'],['daylight',Math.round(s.env.daylight/0.3*100)+'% of a clear day'],['dust',Math.round(s.env.dust*100)+'%']]); }
-  else if(k==='wplant'){ title='Water plant'; body=rows([['state',s.water.plant?'melting ice':'stopped'],['reactor heat',s.water.heat?'available':'none'],['output',s.water.plant_m3_h+' m3/h'],['tank in the city',s.water.tank_m3+' m3']]); }
+  else if(k==='wplant'||k==='intake'){ title=k==='intake'?'Ocean intake / heated well':'Ocean water treatment'; body=rows([['source','frozen saline ocean'],['state',s.water.plant?'melting / filtering / desalinating':'stopped'],['raw intake',s.water.raw_m3_h+' m³/h'],['treated water',s.water.plant_m3_h+' m³/h'],['brine return',s.water.brine_m3_h+' m³/h'],['heat used / available',s.water.heat_kw+' / '+s.water.heat_available_kw+' kW'],['recovery','85%'],['tank in the city',s.water.tank_m3+' m³']]); }
   else if(k==='rad'){ title='Radioactive waste storage'; body=rows([['load',s.power.infra.waste_storage+' kW'],['state','sealed'],['upkeep','3000 cr/month, colony']]); }
   else if(k==='mine'){ title='Mine'; body=rows([['load',s.power.infra.mine+' kW'],['state',s.power.mine?(s.power.mine_frac<1?'curtailed to '+Math.round(s.power.mine_frac*100)+'%':'working'):'stopped'],['income','3 cr/min to the colony while powered']]); }
   else if(k==='wproc'){ title='Waste processing'; body=rows([['loads received',s.finance.waste_station],['sector bins',s.sectors.map(x=>Math.round(x.waste*100)+'%').join(' ')]]); }
-  else if(k==='tower'){ title='Radio tower'; body=rows([['uplink',s.net.uplink?'OK':'LOST'],['line power',s.power.tower_line?'ok':'cut'],['comms node',s.net.comms?'ok':'down'],['traffic',s.net.packets_per_min+' packets/min']]); }
+  else if(k==='tower'){title='Cellular / 5G base station';body=rows([['role','local mobile communications'],['coverage',s.net.mobile?'online':'offline'],['line power',s.power.tower_line?'ok':'cut']]);}
+  else if(k==='dish'){title='Deep-space tracking complex';body=rows([['reflector','64 m / parabolic'],['role','Weyland-Yutani space uplink'],['uplink',s.net.uplink?'OK':'LOST'],['traffic',s.net.packets_per_min+' packets/min']]);}
   else if(k==='garage'){ title='Vehicle bay'; body=rows(s.rovers.map(r=>[r.name, r.state.toLowerCase().replace(/_/g,' ')+(r.job?' ('+r.job+')':'')])); }
   else if(k==='medlab'){ title='Med lab'; body=rows([['load','part of ops center'],['cold houses',s.sectors.reduce((a,x)=>a+(x.min_t<10?1:0),0)+' sectors with houses below 10 C']]); }
   else if(k==='school'){ title='School'; body=rows([['residents walking now',s.people.length],['storm',s.env.storm?'closed':'open']]); }
@@ -2751,7 +3225,7 @@ window.addEventListener('resize', resize); resize();
 let t0=performance.now();
 function frame(){ const now=performance.now(); const t=(now-t0)/1000;
   if(flyAnim){ const u=Math.min(1,(now-flyAnim.t0)/1200); const k=u*u*(3-2*u); camera.position.lerpVectors(flyAnim.from, flyAnim.to, k); controls.target.lerpVectors(flyAnim.tfrom, flyAnim.tto, k); if(u>=1) flyAnim=null; }
-  controls.update(); updateDetail(); updateUtilityFlow(t);
+  updateCameraMotion(now);controls.update(); updateDetail(); updateUtilityFlow(t);
   { const hour=(clock.hour + clock.speed*(now-clock.at)/1000/60)%24; const a=(hour-6)/24*Math.PI*2; sunDir.set(Math.cos(a)*12000, 3200, Math.sin(a)*12000).normalize(); sun.position.copy(sunDir).multiplyScalar(12000); sunSprite.position.copy(sunDir).multiplyScalar(48000);
     const dl=Math.max(0, Math.sin(Math.PI*(hour-6)/12))*(weather.storm?0.2:1); sun.intensity=0.8+1.6*dl; sun.color.setHSL(0.08, 0.6, 0.55+0.25*dl); planetMat.uniforms.uSun.value.copy(sun.position).normalize(); planetMat.uniforms.uTime.value=t;
     const wantFog = weather.storm ? 0.00055 : (weather.precip==='snow' ? 0.00018 : 0.0); scene.fog.density += (wantFog-scene.fog.density)*0.05; scene.fog.color.setHex(weather.storm?0x3a3e48:0x2a2e38);
@@ -2760,7 +3234,7 @@ function frame(){ const now=performance.now(); const t=(now-t0)/1000;
       for(let i=0;i<p.count;i++){ let x=p.getX(i), y=p.getY(i), z=p.getZ(i); y-=(weather.storm?60:25)*dt*4; x+=w*dt*4; z+=Math.sin(t*3+i)*0.5; if(y<0){ y=500; x=(Math.random()-0.5)*1600; z=(Math.random()-0.5)*1600; } if(x>800) x=-800; p.setXYZ(i,x,y,z); }
       p.needsUpdate=true; weather.snow.position.copy(c); weather.snow.quaternion.copy(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0), n)); }
     if(weather.tornadoOn){ const tor=weather.tornado; tor.visible=true; tor.material.opacity+= (0.35-tor.material.opacity)*0.02; const ang=t*0.05; const [tx,ty]=[Math.cos(ang)*1100+300, Math.sin(ang)*900]; tor.position.copy(sph(tx,ty,130)); tor.quaternion.copy(quatAt(tx,ty)); tor.rotateY(t*6); } else if(weather.tornado.visible){ const tor=weather.tornado; tor.material.opacity*=0.97; if(tor.material.opacity<0.01) tor.visible=false; } }
-  if(housesMesh){ flowPower.update(t);if(phaseDropFlow)phaseDropFlow.update(t); flowWater.update(t); updatePackets();
+  if(housesMesh){ flowPower.update(t);if(phaseDropFlow)phaseDropFlow.update(t); flowWater.update(t);if(oceanFlow){oceanFlow.update(t);thermalFlow.update(t);complex.deliveryFlow.update(t);} updatePackets();
     for(const g of gates){ if(g.armTarget!==undefined) g.arm.rotation.x+=(g.armTarget-g.arm.rotation.x)*0.15; g.beacons.forEach((b,i)=>{ b.material.opacity=0.3+0.7*Math.max(0,Math.sin(t*8+i*Math.PI)); }); }
     for(const w of lockWedges){ if(w.visible) w.material.opacity=0.10+0.08*Math.sin(t*3); }
     for(const p of xenoPool){ if(p.to){ const u=Math.min(1,(now-p.t0)/Math.max(200,pollGap)); p.g.position.lerpVectors(p.from,p.to,u); p.g.quaternion.slerp(p.q,0.2); const moving=p.state==='hunt'||p.state==='approach'||p.state==='retreat'; p.g.children[0].position.y=4+(moving?Math.abs(Math.sin(t*14))*1.2:0); if(p.state==='attack') p.g.children[1].position.z=5.5+Math.sin(t*20)*1.5; if(p.state==='dying') p.g.rotation.z=Math.min(1.4,p.g.rotation.z+0.1); else p.g.rotation.z=0; } }
@@ -3229,7 +3703,8 @@ def internet_step(w: World):
     c = w.cfg
     S = w.S
     center_ok = w.comms_ok and w.comms_powered
-    w.uplink_ok = center_ok and w.tower_ok and w.tower_line_ok and w.trunk_ok and w.substation_ok
+    w.mobile_online = bool(center_ok and w.tower_ok and w.tower_line_ok)
+    w.uplink_ok = bool(center_ok and w.dish_ok and w.tower_line_ok and w.trunk_ok and w.substation_ok)
     for s in range(S):
         if w.sector_online[s] and w.rp_ok[s]:
             w.cabinet_ups_h[s] = min(2.0, w.cabinet_ups_h[s] + 1 / 240)
@@ -3474,11 +3949,76 @@ def rover_polar(r: Rover):
     return math.degrees(math.atan2(r.y, r.x)) % 360.0, math.hypot(r.x, r.y)
 
 
+def traffic_junctions(c):
+    radii=[c['hub_radius']-22,210]+[c['house_radius_min']-30+k*c['house_ring_step'] for k in range(c['house_rows']+1)]+[c['ring_road_radius']]
+    return [dict(x=polar(s*60,r)[0],y=polar(s*60,r)[1],angle=s*60,sector=s,row=k,offset=s*2+k*3)
+            for s in range(c['sectors']) for k,r in enumerate(radii)]+[dict(x=x,y=y,angle=0,sector=-1,row=i,offset=i*2) for i,(x,y) in enumerate([(-53,0),(0,0),(53,0),(c['tower_junction'][0],0),(c['reactor_pos'][0]+70,0),(c['reactor_pos'][0]+70,220),(c['reactor_pos'][0]+70,620)])]
+
+
+def signal_phase(t,j):
+    phase=(t+j['offset'])%12
+    return phase
+
+
+def make_traffic(c):
+    fleet=[]
+    for i in range(c.get('traffic_vehicles',18)):
+        radius=c['ring_road_radius'] if i%3==0 else c['house_radius_min']-30+(i%c['house_rows'])*c['house_ring_step']
+        r=Rover('transit-'+str(i+1),'transit',*polar(i*137.508%360,radius),state='CIRCULATING',speed=16+i%4*2)
+        r.job={'radius':radius,'direction':1 if i%2 else -1,'cargo':False};r.heading=math.radians(i*137.508%360)+(math.pi/2 if i%2 else -math.pi/2);fleet.append(r)
+    for i in range(2):
+        a,rr=c['cargo_depot'];r=Rover('freight-'+str(i+1),'freight',*polar(a-11+i*9,rr),state='TO_DEPOT',speed=13)
+        r.job={'cargo':True,'radius':rr,'direction':1};fleet.append(r)
+    return fleet
+
+
+def traffic_step(w):
+    for r in w.traffic:
+        if r.kind=='transit':
+            if not r.route:
+                a=math.degrees(math.atan2(r.y,r.x));r.route=arc_waypoints(a,a+r.job['direction']*60,r.job['radius'],2)
+            if math.hypot(r.x,r.y)>w.cfg['ring_road_radius']-5:
+                a=math.degrees(math.atan2(r.y,r.x))%360
+                nearest=int(round(a/60))%6
+                if abs(angle_diff(a,nearest*60))<2 and w.gate_state[nearest]=='LOCKDOWN':r.velocity=0;continue
+            rover_move(w,r)
+            if r.fuel_l<15 and not r.route:r.fuel_l=120  # fuel service at a route endpoint
+        elif r.state in ('TO_DEPOT','RETURN'):
+            if not r.route:
+                aa,rr=w.cfg['cargo_depot'];a=math.degrees(math.atan2(r.y,r.x));r.route=arc_waypoints(a,aa,rr,2)
+            if rover_move(w,r):r.state='WAITING';r.velocity=0
+        elif r.state=='DELIVER':
+            if rover_move(w,r):r.state='UNLOADING';r.timer=8
+        elif r.state=='UNLOADING':
+            r.timer-=1
+            if r.timer<=0:r.load=0;r.state='RETURN';w.cargo['completed']+=1
+    # One rail-mounted crane serves one truck; no container teleport between vehicles.
+    if w.cargo['phase']=='WAIT':
+        ready=[i for i,r in enumerate(w.traffic) if r.kind=='freight' and r.state=='WAITING']
+        if ready and w.cargo['loaded']<24:w.cargo.update(phase='LIFT',progress=0.0,truck=ready[0]);w.traffic[ready[0]].state='LOADING'
+    else:
+        w.cargo['progress']+=1/24
+        if w.cargo['progress']>=1:
+            r=w.traffic[w.cargo['truck']];r.load=1;r.state='DELIVER';a,rr=w.cfg['cargo_depot']
+            r.route=arc_waypoints(a,420,rr,2);w.cargo['loaded']+=1;w.cargo['phase']='WAIT';w.cargo['progress']=0
+
+
 def exterior_route(c, x, y):
     """West gate -> distribution junction -> paved industrial service corridor."""
     gate=(-c['wall_radius']-30,0.0)
     junction=(c['tower_junction'][0],0.0)
     spine=c['reactor_pos'][0]+70
+    # Stop at each service apron, outside the building footprint.
+    for key,stand in [('reactor_pos',55),('water_plant_pos',36),('mine_pos',36),('solar_pos',75),('radwaste_pos',42)]:
+        px,py=c[key]
+        if math.hypot(x-px,y-py)<1:
+            return [gate,(spine,0.0),(spine,py),(px+stand,py)]
+    tx,ty=c['tower_pos']
+    if math.hypot(x-tx,y-ty)<1:
+        return [gate,junction,(tx,ty+40),(tx+79,ty+40),(tx+79,ty),(tx+72,ty)]
+    dx,dy=c['dish_pos']
+    if math.hypot(x-dx,y-dy)<1:
+        return [gate,junction,(tx,ty+40),(tx+30,ty+40),(tx+30,dy+105),(dx+88,dy+105),(dx+88,dy),(dx+72,dy)]
     if abs(y)<20 and x>=spine:
         return [gate,(x,0.0),(x,y)]
     if y < -100 and x > spine:
@@ -3579,25 +4119,24 @@ def rover_move(w: World, r: Rover):
         nx,ny=r.route[1][0]-tx,r.route[1][1]-ty
         turn=abs(math.atan2(math.sin(math.atan2(ny,nx)-math.atan2(dy,dx)),math.cos(math.atan2(ny,nx)-math.atan2(dy,dx))))
         target_speed*=max(.3,1-turn/math.pi)
-    for other in w.rovers:
-        if other is r:continue
+    for other in w.rovers+getattr(w,'traffic',[]):
+        if other is r or (other.state=='IDLE' and not other.route):continue
         ox,oy=other.x-r.x,other.y-r.y
         ahead=(ox*dx+oy*dy)/max(d,1e-6)
         side=abs(ox*dy-oy*dx)/max(d,1e-6)
-        if 0<ahead<10 and side<3 and math.cos(other.heading-r.heading)>.7:
-            target_speed=min(target_speed,max(0,ahead-6))
+        gap=18 if r.kind=='freight' or other.kind=='freight' else 6
+        if 0<ahead<gap+5 and side<3 and math.cos(other.heading-math.atan2(dy,dx))>.7:
+            target_speed=min(target_speed,max(0,ahead-gap))
     r.velocity=min(target_speed,getattr(r,'velocity',0)+2.5)
     r.fuel_l=getattr(r,'fuel_l',120.0)
     if r.fuel_l<=0:r.velocity=0
     budget=r.velocity
     # Synchronized ring-road signals. Keep a 12 m stop line clear of the junction.
-    for sector in range(w.S):
-        ix,iy=polar(sector*60,w.cfg['ring_road_radius'])
-        ox,oy=ix-r.x,iy-r.y
-        ahead=(ox*dx+oy*dy)/max(d,1e-6)
-        lateral=abs(ox*dy-oy*dx)/max(d,1e-6)
-        phase=(w.t+sector*2)%12
-        radial=abs((dx*math.cos(sector*math.pi/3)+dy*math.sin(sector*math.pi/3))/max(d,1e-6))>.7
+    for junction in traffic_junctions(w.cfg):
+        ox,oy=junction['x']-r.x,junction['y']-r.y
+        ahead=(ox*dx+oy*dy)/max(d,1e-6);lateral=abs(ox*dy-oy*dx)/max(d,1e-6)
+        angle=math.radians(junction['angle']);phase=signal_phase(w.t,junction)
+        radial=abs((dx*math.cos(angle)+dy*math.sin(angle))/max(d,1e-6))>.7
         green=phase<5 if radial else 6<=phase<11
         if not green and 11.9<=ahead<35 and lateral<4:
             budget=min(budget,max(0,ahead-12));r.velocity=budget
@@ -3655,6 +4194,7 @@ def roads_step(w: World):
     _sludge_rover(w, sludge)
     for r in w.rovers[2:]:
         _repair_rover(w, r)
+    traffic_step(w)
 
 
 def _go_home(w: World, r: Rover):
@@ -4276,13 +4816,16 @@ def attractor_snapshot(w: World, with_hist: bool):
 
     # water: plant throttles as the tank fills, so inflow = use has one solution
     use = sum(r[3] for r in day) / len(day) if day else w.water_flow_m3_h
-    vmax, cap = c["water_plant_m3_h"], c["water_tank_m3"]
+    nominal, cap = c["water_plant_m3_h"], c["water_tank_m3"]
+    ice=max(0,-w.t_out) if w.t_out<-2 else 0
+    melt_kwh_m3=(2.1*ice+(334 if ice else 0)+4.18*5)/3.6
+    vmax=min(nominal,w.water_heat_available_kw/max(melt_kwh_m3,1e-9)*c['water_recovery'])
     if not w.water_plant_ok:
         v_star = 0.0
-    elif use <= 0.15 * vmax:
+    elif use <= 0.15 * nominal and use < vmax:
         v_star = cap
     elif use < vmax:
-        v_star = cap - 60.0 * use / vmax
+        v_star = cap - 60.0 * use / nominal
     else:
         v_star = 0.0
     runway_w = w.water_tank_m3 / use if use > 0 else -1
@@ -4545,11 +5088,12 @@ def snapshot(w: World):
                     "marines": w.marines_active > 0, "thermal_mw": round(w.r_power_mw / 0.3, 1)},
         "hydraulics": w.utilities.state(),
         "water": {"tank_m3": round(w.water_tank_m3, 1), "tank_cap": c["water_tank_m3"], "plant": w.water_plant_ok,
+                  "source":"ocean", "intake_ok":w.intake_ok,"raw_m3_h":round(w.raw_intake_m3_h,3),"brine_m3_h":round(w.brine_m3_h,3),"heat_kw":round(w.water_heat_used_kw,2),"heat_available_kw":round(w.water_heat_available_kw,2),
                   "heat": w.water_plant_heat, "plant_m3_h": round(w.water_plant_m3_h, 2), "flow_m3_h": round(w.water_flow_m3_h, 2),
                   "pump": w.pump_station_ok, "houses_ok": int(w.h_water_ok.sum()),
                   "burst": int(w.h_burst.sum()), "frozen": int((~w.h_pipes_ok).sum()),
                   "sector_m3_h": [round(float(x) * 60, 2) for x in w.sector_water_m3]},
-        "net": {"uplink": w.uplink_ok, "tower": w.tower_ok, "comms": w.comms_ok, "houses_online": int(w.h_net_online.sum()),
+        "net": {"mobile":w.mobile_online,"dish":w.dish_ok,"uplink": w.uplink_ok, "tower": w.tower_ok, "comms": w.comms_ok, "houses_online": int(w.h_net_online.sum()),
                 "packets_per_min": w.packets_per_min, "reactor_link": w.r_link_ok,
                 "packets": w.packets[-40:]},
         "finance": {"colony": round(w.colony_budget), "sectors": [round(float(x)) for x in w.sector_budget],
@@ -4569,7 +5113,8 @@ def snapshot(w: World):
                     "fuel_l":round(r.fuel_l,2),"distance_m":round(r.odometer_m,3),"velocity":round(r.velocity,3),
                     "heading": round(r.heading, 2), "load": round(r.load, 2),
                     "job": (r.job.kind if isinstance(r.job, Issue) else (r.job + 1 if isinstance(r.job, (int, np.integer)) else None))}
-                   for r in w.rovers],
+                   for r in w.rovers+getattr(w,"traffic",[])],
+        "cargo":w.cargo,
         "xenos": [{"id": m.get("id", 0), "x": round(m["x"]), "y": round(m["y"]), "state": m.get("state", "hunt"), "sector": m["sector"] + 1,
                    "heading": round(m.get("heading", 0.0), 2), "target": int(m.get("target", -1)) + 1} for m in w.xeno_markers],
         "squad": {"x": round(w.squad["x"]), "y": round(w.squad["y"]), "state": w.squad["state"], "sector": w.squad["sector"] + 1,
@@ -4660,8 +5205,9 @@ def house_geometry(w: World):
         "cfg": {k: c[k] for k in ("hub_radius", "house_radius_min", "house_ring_step", "house_rows", "ring_road_radius",
                                   "wall_radius", "spine_radii", "reactor_pos", "solar_pos", "water_plant_pos",
                                   "radwaste_pos", "mine_pos", "waste_station_pos", "tower_junction", "tower_pos",
-                                  "landing_pad_pos", "garage", "medlab", "school", "sectors", "water_tank_m3")},
-        "utilities": w.utilities.geometry(w),
+                                  "landing_pad_pos", "garage", "medlab", "school", "sectors", "water_tank_m3",
+                                  "dish_pos","ocean_intake_pos","ocean_level_m","ocean_center","ocean_radii","cargo_depot")},
+        "junctions":traffic_junctions(c),"river":RIVER_PROFILE,"utilities": w.utilities.geometry(w),
         "types": TYPE_NAMES,
     }
 
@@ -4844,7 +5390,7 @@ class Store:
             old=w.utilities;w.utilities=UtilityNetwork(w)
             for key in ('sewer_storage','storm_storage','snow_m3','pump_speed','overflow_m3'):
                 setattr(w.utilities,key,getattr(old,key,getattr(w.utilities,key)))
-            added.append('utilities v2')
+            added.append('utilities v3')
         for r in w.rovers:
             for key,value in [('velocity',0.0),('fuel_l',120.0),('odometer_m',0.0)]:
                 if key not in r.__dict__:setattr(r,key,value)
