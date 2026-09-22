@@ -14,11 +14,14 @@
 </header>
 <div id="map">
  <div id="banner" role="status">Connecting to colony…</div>
- <div id="hint">DRAG pan · RMB orbit · WASD / ↑↓←→ move · Q/E altitude · SHIFT fast · PINCH zoom · F focus · M console</div>
+ <div id="hint">DRAG orbit · PINCH zoom · SHIFT toggle free flight · WASD fly · F inspect · M console</div>
+ <div id="navigation-deck" aria-label="Planet navigation"><button data-planet="-1">0 · SYSTEM</button><button data-planet="0">1 · HEPHAESTUS</button><button data-planet="1">2 · RUSSET</button><button data-planet="2" aria-pressed="true">3 · ACHERON</button><button data-planet="3">4 · NIX</button><button id="camera-toggle"><span id="camera-mode">PLANET ORBIT</span><span id="camera-shortcut"> · SHIFT</span></button></div>
+ <div id="camera-strip"><span id="focus-world">ACHERON · LV–426</span><span id="flight-controls" hidden><button id="slower-flight" aria-label="Slower flight">−</button><span id="flight-speed">12 m/s</span><button id="faster-flight" aria-label="Faster flight">+</button></span></div>
+ <div id="driving-hud" hidden><b id="drive-speed">0</b> km/h <b id="drive-gear">1</b><div id="rpm-track"><div id="rpm-fill"></div></div><span id="drive-rpm">850 RPM</span><span id="drive-surface">ASPHALT</span><button id="exit-drive">ESC · Park &amp; exit</button></div>
  <div id="tip"></div>
  <div id="info"><button class="close" id="infoclose" aria-label="Close inspector">Close</button><h3 id="infotitle"></h3><div id="infobody"></div></div>
  <div id="alerts" role="status"></div><div id="toast" role="status"></div><div id="finished"></div>
- <div id="view-tools"><div class="view-presets" role="group" aria-label="Map view"><button data-key="01" data-view="colony" aria-pressed="true">Colony</button><button data-key="02" data-view="water" aria-pressed="false">Water</button><button data-key="03" data-view="power" aria-pressed="false">Power</button><button data-key="04" data-view="network" aria-pressed="false">Network</button></div><div id="map-key" class="map-key" aria-label="Map legend"></div></div>
+ <div id="view-tools"><div class="view-presets" role="group" aria-label="Map view"><button data-key="" data-view="colony" aria-pressed="true">Colony</button><button data-key="" data-view="water" aria-pressed="false">Water</button><button data-key="" data-view="power" aria-pressed="false">Power</button><button data-key="" data-view="network" aria-pressed="false">Network</button></div><div id="map-key" class="map-key" aria-label="Map legend"></div></div>
 </div>
 <aside id="side" aria-label="Colony management">
  <div class="panel-tabs" role="tablist" aria-label="Management panels"><button id="tab-overview" role="tab" aria-controls="panel-overview" aria-selected="true" data-panel="overview">Overview</button><button id="tab-layers" role="tab" aria-controls="panel-layers" aria-selected="false" data-panel="layers" tabindex="-1">Layers</button><button id="tab-places" role="tab" aria-controls="panel-places" aria-selected="false" data-panel="places" tabindex="-1">Places</button><button id="tab-operations" role="tab" aria-controls="panel-operations" aria-selected="false" data-panel="operations" tabindex="-1">Operations</button></div>

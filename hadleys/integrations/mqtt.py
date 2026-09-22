@@ -32,24 +32,15 @@ class MqttBridge:
         self.last_pub_t = np.full(w.N, -999)
         self.sent = 0
         self.received = 0
-        self.last_try = 0.0
         self.tail = deque(maxlen=150)  # recent messages for the /bus page
         self.rate_in = deque(
             maxlen=600
         )  # (wall time) of received actuators, for messages per second
         self.rate_out = deque(maxlen=600)
+        # Paho owns connection retries in its network thread, never under w.lock.
+        self.cli.reconnect_delay_set(min_delay=1, max_delay=30)
         self.cli.connect_async(self.host, self.port, keepalive=30)
         self.cli.loop_start()
-
-    def _watchdog(self):
-        """paho does not retry a connection that never succeeded; try again every few seconds."""
-        if self.connected or time.time() - self.last_try < 5.0:
-            return
-        self.last_try = time.time()
-        try:
-            self.cli.reconnect()
-        except Exception:
-            pass
 
     def _on_connect(self, client, userdata, flags, reason, properties=None):
         self.connected = True
@@ -94,7 +85,6 @@ class MqttBridge:
         """Called at the end of a tick: env every tick, houses on change or every 10 ticks."""
         w = self.w
         if not self.connected:
-            self._watchdog()
             return
         c = self.cli
         hour = w.t // 60 % 24 + (w.t % 60) / 60.0

@@ -19,8 +19,8 @@ def coast_height(x, y, height):
     """Shared coastal basin and graded frozen river profile; keep colony terraces intact."""
     if math.hypot(x, y) < 900:
         return height
-    q = math.hypot((x + 2350) / 900, (y - 550) / 1150)
-    az = math.atan2((y - 550) / 1150, (x + 2350) / 900)
+    q = math.hypot((x + 2450) / 1080, (y - 600) / 1380)
+    az = math.atan2((y - 600) / 1380, (x + 2450) / 1080)
     q /= (
         1
         + 0.08 * math.sin(3 * az)

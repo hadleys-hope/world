@@ -1,5 +1,6 @@
 """Compatibility entry point. Implementation lives in hadleys/."""
 
+from hadleys.domains.driving import driver_command, driver_holds  # noqa: F401
 from hadleys.config import CFG, COSTS, TYPE_NAMES  # noqa: F401
 from hadleys.numerics import clamp, polar  # noqa: F401
 from hadleys.geometry.terrain import (

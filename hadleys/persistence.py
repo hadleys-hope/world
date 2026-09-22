@@ -81,6 +81,9 @@ class Store:
     def migrate(w: World):
         """Fill in attributes a newer version added since the world was saved, using a fresh world's defaults."""
         previous_layout = getattr(w, "layout_version", 3)
+        for key, old in [("ocean_center", (-2350, 550)), ("ocean_radii", (900, 1150))]:
+            if tuple(w.cfg.get(key, old)) == old:
+                w.cfg[key] = CFG[key]
         old_defaults = {"garage": (75, 210), "medlab": (195, 210), "school": (315, 210)}
         for key, old in old_defaults.items():
             if tuple(w.cfg.get(key, old)) == old:
@@ -120,6 +123,12 @@ class Store:
             ]:
                 if key not in r.__dict__:
                     setattr(r, key, value)
+        for r in w.rovers + getattr(w, "traffic", []):
+            if getattr(r, "driver_owner", None):
+                r.driver_owner = None
+                r.driver_parked = True
+                r.velocity = 0
+                r.state = "PARKED"
         return added
 
     def save_world(self, w: World):

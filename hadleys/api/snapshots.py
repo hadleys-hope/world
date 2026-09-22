@@ -13,7 +13,12 @@ from hadleys.geometry.terrain import RIVER_PROFILE
 from hadleys.models import Issue
 
 
+from hadleys.domains.driving import driver_holds
+
+
 def snapshot(w: World):
+    for rover in w.rovers + w.traffic:
+        driver_holds(rover)
     S = w.S
     c = w.cfg
     sec = []
@@ -192,7 +197,12 @@ def snapshot(w: World):
                 "fuel_l": round(r.fuel_l, 2),
                 "distance_m": round(r.odometer_m, 3),
                 "velocity": round(r.velocity, 3),
-                "heading": round(r.heading, 2),
+                "heading": round(r.heading, 5),
+                "manual": bool(
+                    getattr(r, "driver_parked", False)
+                    or getattr(r, "driver_owner", None)
+                ),
+                "chassis": getattr(r, "driver_chassis", None),
                 "load": round(r.load, 2),
                 "job": (
                     r.job.kind
@@ -458,6 +468,7 @@ def house_geometry(w: World):
                 "school",
                 "sectors",
                 "water_tank_m3",
+                "planet_radius",
                 "dish_pos",
                 "ocean_intake_pos",
                 "ocean_level_m",

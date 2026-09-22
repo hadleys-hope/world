@@ -8,6 +8,7 @@ import os
 from hadleys.api.snapshots import bus_snapshot, house_snapshot, snapshot
 from hadleys.domains.attractors import attractor_snapshot
 from hadleys.domains.energy import reactor_scram
+from hadleys.domains.driving import driver_command
 from hadleys.numerics import clamp
 from hadleys.simulation import inject, new_colony
 from hadleys.web import HTMLATTR, HTMLBUS, HTMLGRAPH, HTMLHOUSE
@@ -139,6 +140,14 @@ def make_handler(
                 )
                 return
             with w.lock:
+                if cmd in ("drive_claim", "drive_pose", "drive_release"):
+                    result = driver_command(w, req)
+                    self._send(
+                        200 if result["ok"] else 409,
+                        "application/json",
+                        json.dumps(result).encode(),
+                    )
+                    return
                 if cmd == "pause":
                     w.paused = not w.paused
                 elif cmd == "speed":

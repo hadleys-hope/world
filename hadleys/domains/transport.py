@@ -21,6 +21,7 @@ from hadleys.geometry.roads import (
 )
 from hadleys.geometry.terrain import site_elevation
 from hadleys.models import Rover
+from hadleys.domains.driving import driver_holds
 from hadleys.numerics import clamp, polar
 
 
@@ -62,6 +63,8 @@ def make_traffic(c):
 
 def traffic_step(w):
     for r in w.traffic:
+        if driver_holds(r):
+            continue
         if r.kind == TransportKind.TRANSIT:
             if not r.route:
                 a = math.degrees(math.atan2(r.y, r.x))
@@ -103,7 +106,9 @@ def traffic_step(w):
         ready = [
             i
             for i, r in enumerate(w.traffic)
-            if r.kind == TransportKind.FREIGHT and r.state == TransportState.WAITING
+            if r.kind == TransportKind.FREIGHT
+            and r.state == TransportState.WAITING
+            and not driver_holds(r)
         ]
         if ready and w.cargo["loaded"] < 24:
             w.cargo.update(phase="LIFT", progress=0.0, truck=ready[0])
@@ -279,10 +284,13 @@ def roads_step(w: World):
         w.sanitary - overflow * 0.05 - sew_bad_frac * 0.1 + (~overflow) * 0.02, 0, 100
     )
     garbage, sludge = w.rovers[0], w.rovers[1]
-    _garbage_rover(w, garbage)
-    _sludge_rover(w, sludge)
+    if not driver_holds(garbage):
+        _garbage_rover(w, garbage)
+    if not driver_holds(sludge):
+        _sludge_rover(w, sludge)
     for r in w.rovers[2:]:
-        _repair_rover(w, r)
+        if not driver_holds(r):
+            _repair_rover(w, r)
     traffic_step(w)
 
 

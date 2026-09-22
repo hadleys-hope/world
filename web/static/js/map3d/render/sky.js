@@ -1,7 +1,8 @@
 /** render/sky: procedural colony viewer. */
-import { state } from '../state.js';
-import { terrainH } from '../geometry/planet.js';
-import * as THREE from 'three';
+import { state } from "../state.js";
+import { surfaceHeight, terrainH } from "../geometry/planet.js";
+import * as THREE from "three";
+
 export function makePlanet() {
   const hash = (x, y, z) => {
     const s = Math.sin(x * 127.1 + y * 311.7 + z * 74.7) * 43758.5453;
@@ -19,7 +20,23 @@ export function makePlanet() {
       v = fy * fy * (3 - 2 * fy),
       w = fz * fz * (3 - 2 * fz);
     const c = (a, b, c2) => hash(i + a, j + b, k + c2);
-    return lerp(lerp(lerp(c(0, 0, 0), c(1, 0, 0), u), lerp(c(0, 1, 0), c(1, 1, 0), u), v), lerp(lerp(c(0, 0, 1), c(1, 0, 1), u), lerp(c(0, 1, 1), c(1, 1, 1), u), v), w) * 2 - 1;
+    return (
+      lerp(
+        lerp(
+          lerp(c(0, 0, 0), c(1, 0, 0), u),
+          lerp(c(0, 1, 0), c(1, 1, 0), u),
+          v,
+        ),
+        lerp(
+          lerp(c(0, 0, 1), c(1, 0, 1), u),
+          lerp(c(0, 1, 1), c(1, 1, 1), u),
+          v,
+        ),
+        w,
+      ) *
+        2 -
+      1
+    );
   };
   const fbm = (x, y, z, o = 6) => {
     let val = 0,
@@ -56,7 +73,7 @@ export function makePlanet() {
       };
       const rim = sm(r, r * 0.75, d) * (1 - sm(r * 0.75, r * 0.35, d)) * 0.5;
       const bowl = sm(r * 0.75, 0, d);
-      c += (rim - bowl * 0.8) * (0.5 + 0.5 * h1) / (1 + q);
+      c += ((rim - bowl * 0.8) * (0.5 + 0.5 * h1)) / (1 + q);
     }
     return c;
   };
@@ -74,41 +91,36 @@ export function makePlanet() {
       ny = y / L,
       nz = z / L;
     const ang = Math.acos(Math.max(-1, Math.min(1, ny)));
-    const mask = 1 - Math.min(1, Math.max(0, (ang - colonyAngle) / (colonyAngle * 0.6)));
+    const mask =
+      1 - Math.min(1, Math.max(0, (ang - colonyAngle) / (colonyAngle * 0.6)));
     const m = mask * mask * (3 - 2 * mask);
-    const h = (fbm(nx * 3, ny * 3, nz * 3) * 1.0 + (1 - Math.abs(noise(nx * 7, ny * 7, nz * 7))) * 0.35 + craters(nx, ny, nz) * 0.5 + fbm(nx * 22, ny * 22, nz * 22, 3) * 0.08) * (1 - m);
+    const h =
+      (fbm(nx * 3, ny * 3, nz * 3) * 1.0 +
+        (1 - Math.abs(noise(nx * 7, ny * 7, nz * 7))) * 0.35 +
+        craters(nx, ny, nz) * 0.5 +
+        fbm(nx * 22, ny * 22, nz * 22, 3) * 0.08) *
+      (1 - m);
     const dist = ang * state.RP,
       az = Math.atan2(nz, nx),
       local = terrainH(dist * Math.cos(az), dist * Math.sin(az)),
-      height = dist < 3750 ? local - 45 : THREE.MathUtils.lerp(local - 45, h * AMP, state.sstep(3750, 4100, dist));
+      height = surfaceHeight(dist * Math.cos(az), dist * Math.sin(az));
     hArr[i] = height / AMP;
     const r = state.RP + height;
     pos.setXYZ(i, nx * r, ny * r, nz * r);
   }
-  geo.setAttribute('aH', new THREE.BufferAttribute(hArr, 1));
+  geo.setAttribute("aH", new THREE.BufferAttribute(hArr, 1));
   geo.computeVertexNormals();
   const mat = new THREE.ShaderMaterial({
     uniforms: {
-      uSun: {
-        value: new THREE.Vector3(1, 0.3, 0)
-      },
-      uColony: {
-        value: new THREE.Vector3(0, 1, 0)
-      },
-      uCold: {
-        value: 0.6
-      },
-      uStorm: {
-        value: 0.0
-      },
-      uTime: {
-        value: 0
-      },
-      uColonyAngle: {
-        value: colonyAngle
-      }
+      uDetail: { value: 1 },
+      uSun: { value: new THREE.Vector3(1, 0.3, 0) },
+      uColony: { value: new THREE.Vector3(0, 1, 0) },
+      uCold: { value: 0.6 },
+      uStorm: { value: 0.0 },
+      uTime: { value: 0 },
+      uColonyAngle: { value: colonyAngle },
     },
-    vertexShader: `attribute float aH; varying vec3 vN; varying vec3 vP; varying float vH; void main(){ vN=normalize(normalMatrix*normal); vP=(modelMatrix*vec4(position,1.0)).xyz; vH=aH; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
+    vertexShader: `uniform float uDetail; attribute float aH; varying vec3 vN; varying vec3 vP; varying float vH; void main(){ vec3 radial=normalize(position); float arc=acos(clamp(radial.y,-1.,1.))*${state.RP}.; vec3 displaced=position-radial*45.*uDetail*(1.-smoothstep(3900.,4450.,arc)); vN=normalize(mat3(modelMatrix)*normal); vP=(modelMatrix*vec4(displaced,1.0)).xyz; vH=aH; gl_Position=projectionMatrix*modelViewMatrix*vec4(displaced,1.0); }`,
     fragmentShader: `uniform vec3 uSun; uniform vec3 uColony; uniform float uCold; uniform float uStorm; uniform float uTime; uniform float uColonyAngle;
       varying vec3 vN; varying vec3 vP; varying float vH;
       float hash(vec3 p){ return fract(sin(dot(p,vec3(127.1,311.7,74.7)))*43758.5453); }
@@ -121,10 +133,11 @@ export function makePlanet() {
         float ang=acos(clamp(dot(sn,uColony),-1.0,1.0)); float glow=(1.0-smoothstep(uColonyAngle*0.8, uColonyAngle*2.2, ang))*(1.0-day);
         vec3 lit=col*(0.10+0.95*sun*day+0.07*(1.0-day)) + vec3(1.0,0.75,0.45)*glow*0.35;
         float rim=pow(1.0-max(dot(n,normalize(cameraPosition-vP)),0.0),3.0); lit+=vec3(0.25,0.35,0.55)*rim*0.5*(0.4+0.6*day);
-        gl_FragColor=vec4(lit,1.0); }`
+        gl_FragColor=vec4(lit,1.0); }`,
   });
   return new THREE.Mesh(geo, mat);
 }
+
 export function initialize() {
   state.scene.add(new THREE.AmbientLight(0xa8b0c4, 1.35));
   state.scene.add(new THREE.HemisphereLight(0x778ab0, 0x2a2118, 1.2));
@@ -135,55 +148,72 @@ export function initialize() {
   state.sun.shadow.camera.near = 100;
   state.sun.shadow.camera.far = 30000;
   state.sun.shadow.bias = -0.0008;
-  state.sun.shadow.normalBias = .12;
+  state.sun.shadow.normalBias = 0.12;
   state.sunTarget = new THREE.Object3D();
   state.scene.add(state.sunTarget);
   state.sun.target = state.sunTarget;
-  state.sunSprite = new THREE.Sprite(new THREE.SpriteMaterial({
-    map: state.TEX.glow,
-    transparent: true,
-    depthTest: false
-  }));
+  state.sunSprite = new THREE.Sprite(
+    new THREE.SpriteMaterial({
+      map: state.TEX.glow,
+      transparent: true,
+      depthTest: false,
+    }),
+  );
   state.sunSprite.scale.set(1800, 1800, 1);
   state.scene.add(state.sunSprite);
   {
     const n = 3000,
       p = new Float32Array(n * 3);
     for (let i = 0; i < n; i++) {
-      const v = new THREE.Vector3().randomDirection().multiplyScalar(60000);
+      const v = new THREE.Vector3().randomDirection().multiplyScalar(900000);
       p.set([v.x, v.y, v.z], i * 3);
     }
     const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.BufferAttribute(p, 3));
-    state.scene.add(new THREE.Points(g, new THREE.PointsMaterial({
-      color: 0xbfc8dc,
-      size: 2.2,
-      sizeAttenuation: false
-    })));
+    g.setAttribute("position", new THREE.BufferAttribute(p, 3));
+    state.scene.add(
+      new THREE.Points(
+        g,
+        new THREE.PointsMaterial({
+          color: 0xbfc8dc,
+          size: 1.2,
+          sizeAttenuation: false,
+        }),
+      ),
+    );
   }
   state.planetMesh = makePlanet();
   state.planetMat = state.planetMesh.material;
   state.scene.add(state.planetMesh);
-  state.scene.add(new THREE.Mesh(new THREE.SphereGeometry(state.RP - 10, 256, 192), new THREE.MeshStandardMaterial({
-    color: 0x749da8,
-    roughness: .42,
-    metalness: .18
-  })));
-  state.scene.add(new THREE.Mesh(new THREE.SphereGeometry(state.RP * 1.035, 64, 48), new THREE.MeshBasicMaterial({
-    color: 0x4a6a9a,
-    transparent: true,
-    opacity: 0.10,
-    side: THREE.BackSide,
-    depthWrite: false
-  })));
+  state.scene.add(
+    new THREE.Mesh(
+      new THREE.SphereGeometry(state.RP - 10, 256, 192),
+      new THREE.MeshStandardMaterial({
+        color: 0x749da8,
+        roughness: 0.42,
+        metalness: 0.18,
+      }),
+    ),
+  );
+  state.scene.add(
+    new THREE.Mesh(
+      new THREE.SphereGeometry(state.RP * 1.035, 64, 48),
+      new THREE.MeshBasicMaterial({
+        color: 0x4a6a9a,
+        transparent: true,
+        opacity: 0.1,
+        side: THREE.BackSide,
+        depthWrite: false,
+      }),
+    ),
+  );
   state.weather = {
     snow: null,
     snowVel: null,
     tornado: null,
     wind: 8,
-    precip: 'none',
+    precip: "none",
     storm: false,
-    tornadoOn: false
+    tornadoOn: false,
   };
   {
     const n = 6000,
@@ -194,25 +224,31 @@ export function initialize() {
       p[i * 3 + 2] = (Math.random() - 0.5) * 1600;
     }
     const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.BufferAttribute(p, 3));
-    state.weather.snow = new THREE.Points(g, new THREE.PointsMaterial({
-      color: 0xe8eef8,
-      size: 6,
-      map: state.TEX.dot,
-      transparent: true,
-      opacity: 0.0,
-      depthWrite: false,
-      sizeAttenuation: true
-    }));
+    g.setAttribute("position", new THREE.BufferAttribute(p, 3));
+    state.weather.snow = new THREE.Points(
+      g,
+      new THREE.PointsMaterial({
+        color: 0xe8eef8,
+        size: 6,
+        map: state.TEX.dot,
+        transparent: true,
+        opacity: 0.0,
+        depthWrite: false,
+        sizeAttenuation: true,
+      }),
+    );
     state.weather.snow.frustumCulled = false;
     state.scene.add(state.weather.snow);
-    state.weather.tornado = new THREE.Mesh(new THREE.CylinderGeometry(14, 70, 260, 24, 8, true), new THREE.MeshBasicMaterial({
-      color: 0x9aa3b5,
-      transparent: true,
-      opacity: 0.0,
-      side: THREE.DoubleSide,
-      depthWrite: false
-    }));
+    state.weather.tornado = new THREE.Mesh(
+      new THREE.CylinderGeometry(14, 70, 260, 24, 8, true),
+      new THREE.MeshBasicMaterial({
+        color: 0x9aa3b5,
+        transparent: true,
+        opacity: 0.0,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      }),
+    );
     state.weather.tornado.visible = false;
     state.scene.add(state.weather.tornado);
   }

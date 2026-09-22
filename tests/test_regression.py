@@ -15,6 +15,14 @@ FIXTURES = Path(__file__).parent / "fixtures"
 class SimulationRegression(unittest.TestCase):
     maxDiff = 2000
 
+    def legacy_snapshot(self, value):
+        # Additive manual-control fields and finer headings are intentional API changes.
+        for rover in value["rovers"]:
+            self.assertFalse(rover.pop("manual"))
+            self.assertIsNone(rover.pop("chassis"))
+            rover["heading"] = round(rover["heading"], 2)
+        return value
+
     def test_original_snapshots_and_domain_order(self):
         with gzip.open(FIXTURES / "simulation.json.gz", "rt") as f:
             expected = json.load(f)
@@ -22,7 +30,7 @@ class SimulationRegression(unittest.TestCase):
         for tick in range(121):
             if str(tick) in expected:
                 actual = dict(
-                    snapshot=snapshot(w),
+                    snapshot=self.legacy_snapshot(snapshot(w)),
                     bus=bus_snapshot(w),
                     house=house_snapshot(w, 17),
                     attractors=attractor_snapshot(w, True),
@@ -35,7 +43,7 @@ class SimulationRegression(unittest.TestCase):
                 world_tick(w)
         w.t = 1439
         world_tick(w)
-        self.assertEqual(json.loads(json.dumps(snapshot(w))), expected["day"])
+        self.assertEqual(json.loads(json.dumps(self.legacy_snapshot(snapshot(w)))), expected["day"])
         w.t = w.cfg["ticks_per_day"] * w.cfg["days_per_month"] - 1
         world_tick(w)
-        self.assertEqual(json.loads(json.dumps(snapshot(w))), expected["month"])
+        self.assertEqual(json.loads(json.dumps(self.legacy_snapshot(snapshot(w)))), expected["month"])

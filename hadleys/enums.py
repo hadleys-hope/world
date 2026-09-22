@@ -13,6 +13,8 @@ class TransportKind(StrEnum):
 
 
 class TransportState(StrEnum):
+    DRIVING = "DRIVING"
+    PARKED = "PARKED"
     CIRCULATING = "CIRCULATING"
     DELIVER = "DELIVER"
     IDLE = "IDLE"

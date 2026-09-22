@@ -1,4 +1,5 @@
 /** Real HTTP/browser smoke, including GPU initialization; no production endpoints. */
+import { verifyExploration } from './browser-exploration.mjs';
 import { createRequire } from 'node:module';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -37,7 +38,7 @@ try {
     const { updateDetail } = await import('/static/js/map3d/render/lod.js');
     HH.flyTo(HH.geometry.houses.x[0], HH.geometry.houses.y[0], 90);
     state.camera.position.copy(state.flyAnim.to); state.controls.target.copy(state.flyAnim.tto); state.flyAnim=null;
-    state.controls.update();
+    state.camera.lookAt(state.controls.target);
     for(let i=0;i<30;i++) updateDetail();
     HH.renderer.render(HH.scene,HH.camera);
     return { houses: HH.geometry.houses.x.length, detailed: HH.houseDetails.size, drawCalls: HH.renderer.info.render.calls, triangles: HH.renderer.info.render.triangles };
@@ -46,6 +47,7 @@ try {
   mkdirSync(resolve(root,'test-results'), {recursive:true});
   await page.screenshot({path:resolve(root,'test-results/map3d.png')});
   console.log('3D scene:', metrics);
+  await verifyExploration(page, root);
   for (const route of ['/flat','/attractors','/house?id=1','/graph','/bus']) {
     await page.goto(base+route);
     await page.waitForTimeout(700);

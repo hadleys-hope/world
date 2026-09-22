@@ -76,19 +76,17 @@ class Runtime:
             )
 
     def run(self):
+        self.cli.reconnect_delay_set(min_delay=1, max_delay=30)
         self.cli.connect_async(self.host, self.port, keepalive=30)
         self.cli.loop_start()
         try:
             while True:
                 time.sleep(5)
                 if not self.connected:
-                    try:
-                        self.cli.reconnect()
-                    except Exception as e:
-                        print(
-                            f"broker {self.host}:{self.port} not reachable ({e}), retrying"
-                        )
-                        continue
+                    print(
+                        f"broker {self.host}:{self.port} not connected; background retry active"
+                    )
+                    continue
                 print(
                     f"houses seen {len(self.houses)}, decisions {self.decisions}, weather at t={self.weather.get('t')}"
                 )
