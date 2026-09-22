@@ -3,6 +3,31 @@
 One process, one file: environment, reactor and grid, 300 houses, water,
 internet, roads and rovers, incidents, finance, a browser UI and persistence.
 Run `python3 hadleys_hope.py` and open http://localhost:8000.
+
+Modelling revision: shared SI utility graph, pressure-dependent domestic water,
+separate gravity drains and zoom-loaded prefab interiors. Viewer: "inspect a
+home", "roof / upper floor cutaway", and "underground utilities". Select pipes
+for live engineering data. Procedural assets need no downloaded texture packs.
+The Attractors navigation tab preserves the thermal phase portrait and water,
+power/UPS, repair and money history panels. Its optional 3D water-coupling view
+plots measured temperature, thermal rate and gauge pressure, with selectable
+basin/district/pressure colour. Preview flow assumes fixed weather and loads.
+Main HUD: Colony / Water / Power / Network presets; Overview / Layers / Places /
+Operations panels. Operator scenario controls are in Operations.
+
+Scope: expanded 300-house interpretation of Hadley's Hope, retaining the original
+six-sector layout and simulation interfaces. Hydraulic model is quasi-steady
+Darcy-Weisbach on an explicitly branched network, not EPANET or water hammer.
+Drainage uses Manning capacity plus aggregate sump storage, not a backwater PDE.
+Buried mains assume maintained insulation/heat tracing; domestic freeze/burst
+uses the existing indoor thermal model. Glass reflections use a procedural
+prefiltered environment, not ray tracing. Detailed meshes load for at most 13
+nearby homes; distant homes use lightweight proxies. Pressure is gauge kPa,
+flow is L/s, geometry metres. Surface-water precipitation is water-equivalent.
+
+References: https://usepa.github.io/EPANET2.2/12_analysis_algorithms.html
+Design context: https://alienseries.wordpress.com/2012/10/18/hadleys-hope/
+
 """
 from __future__ import annotations
 
@@ -132,6 +157,281 @@ def clamp(x, lo, hi):
 def polar(angle_deg, radius):
     a = math.radians(angle_deg)
     return radius * math.cos(a), radius * math.sin(a)
+
+
+# ------------------------------------------------------------------------------------
+# Utility engineering. SI units; one rooted pressure network, no decorative fake links.
+# Steady state per tick (not a water-hammer or drinking-water quality model).
+# Darcy-Weisbach / pressure-dependent demand: USEPA EPANET 2.2, chapter 12.
+# ------------------------------------------------------------------------------------
+
+def site_elevation(x, y, c):
+    """Same finished grades as terrainH in the viewer (metres above local datum)."""
+    r = math.hypot(x, y)
+    def smooth(a, b, v):
+        t = clamp((v-a)/(b-a), 0.0, 1.0)
+        return t*t*(3-2*t)
+    if r < c['hub_radius']:
+        h = 8.0
+    elif r < c['house_radius_min']-30:
+        h = 8-3*smooth(c['hub_radius'], c['house_radius_min']-30, r)
+    elif r < c['ring_road_radius']:
+        u = (r-(c['house_radius_min']-30))/c['house_ring_step']
+        k = math.floor(u)
+        h = 5+k*1.7+1.7*smooth(.86, 1, u-k)
+    elif r < c['wall_radius']+20:
+        h = 5+c['house_rows']*1.7
+    else:
+        h = (5+c['house_rows']*1.7)*(1-smooth(c['wall_radius']+20, c['wall_radius']+260, r))
+    return h+.5*math.sin(x*.031)*math.cos(y*.027)
+
+
+class UtilityNetwork:
+    """Rooted, isolatable district mains. Every service has one traced supply path.
+
+    A tree is intentional: sector isolation cannot secretly backfeed through a
+    decorative ring. Nodes/links are also the authoritative drawing coordinates.
+    Sanitary and storm gravity networks run in separate corridors and outfalls.
+    """
+    VERSION = 1
+
+    def __init__(self, w):
+        self.version = self.VERSION
+        c = w.cfg
+        self.nodes, self.links = [], []
+        self.house_nodes = np.zeros(w.N, dtype=int)
+        def node(xy, kind, sector=-1, house=-1, height=-1.8):
+            x, y = map(float, xy)
+            n = len(self.nodes)
+            self.nodes.append(dict(id=n, x=x, y=y, z=site_elevation(x,y,c)+height,
+                                   kind=kind, sector=int(sector), house=int(house)))
+            return n
+        def link(a, b, diameter, kind, points=None):
+            na, nb = self.nodes[a], self.nodes[b]
+            pts = points or [[na['x'],na['y']], [nb['x'],nb['y']]]
+            xyz = [[float(x),float(y),site_elevation(x,y,c)-1.8] for x,y in pts]
+            xyz[0] = [na['x'],na['y'],na['z']]
+            xyz[-1] = [nb['x'],nb['y'],nb['z']]
+            length = sum(math.dist(p,q) for p,q in zip(xyz,xyz[1:]))
+            self.links.append(dict(id=len(self.links), a=a, b=b, diameter_m=diameter,
+                                   length_m=length, roughness_m=.000007 if diameter<.1 else .000045,
+                                   material='PE100 SDR11' if diameter<.1 else 'lined ductile iron',
+                                   insulation_mm=60, minor_k=2.5 if kind=='service' else 1.2,
+                                   kind=kind, sector=nb['sector'], points=xyz))
+        root = node((-70,-45), 'tank')
+        pump = node((-40,-40), 'pump')
+        link(root,pump,.25,'pump')
+        for s in range(w.S):
+            a = s*60.0
+            prev = node(polar(a,c['hub_radius']+20), 'isolation', s)
+            link(pump,prev,.15,'district')
+            for row in range(c['house_rows']):
+                r = c['house_radius_min']-30+row*c['house_ring_step']
+                junction = node(polar(a,r), 'tee', s)
+                link(prev,junction,.125,'main')
+                prev = junction
+                last, angle = junction, a
+                ids = np.flatnonzero((w.h_sector==s)&(w.h_ring==row))
+                for i in ids:
+                    end_angle = float(w.h_angle[i])
+                    tap = node(polar(end_angle,r), 'tee', s)
+                    pts = [polar(v,r) for v in np.linspace(angle,end_angle,max(2,int((end_angle-angle)/1.5)+1))]
+                    link(last,tap,.08,'row',pts)
+                    # Entry at the wet-core riser inside the front wall.
+                    service = node(polar(end_angle,float(w.h_radius[i])-6), 'meter', s, int(i), .9)
+                    link(tap,service,.025,'service')
+                    self.house_nodes[i] = service
+                    last, angle = tap, end_angle
+        self.a = np.array([e['a'] for e in self.links])
+        self.b = np.array([e['b'] for e in self.links])
+        self.length = np.array([e['length_m'] for e in self.links])
+        self.diameter = np.array([e['diameter_m'] for e in self.links])
+        self.roughness = np.array([e['roughness_m'] for e in self.links])
+        self.minor = np.array([e['minor_k'] for e in self.links])
+        self.z = np.array([n['z'] for n in self.nodes])
+        self.parent_edge = np.full(len(self.nodes),-1,dtype=int)
+        self.parent_edge[self.b] = np.arange(len(self.links))
+        depth = np.zeros(len(self.nodes),dtype=int)
+        for a,b in zip(self.a,self.b): depth[b]=depth[a]+1
+        self.levels = [np.flatnonzero(depth[self.b]==d) for d in range(1,int(depth.max())+1)]
+        self.head = self.z.copy()
+        self.flow = np.zeros(len(self.links))
+        self.velocity = self.flow.copy()
+        self.loss = self.flow.copy()
+        self.pressure = np.zeros(w.N)
+        self.delivered = np.zeros(w.N)
+        self.leaks = np.zeros(w.N)
+        self.converged = True
+        self.residual = 0.0
+        self.iterations = 0
+        self.pump_speed = 1.0
+        self.sewer_storage = 0.0
+        self.storm_storage = 0.0
+        self.snow_m3 = 0.0
+        self.sewer_out_m3 = self.storm_out_m3 = self.overflow_m3 = 0.0
+        self.drainage = self._drainage(w)
+        self.drain_rates = [np.zeros(len(self.links)), np.zeros(len(self.links))]
+
+    def _drainage(self,w):
+        """Separate foul/surface-water trees; inverts descend all the way to outfall.
+
+        Deep collectors are required by the artificial terrace grades. Lift at the
+        western treatment sump is explicit; no uphill gravity sewer is implied.
+        """
+        systems = []
+        for name, offset, rough in [('sanitary',2.3,.013),('storm',-2.3,.015)]:
+            nodes = []
+            for n in self.nodes:
+                a=math.atan2(n['y'],n['x'])
+                nodes.append(dict(x=n['x']-math.sin(a)*offset,y=n['y']+math.cos(a)*offset,z=0.0,
+                                  kind=n['kind'],house=n['house']))
+            # Accumulate rises first, then lower the whole network to maintain cover.
+            distances=[]
+            for e in self.links:
+                a,b=e['a'],e['b']; pa,pb=nodes[a],nodes[b]
+                L=e['length_m']; slope=.02 if e['kind']=='service' else .005
+                nodes[b]['z']=nodes[a]['z']+L*slope
+                distances.append((L,slope))
+            datum=min(site_elevation(n['x'],n['y'],w.cfg)-3.2-n['z'] for n in nodes)
+            for n in nodes:n['z']+=datum
+            edges=[]
+            for e,(L,slope) in zip(self.links,distances):
+                # A service is 110 mm; rows 250 mm; collectors 450/600 mm.
+                d=.11 if e['kind']=='service' else (.25 if e['kind']=='row' else (.6 if name=='storm' else .45))
+                area=math.pi*d*d/4
+                capacity=area*(d/4)**(2/3)*math.sqrt(slope)/rough
+                pts=[]
+                for k,p in enumerate(e['points']):
+                    f=k/(len(e['points'])-1); a,b=nodes[e['a']],nodes[e['b']]
+                    ang=math.atan2(p[1],p[0])
+                    pts.append([p[0]-math.sin(ang)*offset,p[1]+math.cos(ang)*offset,a['z']+(b['z']-a['z'])*f])
+                pts[0]=[nodes[e['a']][k] for k in ('x','y','z')]
+                pts[-1]=[nodes[e['b']][k] for k in ('x','y','z')]
+                edges.append(dict(a=e['b'],b=e['a'],diameter_m=d,slope=slope,length_m=L,
+                                  material='vitrified clay' if name=='sanitary' else 'reinforced concrete',
+                                  capacity_m3_s=capacity,points=pts))
+            outlet=nodes[0]
+            plant=w.cfg['water_plant_pos']
+            # These are pumped rising mains, shown separately from gravity links.
+            rising=[[outlet[k] for k in ('x','y','z')],
+                    [plant[0]+20,plant[1]-12,site_elevation(*plant,w.cfg)-2.5]]
+            systems.append(dict(name=name,nodes=nodes,links=edges,rising_main=rising,
+                                outfall='western treatment / retention works',manning_n=rough))
+        return systems
+
+    def aggregate(self, demand):
+        out=demand.copy()
+        for ids in reversed(self.levels): np.add.at(out,self.a[ids],out[self.b[ids]])
+        return out[self.b]
+
+    def headloss(self,q):
+        """Darcy-Weisbach; laminar f=64/Re; Swamee-Jain turbulent estimate."""
+        v=4*np.abs(q)/(math.pi*self.diameter**2)
+        re=v*self.diameter/1.31e-6  # 10 C water
+        safe=np.maximum(re,1.0)
+        turbulent=.25/np.log10(self.roughness/(3.7*self.diameter)+5.74/np.maximum(safe,2300)**.9)**2
+        blend=np.clip((re-2300)/1700,0,1)
+        f=(1-blend)*64/safe+blend*turbulent
+        return (f*self.length/self.diameter+self.minor)*v*v/(2*9.81)
+
+    def solve(self,w,requested):
+        dt=float(w.cfg['tick_seconds'])
+        active=w.water_main_ok[w.h_sector]&w.h_valve_open
+        intact=w.h_pipes_ok&~w.h_burst
+        active &= bool(w.pump_station_ok and w.water_tank_m3>0)
+        requested=np.where(active&intact,requested,0.0)
+        leak_area=np.where(active&w.h_burst,math.pi*.0015**2,0.0) # 3 mm equivalent break
+        node_load=np.zeros(len(self.nodes))
+        p=np.maximum(self.pressure/9.81,20.0)
+        use=np.zeros(w.N); leak=use.copy()
+        for iteration in range(200):
+            use=requested*np.sqrt(np.clip(p/15.0,0,1))
+            leak=.62*leak_area*np.sqrt(2*9.81*np.maximum(p,0))
+            total=float((use+leak).sum())
+            # Average partial-tick delivery when the tank runs dry, exact mass balance.
+            factor=min(1.0,w.water_tank_m3/max(total*dt,1e-30))
+            use*=factor; leak*=factor
+            node_load.fill(0); node_load[self.house_nodes]=use+leak
+            q=self.aggregate(node_load)
+            loss=self.headloss(q)
+            source=self.z[0]+2+8*w.water_tank_m3/w.cfg['water_tank_m3']
+            head=np.full(len(self.nodes),source)
+            pump_gain=max(0,44*self.pump_speed**2-20000*q[0]**2) if w.pump_station_ok else 0.0
+            for ids in self.levels:
+                head[self.b[ids]]=head[self.a[ids]]-loss[ids]
+                if 0 in ids:head[1]+=pump_gain
+            target=np.where(active,np.maximum(0,head[self.house_nodes]-self.z[self.house_nodes]),0)
+            error=float(np.max(np.abs(target-p)))
+            if error<1e-6:break
+            p=.65*p+.35*target
+        self.iterations=iteration+1; self.converged=error<1e-5; self.residual=error
+        self.head=head; self.flow=q; self.loss=loss
+        self.velocity=4*q/(math.pi*self.diameter**2)
+        self.pressure=target*9.81  # kPa, gauge
+        self.delivered=use*dt; self.leaks=leak*dt
+        w.h_water_ok=active&intact&(target>=3.0)&(use>=requested*.95)&(factor>.95)
+        return self.delivered
+
+    def geometry(self,w):
+        c=w.cfg; plant=c['water_plant_pos']
+        feed=[[plant[0],plant[1],site_elevation(*plant,c)-1.8],
+              [plant[0]+70,plant[1],site_elevation(plant[0]+70,plant[1],c)-1.8],
+              [plant[0]+70,0,site_elevation(plant[0]+70,0,c)-1.8],
+              [-70,0,site_elevation(-70,0,c)-1.8],[-70,-45,self.z[0]]]
+        return dict(nodes=self.nodes,links=self.links,house_nodes=self.house_nodes.tolist(),
+                    drainage=self.drainage,plant_feed=feed,version=self.VERSION)
+
+    def state(self):
+        return dict(pressure_kpa=np.round(self.pressure,2).tolist(),flow_l_s=np.round(self.flow*1000,5).tolist(),
+                    velocity_m_s=np.round(self.velocity,5).tolist(),headloss_m=np.round(self.loss,6).tolist(),
+                    head_m=np.round(self.head,4).tolist(),delivered_l=np.round(self.delivered*1000,4).tolist(),
+                    leak_l=np.round(self.leaks*1000,4).tolist(),converged=self.converged,
+                    residual_m=self.residual,iterations=self.iterations,
+                    sewer_storage_m3=round(self.sewer_storage,5),storm_storage_m3=round(self.storm_storage,5),
+                    snow_m3=round(self.snow_m3,5),sewer_out_m3=round(self.sewer_out_m3,5),
+                    storm_out_m3=round(self.storm_out_m3,5),overflow_m3=round(self.overflow_m3,5),
+                    drainage_l_s=[np.round(q*1000,5).tolist() for q in self.drain_rates])
+
+
+def hydraulic_step(w):
+    if not hasattr(w,'utilities'):w.utilities=UtilityNetwork(w)
+    u=w.utilities; c=w.cfg; dt=float(c['tick_seconds'])
+    hour=(w.t%1440)/60
+    diurnal=.5+.9*max(0,math.sin(math.pi*(hour-5)/16))
+    request=c['water_per_house_m3_day']/86400*(1+.5*w.h_residents)*diurnal
+    use=u.solve(w,request)
+    w.h_water_m3+=use; w.h_water_day+=use; w.h_water_month+=use
+    w.sector_water_m3=np.bincount(w.h_sector,weights=use,minlength=w.S)
+    w.water_flow_m3_h=float((use+u.leaks).sum())/dt*3600
+    w.water_tank_m3=max(0,w.water_tank_m3-float((use+u.leaks).sum()))
+    # Ninety percent return to the separate foul sewer after household use.
+    # Manning full-bore capacities bound each subtree. This is a lumped storage
+    # approximation, not an unsteady free-surface/backwater solver.
+    for system,attr,inflow in [(u.drainage[0],'sewer_storage',use*.9),
+                               (u.drainage[1],'storm_storage',u.leaks.copy())]:
+        if attr=='storm_storage':
+            # Water-equivalent precipitation accumulates as snow below freezing.
+            rain=(.003 if w.storm_ticks>0 else .0002) if w.precip!='none' else 0.0
+            volume=rain*(w.N*350)*dt/3600
+            if w.t_out<=0:u.snow_m3+=volume; volume=0.0
+            melt=min(u.snow_m3,max(0,w.t_out)*.0001*w.N*350*dt/3600)
+            u.snow_m3-=melt
+            inflow+=(volume+melt)/w.N
+        loads=np.zeros(len(u.nodes)); loads[u.house_nodes]=inflow/dt
+        rates=u.aggregate(loads)
+        u.drain_rates[0 if attr=='sewer_storage' else 1]=rates
+        ratios=[e['capacity_m3_s']/q for e,q in zip(system['links'],rates) if q>0]
+        ratio=min(1.0,min(ratios,default=1.0))
+        amount=float(inflow.sum()); queued=getattr(u,attr)+amount
+        # Lift pumps run on the same protected supply as the potable station.
+        capacity=(.012 if attr=='sewer_storage' else .08)*dt if w.pump_station_ok else 0.0
+        out=min(queued,capacity,max(0,amount*ratio)+max(0,capacity-amount))
+        storage=queued-out; overflow=max(0,storage-200)
+        setattr(u,attr,min(storage,200)); u.overflow_m3+=overflow
+        if attr=='sewer_storage':u.sewer_out_m3=out
+        else:u.storm_out_m3=out
+    w.h_sludge+=np.where(w.h_water_ok,c['sludge_per_resident_per_tick']*(1+w.h_residents),0)
+    w.h_sludge=np.minimum(w.h_sludge,1.0)
 
 
 # ------------------------------------------------------------------------------------
@@ -360,6 +660,7 @@ class World:
         self.water_main_ok = np.ones(S, dtype=bool)
         self.sector_water_m3 = np.zeros(S)
         self.water_flow_m3_h = 0.0
+        self.utilities = UtilityNetwork(self)
 
         # ---- internet ----
         self.comms_ok = True
@@ -857,6 +1158,7 @@ def houses_step(w: World):
     w.h_t_in += (w.h_heat_w + q_int - q_loss) * dt / w.h_cap
     cold = w.h_t_in < 0.0
     w.h_frozen = np.where(cold, w.h_frozen + 1, 0)
+    w.h_pipes_ok[(w.h_t_in > 3.0) & ~w.h_burst] = True
     newly_frozen = (w.h_frozen == c["freeze_ticks_to_frozen"]) & w.h_pipes_ok
     for i in np.flatnonzero(newly_frozen):
         w.h_pipes_ok[i] = False
@@ -868,19 +1170,7 @@ def houses_step(w: World):
         iss = w.open_issue("pipes_burst", f"house:{i}", int(w.h_sector[i]), "freeze", "pipes",
                            (float(w.h_x[i]), float(w.h_y[i])), "critical")
         iss.cost *= cost_mul
-    supply = w.water_tank_m3 > 0 and w.pump_station_ok
-    w.h_water_ok = supply & w.water_main_ok[w.h_sector] & w.h_pipes_ok & ~w.h_burst
-    hour = (w.t % 1440) / 60.0
-    diurnal = 0.5 + 0.9 * max(0.0, math.sin(math.pi * (hour - 5) / 16))     # people use water by day
-    use = np.where(w.h_water_ok, c["water_per_house_m3_day"] / 1440.0 * (1 + 0.5 * w.h_residents) * diurnal, 0.0)
-    w.h_water_m3 += use
-    w.h_water_day += use
-    w.h_water_month += use
-    w.sector_water_m3 = np.bincount(w.h_sector, weights=use, minlength=w.S)
-    w.water_flow_m3_h = float(use.sum()) * 60.0
-    w.water_tank_m3 = max(0.0, w.water_tank_m3 - float(use.sum()))
-    w.h_sludge += np.where(w.h_water_ok, c["sludge_per_resident_per_tick"] * (1 + w.h_residents), 0.0)
-    w.h_sludge = np.minimum(w.h_sludge, 1.0)
+    hydraulic_step(w)
 
 
 def water_step(w: World):
@@ -889,8 +1179,9 @@ def water_step(w: World):
     if w.water_plant_ok:
         need = c["water_tank_m3"] - w.water_tank_m3
         rate = c["water_plant_m3_h"] * clamp(need / 60.0, 0.15, 1.0)     # throttles as the tank fills
-        w.water_plant_m3_h = rate
-        w.water_tank_m3 = min(c["water_tank_m3"], w.water_tank_m3 + rate / 60.0)
+        produced = min(need, rate * c["tick_seconds"] / 3600.0)
+        w.water_plant_m3_h = produced * 3600.0 / c["tick_seconds"]
+        w.water_tank_m3 += produced
     else:
         w.water_plant_m3_h = 0.0
     if w.water_tank_m3 <= 0 and w.t % 60 == 0:
@@ -945,7 +1236,7 @@ HTML = r"""<!doctype html>
   <div id="tip" style="position:absolute;display:none;background:rgba(23,26,33,.95);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:11px;pointer-events:none"></div>
 </div>
 <div id="side">
-  <div class="row" style="margin-bottom:8px"><a href="/" class="tab">3D planet</a><a href="/flat" class="tab on">flat map</a><a href="/bus" class="tab">bus and programs</a><a href="/house" class="tab">house</a><a href="/graph" class="tab">system graph</a></div>
+  <div class="row" style="margin-bottom:8px"><a href="/" class="tab">3D planet</a><a href="/flat" class="tab on">flat map</a><a href="/bus" class="tab">bus and programs</a><a href="/house" class="tab">house</a><a href="/graph" class="tab">systems</a><a href="/attractors" class="tab">Attractors</a></div>
   <h1>Hadley's Hope, LV-426</h1>
   <div class="row"><span id="time" style="font-weight:600;min-width:120px"></span>
     <button id="pause">Pause</button>
@@ -1038,10 +1329,10 @@ function draw(){
   // gates in the wall at the sector boundaries
   for(let s=0;s<ns;s++){ const [gx,gy]=polar(s*60,WR); const st=S.sectors[s].gate; const col = st==='LOCKDOWN'?'#e2574d':(st==='OPEN'?'#5ec07a':'#8a93a6');
     ctx.save(); ctx.translate(X(gx),Y(gy)); ctx.rotate(s*60*Math.PI/180); ctx.fillStyle=col; ctx.fillRect(-3,-9,6,18); ctx.restore(); if(!S.sectors[s].gate_ok) text(gx,gy-12,'!','#e2574d',12); }
-  // water: plant -> trunk road -> hub tank; hub -> sector mains along the boundary streets
+  // Both views consume the same utility graph.
   const waterOn = S.water.tank_m3>0 && S.water.pump;
-  flow(c.water_plant_pos[0]-10, c.water_plant_pos[1]-40, c.reactor_pos[0]+40, -10, '#5aa9ff', 2, S.water.plant, 1.2); flow(c.reactor_pos[0]+40,-10,-HR+30,-10,'#5aa9ff',2,S.water.plant,1.2);
-  for(let s=0;s<ns;s++){ const [x0,y0]=polar(s*60-1.4,HR-30), [x1,y1]=polar(s*60-1.4,R-20); flow(x0,y0,x1,y1,'#5aa9ff',1.5, waterOn && S.sectors[s].water_ok>0, 1.0); }
+  for(const e of G.utilities.links){const pts=e.points;const on=(S.hydraulics.flow_l_s[e.id]||0)>0;for(let j=0;j<pts.length-1;j++)flow(pts[j][0],pts[j][1],pts[j+1][0],pts[j+1][1],on?'#65bbd1':'#344c54',e.kind==='service'?.55:1.15,on,.5);}
+
   // power: trunk, tower line, solar line, feeders, spans along the pole tree
   const reactorUp = S.reactor.available_mw>0;
   flow(c.reactor_pos[0]+70, 8, -HR+10, 8, '#f2c14e', 3, S.power.trunk && reactorUp, 2.5);
@@ -1211,65 +1502,77 @@ HTML3D = r"""<!doctype html>
   #finished { position:absolute; inset:0; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,.6); font-size:28px; color:var(--bad); }
   pre { white-space:pre-wrap; font-size:11px; background:#0b0e13; padding:6px; border-radius:6px; border:1px solid var(--line); }
   @media (max-width: 900px) { body { flex-direction:column; overflow:auto; height:auto; } #map { flex:none; height:64vh; min-height:360px; } #side { width:100%; flex:none; border-left:none; border-top:1px solid var(--line); } #hint { display:none; } #info { width:220px; } }
+/* Flight-console hierarchy: navigation, viewport, one focused management panel. */
+:root{--bg:#0b1012;--panel:#121a1d;--line:#2d3b3e;--text:#e5ebe7;--dim:#9aaba8;--blue:#81bcb7;--cyan:#7fbfb1;--ok:#99bd8f;--warn:#d6b271;--bad:#dc8074}
+body{display:grid;grid-template-columns:minmax(0,1fr) 370px;grid-template-rows:76px minmax(0,1fr);height:100dvh}
+#commandbar{grid-column:1/-1;grid-row:1;display:flex;align-items:center;gap:24px;padding:0 22px;background:#11191c;border-bottom:1px solid #3c4b49;z-index:10}
+.brand{display:flex;align-items:center;gap:12px;flex-shrink:0}.brand-mark{width:39px;height:39px;border:1px solid #b5b99a;display:grid;place-items:center;color:#d7d4ac;font-weight:800;letter-spacing:-2px;font-size:17px}.brand strong{font-size:15px;letter-spacing:.09em;display:block}.brand small{font-size:9px;color:#98aba6;letter-spacing:.17em;display:block;margin-top:5px}
+.main-nav{display:flex;gap:4px;overflow-x:auto;scrollbar-width:none}.main-nav a{padding:12px 10px;color:#9bacaa;text-decoration:none;font-size:12px;white-space:nowrap;border-bottom:2px solid transparent}.main-nav a:hover{color:#f0f3e9;background:#1c292b}.main-nav a[aria-current=page]{color:#e6eadb;border-color:#c8bb8d}.main-nav a.attr-link{color:#94c6b6}
+.transport{display:flex;align-items:center;gap:8px;margin-left:auto}.transport #time{font:11px ui-monospace,monospace;color:#c9d4cb;white-space:nowrap}.transport label{font-size:10px;color:var(--dim)}.transport input{width:90px;accent-color:#bdc4a2}.transport #speedv{font-size:10px;min-width:50px;color:#bcc7c0}
+button{background:#1a282b;border:1px solid #35494a;border-radius:4px;padding:8px 10px;font-family:inherit;font-size:12px;font-weight:500}button:hover{background:#2a3e40;border-color:#779f96}button:focus-visible,a:focus-visible,summary:focus-visible{outline:2px solid #b5d4c3;outline-offset:3px}button:disabled{opacity:.4;cursor:not-allowed}input[type=checkbox]{accent-color:#a2c4ad}#pause{min-width:65px;border-color:#8a957c;color:#dce6c5}
+#map{grid-column:1;grid-row:2;min-height:0;overflow:hidden}#side{grid-column:2;grid-row:2;width:auto;min-width:0;flex:none;padding:0;border-left:1px solid #344341;background:#121a1d;scrollbar-width:thin;scrollbar-color:#3e5554 transparent}
+.panel-tabs{position:sticky;top:0;z-index:4;background:#121a1d;display:grid;grid-template-columns:repeat(4,1fr);border-bottom:1px solid var(--line);padding:10px 10px 0;gap:3px}.panel-tabs button{border:0;border-bottom:2px solid transparent;background:none;padding:12px 3px;color:var(--dim);border-radius:0;font-size:11px}.panel-tabs button[aria-selected=true]{border-color:#b7bd97;color:#e4e9cf}
+.hud-panel{padding:18px 16px}.hud-panel[hidden]{display:none}.section-kicker{font-size:9px;color:#a6b9ad;letter-spacing:.18em;text-transform:uppercase;margin-bottom:7px}.hud-panel h2{margin:0 0 14px;font-size:20px;letter-spacing:-.02em;text-transform:none;color:#e1e9df;font-weight:500}.hud-panel h3{font-size:11px;letter-spacing:.06em;color:#b8c9c0;font-weight:500;margin:20px 0 10px}
+.kpi{gap:8px}.card{border:1px solid #2c3b3d;background:#172225;border-radius:4px;padding:11px}.card .v{font-size:21px;font-weight:500;letter-spacing:-.03em}.card .l{font-size:10px;margin-top:5px;color:#9eb0a9}.hud-panel details{border-top:1px solid var(--line);padding:12px 0}.hud-panel summary{cursor:pointer;color:#ccd8cd;font-size:12px;list-style-position:inside}.hud-panel details>div,.hud-panel details>pre{margin-top:12px}.table-scroll{overflow:auto;max-width:100%}th,td{padding:6px}.sector-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:6px}.sector-card{display:flex;flex-direction:column;align-items:flex-start;text-align:left;padding:10px;background:#172225;gap:5px}.sector-card strong{font-weight:500;font-size:12px}.sector-card small{font-size:10px;color:#9eb0a9}.sector-card .service-bars{display:flex;gap:4px;width:100%}.service-bars span{height:3px;background:#415553;flex:1}.service-bars .good{background:#91b897}.service-bars .warn{background:#d6b271}
+#layers{display:block}#layers fieldset{margin:0 0 16px;padding:0;border:0}#layers legend{padding:0 0 9px;color:#8faaa2;font-size:10px;text-transform:uppercase;letter-spacing:.1em}.layer-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}label.chk{border:1px solid #2c4141;background:#182527;display:flex;align-items:center;gap:7px;border-radius:4px;font-size:11px;min-height:36px;padding:8px}label.chk:has(input:checked){border-color:#6d9385;background:#223731;color:#e2e9d6}.muted-copy{color:#91a79e;font-size:11px;line-height:1.6}
+#fly{display:grid;grid-template-columns:1fr 1fr;gap:7px}#fly button{text-align:left;padding:13px}.destination-primary{grid-column:1/-1;background:#263c34;color:#e1e6c6}
+#banner{left:18px;top:16px;max-width:calc(100% - 36px);background:#111a1ddd;border-color:#354846;font-size:11px;border-radius:4px;padding:9px 12px;backdrop-filter:blur(8px)}#info{top:66px;right:18px;background:#111b1eef;border-color:#607e71;padding:15px;border-radius:5px;z-index:5;max-height:calc(100% - 180px);overflow:auto}#infoclose{background:transparent;padding:3px 6px;font-size:10px}#alerts{top:58px;left:18px;max-width:calc(100% - 36px);font-size:11px;border-radius:4px}#hint{bottom:12px;left:18px;background:transparent;border:0;padding:0;font-size:10px;letter-spacing:.02em}
+#view-tools{position:absolute;left:18px;bottom:57px;z-index:3;display:flex;flex-direction:column;gap:8px;max-width:calc(100% - 36px)}.view-presets{display:flex;gap:2px;background:#111b1eea;border:1px solid #3a504a;padding:4px;border-radius:5px;align-self:flex-start}.view-presets button{background:transparent;border:0;padding:9px 13px;color:#9bada7;font-size:11px}.view-presets button[aria-pressed=true]{background:#314b3e;color:#e1eacb}.map-key{display:flex;gap:14px;flex-wrap:wrap;background:#111b1edd;padding:10px 12px;border:1px solid #2c4141;border-radius:4px;font-size:10px;color:#b8c9bf;max-width:510px}.map-key span{display:flex;align-items:center;gap:6px}.map-key i{display:inline-block;width:14px;height:3px;background:var(--swatch);border-radius:2px}.map-key b{font-weight:400;color:#dce4d8}
+body.panel-collapsed{grid-template-columns:minmax(0,1fr) 0}body.panel-collapsed #side{display:none}.ops-actions{display:grid;grid-template-columns:1fr 1fr;gap:6px}.ops-actions .danger{color:#e6a497;border-color:#75534e}#ctrl{overflow-wrap:anywhere}#token{width:100%;margin:8px 0;background:#0c1618;color:#c7d5cb;border:1px solid #425c51;padding:9px}
+@media(max-width:1250px){#commandbar{gap:12px;padding:0 14px}.brand strong{font-size:12px}.brand small{font-size:8px}.brand-mark{display:none}.main-nav a{padding:12px 7px}.transport #time{display:none}}
+@media(max-width:980px){body{grid-template-columns:minmax(0,1fr) 310px;grid-template-rows:106px minmax(0,1fr)}#commandbar{flex-wrap:wrap;gap:4px 12px;padding:10px 14px}.main-nav{order:3;width:100%;flex:1 0 100%}.transport{margin-left:auto}.hud-panel{padding:15px 12px}.brand small{display:none}#hint{display:none}}
+@media(max-width:700px){body{display:flex;flex-direction:column;height:100dvh;overflow:hidden}#commandbar{flex:0 0 auto;min-height:102px}#map{flex:1;min-height:42vh;height:auto}#side{width:100%;flex:0 0 36vh;border-left:0;border-top:1px solid #344341;overflow:auto}body.panel-collapsed #side{display:none}#banner{font-size:10px}#view-tools{left:10px;bottom:12px}.view-presets button{padding:8px 10px}.map-key{max-width:300px;gap:6px 12px;font-size:9px}#info{top:55px;right:10px;width:260px;max-height:65%}}
+@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
+
 </style>
 <script type="importmap">{"imports":{"three":"__THREE_BASE__build/three.module.js","three/addons/":"__THREE_BASE__examples/jsm/"}}</script>
 </head>
 <body>
+<header id="commandbar">
+ <div class="brand"><span class="brand-mark" aria-hidden="true">HH</span><div><strong>HADLEY'S HOPE</strong><small>LV–426 · COLONY OPERATIONS</small></div></div>
+ <nav class="main-nav" aria-label="Main navigation"><a href="/" aria-current="page">3D map</a><a href="/flat">Map</a><a href="/attractors" class="attr-link">Attractors</a><a href="/graph">Systems</a><a href="/bus">Controllers</a><a href="/house">House</a></nav>
+ <div class="transport"><span id="time"></span><button id="pause" title="Pause or resume simulation">Pause</button><label for="speed">Speed</label><input type="range" id="speed" min="0" max="100" value="45"><span id="speedv"></span><button id="panel-toggle" aria-expanded="true" aria-controls="side" title="Show or hide management panel">Panel</button></div>
+</header>
 <div id="map">
-  <div id="banner">connecting...</div>
-  <div id="hint">drag: rotate &nbsp; right-drag / shift-drag / WASD / arrows: move &nbsp; wheel: zoom &nbsp; double-click: centre there &nbsp; click a building, rover or person for live stats &nbsp; flat map: <b>/flat</b> &nbsp; bus and house programs: <b><a href="/bus" target="_blank" style="color:#5aa9ff;pointer-events:auto">/bus</a></b></div>
-  <div id="tip"></div>
-  <div id="info"><span class="close" id="infoclose">close</span><h3 id="infotitle"></h3><div id="infobody"></div></div>
-  <div id="alerts"></div>
-  <div id="toast"></div>
-  <div id="finished"></div>
+ <div id="banner" role="status">Connecting to colony…</div>
+ <div id="hint">Drag to orbit · Right-drag / WASD to pan · Scroll to zoom · Click to inspect</div>
+ <div id="tip"></div>
+ <div id="info"><button class="close" id="infoclose" aria-label="Close inspector">Close</button><h3 id="infotitle"></h3><div id="infobody"></div></div>
+ <div id="alerts" role="status"></div><div id="toast" role="status"></div><div id="finished"></div>
+ <div id="view-tools"><div class="view-presets" role="group" aria-label="Map view"><button data-view="colony" aria-pressed="true">Colony</button><button data-view="water" aria-pressed="false">Water</button><button data-view="power" aria-pressed="false">Power</button><button data-view="network" aria-pressed="false">Network</button></div><div id="map-key" class="map-key" aria-label="Map legend"></div></div>
 </div>
-<div id="side">
-  <div class="row" style="margin-bottom:8px"><a href="/" class="tab on">3D planet</a><a href="/flat" class="tab">flat map</a><a href="/bus" class="tab">bus and programs</a><a href="/house" class="tab">house</a><a href="/graph" class="tab">system graph</a></div>
-  <h1>Hadley's Hope, LV-426</h1>
-  <div class="row"><span id="time" style="font-weight:600;min-width:120px"></span><button id="pause">Pause</button>
-    <span class="dim">speed</span><input type="range" id="speed" min="0" max="100" value="45"><span id="speedv" class="dim" style="min-width:64px"></span></div>
-  <div class="row" style="margin-top:6px"><span class="dim">admin token</span><input type="text" id="token" placeholder="paste token"><button id="tokenbtn">use</button><span id="tokenstate" class="dim"></span></div>
-  <h2>Layers</h2>
-  <div class="row" id="layers">
-    <label class="chk"><input type="checkbox" data-l="issues" checked> issues</label>
-    <label class="chk"><input type="checkbox" data-l="nonet" checked> no internet</label>
-    <label class="chk"><input type="checkbox" data-l="ups" checked> ups charging</label>
-    <label class="chk"><input type="checkbox" data-l="heater"> heaters on</label>
-    <label class="chk"><input type="checkbox" data-l="power" checked> power flow</label>
-    <label class="chk"><input type="checkbox" data-l="water" checked> water flow</label>
-    <label class="chk"><input type="checkbox" data-l="packets" checked> packets</label>
-    <label class="chk"><input type="checkbox" data-l="people" checked> people</label>
-    <label class="chk"><input type="checkbox" data-l="threats" checked> xenomorphs, marines</label>
-    <label class="chk"><input type="checkbox" data-l="labels" checked> labels</label>
-    <label class="chk"><input type="checkbox" data-l="ctrl" checked> house programs</label>
-    <label class="chk"><input type="checkbox" data-l="bloom" checked> bloom</label>
-    <label class="chk"><input type="checkbox" data-l="shadows" checked> shadows</label>
-  </div>
-  <div id="ctrl" class="dim" style="font-size:11px;margin-top:4px"></div>
-  <div style="margin-top:4px"><a href="/bus" target="_blank">open the bus page: every house, its program, its last decision, program comparison</a></div>
-  <h2>Fly to</h2>
-  <div class="row" id="fly"><button data-f="hub">hub</button><button data-f="gate">west gate</button><button data-f="reactor">reactor</button><button data-f="solar">solar</button><button data-f="tower">tower</button><button data-f="mine">mine</button><button data-f="city">city</button><button data-f="planet">planet</button></div>
-  <h2>Inject</h2>
-  <div class="row">
-    <button data-i="span">break span</button><button data-i="pole">fell pole</button><button data-i="xeno">xenomorphs</button>
-    <button data-i="storm">storm</button><button data-i="trunk">cut trunk</button><button data-i="pump">pump trip</button>
-    <button data-i="marines">marines fire</button><button data-i="scram">SCRAM</button><button data-i="road">break road</button><button data-i="money">+50k cr</button>
-    <button id="reset" style="border-color:#e2574d">new colony</button>
-  </div>
-  <h2>Colony</h2>
-  <div class="kpi" id="kpi"></div>
-  <h2>Reactor and power</h2>
-  <div id="reactor" class="card"></div>
-  <h2>Sectors <span class="dim" style="font-weight:400;text-transform:none">(click a row to fly there)</span></h2>
-  <table id="sectors"><thead><tr><th>#</th><th>cr</th><th>kW</th><th>avg C</th><th>min C</th><th>pwr</th><th>water</th><th>net</th><th>UPS</th><th>waste</th><th>san</th><th>gate</th><th>road</th></tr></thead><tbody></tbody></table>
-  <h2>Open issues <span id="nissues" class="dim"></span></h2>
-  <div id="issues" class="dim" style="font-size:11px;max-height:120px;overflow-y:auto"></div>
-  <h2>Events</h2>
-  <div id="log"></div>
-  <h2>Last monthly report</h2>
-  <pre id="report">no month closed yet</pre>
-</div>
+<aside id="side" aria-label="Colony management">
+ <div class="panel-tabs" role="tablist" aria-label="Management panels"><button id="tab-overview" role="tab" aria-controls="panel-overview" aria-selected="true" data-panel="overview">Overview</button><button id="tab-layers" role="tab" aria-controls="panel-layers" aria-selected="false" data-panel="layers" tabindex="-1">Layers</button><button id="tab-places" role="tab" aria-controls="panel-places" aria-selected="false" data-panel="places" tabindex="-1">Places</button><button id="tab-operations" role="tab" aria-controls="panel-operations" aria-selected="false" data-panel="operations" tabindex="-1">Operations</button></div>
+ <section id="panel-overview" class="hud-panel" role="tabpanel" aria-labelledby="tab-overview">
+  <div class="section-kicker">Colony telemetry</div><h2>Current situation</h2><div class="kpi" id="kpi"></div>
+  <h3>Districts</h3><div id="sector-cards" class="sector-grid"></div>
+  <details><summary>Reactor &amp; power</summary><div id="reactor" class="card"></div></details>
+  <details><summary>District data</summary><div class="table-scroll"><table id="sectors"><thead><tr><th>#</th><th>cr</th><th>kW</th><th>avg °C</th><th>min °C</th><th>power</th><th>water</th><th>net</th><th>UPS</th><th>waste</th><th>san.</th><th>gate</th><th>road</th></tr></thead><tbody></tbody></table></div></details>
+  <details open><summary>Maintenance <span id="nissues" class="dim"></span></summary><div id="issues" class="dim" style="font-size:11px;max-height:150px;overflow:auto"></div></details>
+  <details><summary>Event log</summary><div id="log"></div></details><details><summary>Monthly report</summary><pre id="report">No month closed yet.</pre></details>
+ </section>
+ <section id="panel-layers" class="hud-panel" role="tabpanel" aria-labelledby="tab-layers" hidden>
+  <div class="section-kicker">Display controls</div><h2>Read the city</h2>
+  <div id="layers">
+   <fieldset><legend>World</legend><div class="layer-grid"><label class="chk"><input type="checkbox" data-l="people" checked>Colonists</label><label class="chk"><input type="checkbox" data-l="threats" checked>Threats &amp; marines</label><label class="chk"><input type="checkbox" data-l="labels">Place labels</label><label class="chk"><input type="checkbox" data-l="cutaway">House cutaway</label></div></fieldset>
+   <fieldset><legend>Infrastructure</legend><div class="layer-grid"><label class="chk"><input type="checkbox" data-l="underground">Buried utilities</label><label class="chk"><input type="checkbox" data-l="water" checked>Water flow</label><label class="chk"><input type="checkbox" data-l="power">Power flow</label><label class="chk"><input type="checkbox" data-l="packets">Data packets</label></div></fieldset>
+   <fieldset><legend>Indicators</legend><div class="layer-grid"><label class="chk"><input type="checkbox" data-l="issues" checked>Faults</label><label class="chk"><input type="checkbox" data-l="nonet">Offline homes</label><label class="chk"><input type="checkbox" data-l="ups">UPS activity</label><label class="chk"><input type="checkbox" data-l="heater">Heating</label><label class="chk"><input type="checkbox" data-l="ctrl">House programs</label></div></fieldset>
+   <fieldset><legend>Graphics</legend><div class="layer-grid"><label class="chk"><input type="checkbox" data-l="bloom" checked>Light bloom</label><label class="chk"><input type="checkbox" data-l="shadows" checked>Shadows</label></div></fieldset>
+  </div><p class="muted-copy">Select Water below the map to inspect underground pipes. Colours identify separate networks; click a pipe for its material, diameter and live flow.</p>
+ </section>
+ <section id="panel-places" class="hud-panel" role="tabpanel" aria-labelledby="tab-places" hidden>
+  <div class="section-kicker">Camera navigation</div><h2>Explore the colony</h2>
+  <div id="fly"><button data-f="home" class="destination-primary">Inspect selected home</button><button data-f="city">Colony overview</button><button data-f="street">Residential street</button><button data-f="hub">Operations hub</button><button data-f="gate">West gate</button><button data-f="reactor">Reactor</button><button data-f="solar">Solar field</button><button data-f="tower">Comms tower</button><button data-f="mine">Mine</button><button data-f="planet">Planet</button></div>
+  <p class="muted-copy">Close views reveal furnished rooms and building services. Enable House cutaway in Layers to remove roofs and upper floors.</p>
+  <h3>Research</h3><a href="/attractors" class="tab">Open attractor observatory →</a>
+ </section>
+ <section id="panel-operations" class="hud-panel" role="tabpanel" aria-labelledby="tab-operations" hidden>
+  <div class="section-kicker">Operator console</div><h2>Simulation controls</h2>
+  <details><summary>Operator access <span id="tokenstate" class="dim"></span></summary><label for="token" class="muted-copy">Admin token</label><input type="password" id="token" placeholder="Enter token" autocomplete="off"><button id="tokenbtn">Enable controls</button></details>
+  <details><summary>House controllers</summary><div id="ctrl" class="dim" style="font-size:11px"></div><p><a href="/bus">Controller messages &amp; programs →</a></p></details>
+  <details><summary>Scenario events</summary><p class="muted-copy">These actions change the running simulation.</p><div class="ops-actions"><button data-i="storm">Storm</button><button data-i="xeno">Xenomorphs</button><button data-i="span">Break power span</button><button data-i="pole">Fell pole</button><button data-i="trunk">Cut main cable</button><button data-i="pump">Pump trip</button><button data-i="marines">Marine response</button><button data-i="road">Damage road</button><button data-i="money">Add 50k credits</button><button data-i="scram" class="danger">Reactor SCRAM</button><button id="reset" class="danger">Found new colony</button></div></details>
+ </section>
+</aside>
 <script type="module">
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -1298,7 +1601,22 @@ speedEl.oninput = () => { speedV.textContent = sliderToSpeed(+speedEl.value) + '
 speedEl.onchange = () => post({cmd:'speed', value: sliderToSpeed(+speedEl.value)});
 const layers = {}; document.querySelectorAll('#layers input').forEach(c => { layers[c.dataset.l] = c.checked; c.onchange = () => { layers[c.dataset.l] = c.checked; applyLayers(); }; });
 
-async function loadGeom(){ G = await (await fetch('/geometry')).json(); }
+function selectPanel(name){document.querySelectorAll('[data-panel]').forEach(b=>{const on=b.dataset.panel===name;b.setAttribute('aria-selected',String(on));b.tabIndex=on?0:-1;});document.querySelectorAll('.hud-panel').forEach(p=>p.hidden=p.id!=='panel-'+name);}
+document.querySelectorAll('[data-panel]').forEach(b=>{b.onclick=()=>selectPanel(b.dataset.panel);b.onkeydown=e=>{const names=['overview','layers','places','operations'];if(['ArrowLeft','ArrowRight','Home','End'].includes(e.key)){e.preventDefault();let i=names.indexOf(b.dataset.panel);i=e.key==='Home'?0:e.key==='End'?3:(i+(e.key==='ArrowRight'?1:3))%4;selectPanel(names[i]);document.querySelector('[data-panel="'+names[i]+'"]').focus();}};});
+document.getElementById('panel-toggle').onclick=()=>{const hidden=document.body.classList.toggle('panel-collapsed');document.getElementById('panel-toggle').setAttribute('aria-expanded',String(!hidden));resize();};
+const VIEW_PRESETS={colony:{power:false,packets:false,underground:false,nonet:false,ups:false,heater:false,ctrl:false,labels:false},water:{power:false,packets:false,underground:true,water:true,nonet:false,ups:false,ctrl:false,labels:false},power:{power:true,packets:false,underground:false,nonet:false,ups:true,ctrl:false,labels:false},network:{power:false,packets:true,underground:false,nonet:true,ups:false,ctrl:true,labels:false}};
+function updateMapKey(){const items=[];const add=(color,label)=>items.push(`<span><i style="--swatch:${color}"></i>${label}</span>`);
+ if(layers.underground){add('#4b9bb9','Potable');add('#b99865','Sanitary');add('#71988b','Storm');if(layers.water)add('#c8f6ff','Flow direction');}
+ if(layers.power)add('#f2c14e','Power');if(layers.packets)add('#4fd1c5','Data');if(layers.issues)add('#e2574d','Fault');if(layers.nonet)add('#d98082','Offline');if(layers.ups)add('#4fd1c5','UPS');
+ if(!layers.underground&&!layers.power&&!layers.packets){add('#a7af94','Habitat');add('#ffd18c','Lighting');}
+ document.getElementById('map-key').innerHTML=items.join('');
+}
+document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>{Object.assign(layers,VIEW_PRESETS[b.dataset.view]);document.querySelectorAll('#layers input').forEach(c=>c.checked=!!layers[c.dataset.l]);document.querySelectorAll('[data-view]').forEach(t=>t.setAttribute('aria-pressed',String(t===b)));applyLayers();});
+document.querySelectorAll('#layers input').forEach(c=>c.addEventListener('change',()=>{document.querySelectorAll('[data-view]').forEach(b=>b.setAttribute('aria-pressed','false'));updateMapKey();}));
+function sectorCards(s){const total=G.houses.x.length/G.cfg.sectors;document.getElementById('sector-cards').innerHTML=s.sectors.map((x,i)=>`<button class="sector-card" data-district="${i}" title="Fly to district ${i+1}"><strong>District ${String(i+1).padStart(2,'0')} <span class="${x.min_t<0?'bad':x.avg_t<15?'warn':'ok'}">${x.avg_t}°</span></strong><small>Power ${x.power_ok}/${total} · Water ${x.water_ok}/${total}</small><span class="service-bars" aria-hidden="true"><span class="${x.power_ok===total?'good':'warn'}"></span><span class="${x.water_ok===total?'good':'warn'}"></span><span class="${x.net_ok===total?'good':'warn'}"></span></span></button>`).join('');}
+document.getElementById('sector-cards').onclick=e=>{const b=e.target.closest('[data-district]');if(b)flyTo(...polar(+b.dataset.district*60+30,420),380);};
+
+async function loadGeom(){ G = await (await fetch('/geometry')).json();TER={hub:G.cfg.hub_radius,row0:G.cfg.house_radius_min,step:G.cfg.house_ring_step,rows:G.cfg.house_rows,ring:G.cfg.ring_road_radius,wall:G.cfg.wall_radius}; }
 async function poll(){
   try { const s = await (await fetch('/state')).json(); const first = !S; prevS = S; S = s; const now=performance.now(); pollGap = lastPoll ? Math.min(1200, now-lastPoll) : 300; lastPoll = now; renderSide(s); onState(s, first); renderInfo(); }
   catch(e) { console.error('poll failed', e); document.getElementById('banner').textContent = 'update failed: '+(e&&e.message||e); }
@@ -1323,18 +1641,18 @@ function arcPts(a0, a1, r, n=24){ const out=[]; for(let i=0;i<=n;i++) out.push(p
 function offsetArc(a0,a1,r,off,n=24){ return arcPts(a0,a1,r+off,n); }
 
 function ribbon(flat, width, h, color, opts={}){
-  const pts = subdiv(flat, 10); const pos=[], idx=[];
+  const pts = subdiv(flat, 10); const pos=[], idx=[],uv=[];let distance=0;
   for(let i=0;i<pts.length;i++){ const p=pts[i], q=pts[Math.min(i+1,pts.length-1)], o=pts[Math.max(i-1,0)]; let dx=q[0]-o[0], dy=q[1]-o[1]; const L=Math.hypot(dx,dy)||1; dx/=L; dy/=L; const nx=-dy*width/2, ny=dx*width/2;
+    if(i)distance+=Math.hypot(p[0]-pts[i-1][0],p[1]-pts[i-1][1]);uv.push(0,distance/4,width/4,distance/4);
     const a=sph(p[0]+nx,p[1]+ny,h), b=sph(p[0]-nx,p[1]-ny,h); pos.push(a.x,a.y,a.z,b.x,b.y,b.z); if(i<pts.length-1){ const k=i*2; idx.push(k,k+1,k+2, k+1,k+3,k+2); } }
-  const g=new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos,3)); g.setIndex(idx); g.computeVertexNormals();
+  const g=new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos,3)); g.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));g.setIndex(idx); g.computeVertexNormals();
   const m=new THREE.Mesh(g, new THREE.MeshStandardMaterial({color, roughness:1, metalness:0, polygonOffset:true, polygonOffsetFactor:-1, ...opts})); world.add(m); return m;
 }
 function tube(pts3, radius, color, opts={}){ const g=new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts3), Math.max(8, pts3.length*3), radius, 6, false); const m=new THREE.Mesh(g, new THREE.MeshStandardMaterial({color, roughness:.5, metalness:.3, ...opts})); world.add(m); return m; }
-function cap(radius, h, color, rings=24, segs=96, bump=0){ const pos=[], idx=[]; for(let r=0;r<=rings;r++){ const rr=radius*r/rings; for(let s=0;s<segs;s++){ const [x,y]=polar(s*360/segs, rr); const b=bump*(Math.sin(x*0.07)*Math.cos(y*0.05)+0.6*Math.sin(x*0.19+y*0.13)); const p=sph(x,y,h+b); pos.push(p.x,p.y,p.z); } }
+function cap(radius, h, color, rings=24, segs=96, bump=0, cx=0, cy=0){ const pos=[], idx=[]; for(let r=0;r<=rings;r++){ const rr=radius*r/rings; for(let s=0;s<segs;s++){ const [x,y]=polar(s*360/segs, rr); const b=bump*(Math.sin(x*0.07)*Math.cos(y*0.05)+0.6*Math.sin(x*0.19+y*0.13)); const p=sph(x+cx,y+cy,h+b); pos.push(p.x,p.y,p.z); } }
   for(let r=0;r<rings;r++) for(let s=0;s<segs;s++){ const a=r*segs+s, b=r*segs+(s+1)%segs, c2=(r+1)*segs+s, d=(r+1)*segs+(s+1)%segs; idx.push(a,c2,b, b,c2,d); }
   const g=new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos,3)); g.setIndex(idx); g.computeVertexNormals(); const m=new THREE.Mesh(g, new THREE.MeshStandardMaterial({color, roughness:1, side:THREE.DoubleSide})); m.receiveShadow=true; world.add(m); return m; }
-function road(flat, width, h, color){ const m=ribbon(flat,width,h,color); m.receiveShadow=true; const pts=subdiv(flat,10); const off=[],offb=[]; for(let i=0;i<pts.length;i++){ const p=pts[i], q=pts[Math.min(i+1,pts.length-1)], o=pts[Math.max(i-1,0)]; let dx=q[0]-o[0], dy=q[1]-o[1]; const L=Math.hypot(dx,dy)||1; dx/=L; dy/=L; const nx=-dy*(width/2+0.8), ny=dx*(width/2+0.8); off.push([p[0]+nx,p[1]+ny]); offb.push([p[0]-nx,p[1]-ny]); }
-  ribbon(off,1.4,h+0.5,0x9a9fa8); ribbon(offb,1.4,h+0.5,0x9a9fa8); return m; }
+function road(flat,width,h,color){const m=ribbon(flat,width,h,color,{map:asphaltTexture,roughness:.86,bumpMap:asphaltTexture,bumpScale:.02});m.receiveShadow=true;return m;}
 const pipeTex=(()=>{ const c=document.createElement('canvas'); c.width=64; c.height=8; const x=c.getContext('2d'); x.fillStyle='#3a78c8'; x.fillRect(0,0,64,8); x.fillStyle='#bfe0ff'; x.fillRect(0,0,14,8); x.fillStyle='#7ab8ff'; x.fillRect(14,0,10,8); const t=new THREE.CanvasTexture(c); t.wrapS=THREE.RepeatWrapping; t.wrapT=THREE.ClampToEdgeWrapping; return t; })();
 const pipeMats=[];
 function flowTube(pts3, radius, len){ const t=pipeTex.clone(); t.needsUpdate=true; t.repeat.set(Math.max(1,len/40),1); const mat=new THREE.MeshStandardMaterial({map:t, roughness:.4, metalness:.3}); mat.userData={rate:0, tex:t}; pipeMats.push(mat); const g=new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts3), Math.max(8, pts3.length*3), radius, 8, false); const m=new THREE.Mesh(g, mat); m.castShadow=true; world.add(m); return m; }
@@ -1381,16 +1699,16 @@ function retext(sprite, text, color){ const key=text+'|'+color+'|'+sprite.userDa
 
 // ---------- scene ----------
 const mapEl=document.getElementById('map');
-const renderer=new THREE.WebGLRenderer({antialias:true}); renderer.setPixelRatio(Math.min(devicePixelRatio,2)); renderer.shadowMap.enabled=true; renderer.shadowMap.type=THREE.PCFSoftShadowMap; renderer.toneMapping=THREE.ACESFilmicToneMapping; renderer.toneMappingExposure=1.3; mapEl.appendChild(renderer.domElement);
+const renderer=new THREE.WebGLRenderer({antialias:true}); renderer.setPixelRatio(Math.min(devicePixelRatio,2)); renderer.shadowMap.enabled=true; renderer.shadowMap.type=THREE.PCFSoftShadowMap; renderer.toneMapping=THREE.ACESFilmicToneMapping; renderer.toneMappingExposure=1.05; mapEl.appendChild(renderer.domElement);
 const scene=new THREE.Scene(); scene.background=new THREE.Color(0x05070b);
-const camera=new THREE.PerspectiveCamera(50,1,1,80000); camera.position.set(500, RP+1500, 1700);
-const controls=new OrbitControls(camera, renderer.domElement); controls.target.set(0,RP,0); controls.minDistance=40; controls.maxDistance=RP*4; controls.enablePan=true; controls.screenSpacePanning=false; controls.panSpeed=2.2; controls.zoomSpeed=3.0; controls.enableDamping=true; controls.dampingFactor=0.1; controls.keyPanSpeed=40; controls.listenToKeyEvents(window);
+const camera=new THREE.PerspectiveCamera(50,1,.15,80000); camera.position.set(500, RP+1500, 1700);
+const controls=new OrbitControls(camera, renderer.domElement); controls.target.set(0,RP,0); controls.minDistance=3; controls.maxDistance=RP*4; controls.enablePan=true; controls.screenSpacePanning=false; controls.panSpeed=2.2; controls.zoomSpeed=3.0; controls.enableDamping=true; controls.dampingFactor=0.1; controls.keyPanSpeed=40; controls.listenToKeyEvents(window);
 controls.mouseButtons={LEFT:THREE.MOUSE.ROTATE, MIDDLE:THREE.MOUSE.DOLLY, RIGHT:THREE.MOUSE.PAN};
 const composer=new EffectComposer(renderer); composer.addPass(new RenderPass(scene,camera)); const bloomPass=new UnrealBloomPass(new THREE.Vector2(800,600), 0.45, 0.5, 0.86); composer.addPass(bloomPass);
 window.addEventListener('keydown', e=>{ if(e.shiftKey) controls.mouseButtons.LEFT=THREE.MOUSE.PAN; if(['w','a','s','d'].includes(e.key)){ const d=camera.position.distanceTo(controls.target)*0.06; const f=new THREE.Vector3().subVectors(controls.target,camera.position); const n=controls.target.clone().normalize(); f.projectOnPlane(n).normalize(); const r=new THREE.Vector3().crossVectors(f,n).normalize(); const m=e.key==='w'?f:e.key==='s'?f.clone().negate():e.key==='d'?r.clone().negate():r; m.multiplyScalar(d); controls.target.add(m); camera.position.add(m); } });
 window.addEventListener('keyup', e=>{ if(!e.shiftKey) controls.mouseButtons.LEFT=THREE.MOUSE.ROTATE; });
-scene.add(new THREE.AmbientLight(0xa8b0c4, 2.8)); scene.add(new THREE.HemisphereLight(0x778ab0, 0x2a2118, 1.2));
-const sun=new THREE.DirectionalLight(0xffe0b0, 1.3); scene.add(sun); sun.castShadow=true; sun.shadow.mapSize.set(2048,2048); sun.shadow.camera.near=100; sun.shadow.camera.far=30000; sun.shadow.bias=-0.0008; sun.shadow.normalBias=1.5;
+scene.add(new THREE.AmbientLight(0xa8b0c4, 1.35)); scene.add(new THREE.HemisphereLight(0x778ab0, 0x2a2118, 1.2));
+const sun=new THREE.DirectionalLight(0xffe0b0, 1.3); scene.add(sun); sun.castShadow=true; sun.shadow.mapSize.set(2048,2048); sun.shadow.camera.near=100; sun.shadow.camera.far=30000; sun.shadow.bias=-0.0008; sun.shadow.normalBias=.12;
 const sunTarget=new THREE.Object3D(); scene.add(sunTarget); sun.target=sunTarget; const sunSprite=new THREE.Sprite(new THREE.SpriteMaterial({map:TEX.glow, transparent:true, depthTest:false})); sunSprite.scale.set(1800,1800,1); scene.add(sunSprite);
 { const n=3000, p=new Float32Array(n*3); for(let i=0;i<n;i++){ const v=new THREE.Vector3().randomDirection().multiplyScalar(60000); p.set([v.x,v.y,v.z], i*3); } const g=new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(p,3)); scene.add(new THREE.Points(g, new THREE.PointsMaterial({color:0xbfc8dc, size:2.2, sizeAttenuation:false}))); }
 // planet: procedural terrain baked once on the CPU (value noise, ridges, craters; flat under the colony),
@@ -1452,17 +1770,402 @@ function localGroup(x,y,h,yaw){ const g=new THREE.Group(); g.position.copy(sph(x
 function pointsLayer(n, map, color, size, additive){ const g=new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(n*3).fill(-99999),3)); const m=new THREE.Points(g, new THREE.PointsMaterial({map, color, size, transparent:true, depthWrite:false, blending: additive?THREE.AdditiveBlending:THREE.NormalBlending, sizeAttenuation:true})); m.frustumCulled=false; world.add(m); return m; }
 function setPoints(layer, flatPts, h){ const a=layer.geometry.attributes.position; const n=a.count; for(let i=0;i<n;i++){ if(i<flatPts.length){ const p=sph(flatPts[i][0],flatPts[i][1],h); a.setXYZ(i,p.x,p.y,p.z); } else a.setXYZ(i,0,-99999,0); } a.needsUpdate=true; }
 
+// ---------- colony construction kit: batched geometry, deterministic detail ----------
+const DIM=[[20,4.6,18],[16,7.8,18],[17,4.6,18],[20,8.4,20]];
+const houseDetails=new Map(), houseShells=[], roofProxies=[];
+let utilityGroup=new THREE.Group(), utilityBatches=[], utilityDrops=null, utilityPaths=[],utilityTime=0,utilityLastTime=0;
+let streetDetail=new THREE.Group(), cityPlate=null, detailFrame=0;
+world.add(utilityGroup,streetDetail);
+const UNIT={box:new THREE.BoxGeometry(1,1,1),cyl:new THREE.CylinderGeometry(1,1,1,10),
+  ball:new THREE.SphereGeometry(1,8,6),ring:new THREE.TorusGeometry(1,.13,5,12)};
+const MAT={};
+function material(name,color,opts={}){ if(!MAT[name]) MAT[name]=new THREE.MeshStandardMaterial({color,roughness:.78,...opts}); return MAT[name]; }
+const M={
+  steel:material('steel',0x465052,{metalness:.72,roughness:.48}),
+  trim:material('trim',0x929c98,{metalness:.65,roughness:.38}),
+  panel:material('panel',0x918e7c,{metalness:.35}),
+  dark:material('dark',0x1d2528), concrete:material('concrete',0x696a60),
+  brick:material('brick',0x716050), grout:material('grout',0x363a36),
+  wood:material('wood',0x896a46), fabric:material('fabric',0x656e5a),
+  white:material('white',0xc1c6ba), amber:material('amber',0xc99742),
+  rubber:material('rubber',0x171d20), blue:material('blue',0x2e7083),
+  glow:material('glow',0xffcf85,{emissive:0xffa849,emissiveIntensity:.7}),
+  glass:new THREE.MeshPhysicalMaterial({color:0x9abcc1,metalness:.08,roughness:.12,transparent:true,
+    opacity:.28,depthWrite:false,side:THREE.DoubleSide,envMapIntensity:1.5,clearcoat:1}),
+  screen:material('screen',0x263e47,{emissive:0x386575,emissiveIntensity:.6})
+};
+// An inexpensive procedural environment provides view-dependent glass reflections.
+{ const sky=new THREE.Scene(); sky.background=new THREE.Color(0x46535b);
+  const a=new THREE.Mesh(new THREE.SphereGeometry(40,16,12),new THREE.MeshBasicMaterial({color:0x121b21,side:THREE.BackSide})); sky.add(a);
+  for(let i=0;i<8;i++){ const p=new THREE.Mesh(new THREE.PlaneGeometry(7,18),new THREE.MeshBasicMaterial({color:i%2?0xa7b7b5:0xddd0ab,side:THREE.DoubleSide})); p.position.set(Math.sin(i)*25,8,Math.cos(i)*25); p.lookAt(0,0,0); sky.add(p); }
+  const pmrem=new THREE.PMREMGenerator(renderer); const env=pmrem.fromScene(sky,.06); scene.environment=env.texture;
+  sky.traverse(o=>{if(o.isMesh){o.geometry.dispose();o.material.dispose();}});pmrem.dispose(); }
+class Kit {
+  constructor(parent){ this.parent=parent;this.buckets=new Map(); }
+  add(shape,mat,p,s=[1,1,1],rotation=null,color=null,tag=null){
+    const key=shape+'|'+mat.uuid; if(!this.buckets.has(key))this.buckets.set(key,{shape,mat,items:[]});
+    const q=rotation instanceof THREE.Quaternion?rotation:new THREE.Quaternion().setFromEuler(new THREE.Euler(...(rotation||[0,0,0])));
+    const matrix=new THREE.Matrix4().compose(new THREE.Vector3(...p),q,new THREE.Vector3(...s));
+    this.buckets.get(key).items.push({matrix,color,tag});
+  }
+  box(mat,x,y,z,w,h,d,rot=null,col=null){this.add('box',mat,[x,y,z],[w,h,d],rot,col);}
+  pipe(mat,a,b,r,tag=null){ const p=new THREE.Vector3(...a),q=new THREE.Vector3(...b),delta=q.clone().sub(p);if(delta.length()<1e-5)return;
+    this.add('cyl',mat,p.add(q).multiplyScalar(.5).toArray(),[r,delta.length(),r],new THREE.Quaternion().setFromUnitVectors(UP,delta.normalize()),null,tag); }
+  finish(){const meshes=[];for(const {shape,mat,items} of this.buckets.values()){
+    const mesh=new THREE.InstancedMesh(UNIT[shape],mat,items.length);
+    items.forEach((v,i)=>{mesh.setMatrixAt(i,v.matrix);if(v.color!==null)mesh.setColorAt(i,new THREE.Color(v.color));});
+    mesh.instanceMatrix.needsUpdate=true;mesh.castShadow=!mat.transparent;mesh.receiveShadow=true;mesh.userData.tags=items.map(v=>v.tag);
+    mesh.computeBoundingSphere();this.parent.add(mesh);meshes.push(mesh);
+  }return meshes;}
+}
+function patternTexture(kind){
+ const c=document.createElement('canvas');c.width=c.height=256;const x=c.getContext('2d');let seed=814;
+ const rnd=()=>{seed=(seed*16807)%2147483647;return seed/2147483647;};
+ x.fillStyle=kind==='paving'?'#494b46':'#303637';x.fillRect(0,0,256,256);
+ if(kind==='paving'){for(let row=0;row<16;row++)for(let col=-1;col<8;col++){const v=95+Math.floor(rnd()*28);x.fillStyle=`rgb(${v},${v+3},${v-3})`;x.fillRect(col*36+(row%2)*18+1,row*16+1,34,14);}}
+ else for(let k=0;k<19000;k++){const v=35+rnd()*45;x.fillStyle=`rgba(${v},${v+3},${v+4},.5)`;x.fillRect(rnd()*256,rnd()*256,1,1);}
+ const t=new THREE.CanvasTexture(c);t.wrapS=t.wrapT=THREE.RepeatWrapping;t.colorSpace=THREE.SRGBColorSpace;t.anisotropy=Math.min(8,renderer.capabilities.getMaxAnisotropy());return t;
+}
+const pavingTexture=patternTexture('paving'),asphaltTexture=patternTexture('asphalt');
+function buildNeighborhood(){
+ const n=G.houses.x.length,m4=new THREE.Matrix4();
+ housesMesh=new THREE.InstancedMesh(UNIT.box,new THREE.MeshStandardMaterial({roughness:.8}),n);housesMesh.castShadow=true;world.add(housesMesh);
+ const roofs=new THREE.InstancedMesh(UNIT.box,M.steel,n);world.add(roofs);
+ windowsMesh=new THREE.InstancedMesh(UNIT.box,M.glow,1);windowsMesh.count=0;world.add(windowsMesh);windowSlots=[];
+ const trim=new Kit(world);
+ for(let i=0;i<n;i++){
+   const x=G.houses.x[i],y=G.houses.y[i],a=G.houses.angle[i]*Math.PI/180,[w,h,d]=DIM[G.houses.type[i]],yaw=-a-Math.PI/2;
+   flatHouses.push([x,y]);const q=quatAt(x,y,yaw),base=sph(x,y,2.35);
+   const matrix=new THREE.Matrix4().compose(base.clone().add(new THREE.Vector3(0,h/2,0).applyQuaternion(q)),q,new THREE.Vector3(w,h,d));
+   housesMesh.setMatrixAt(i,matrix);housesMesh.setColorAt(i,new THREE.Color([0x898674,0x999786,0x7e8c85,0xb0a48a][G.houses.type[i]]));
+   const rm=new THREE.Matrix4().compose(base.clone().add(new THREE.Vector3(0,h+.18,0).applyQuaternion(q)),q,new THREE.Vector3(w+.5,.36,d+.5));roofs.setMatrixAt(i,rm);
+   roofProxies.push({mesh:roofs,matrix:rm});houseShells.push({matrix,base,q,yaw});
+   // Silhouettes stay present at colony scale: rooftop HVAC, duct, parapet bands.
+   for(const [p,scale,mat] of [[[w*.25,h+.85,-d*.15],[3.5,1.4,2.5],M.trim],
+      [[-w*.28,h+.9,-d*.2],[.55,1.8,.55],M.steel]]){
+     const pos=base.clone().add(new THREE.Vector3(...p).applyQuaternion(q));trim.add('box',mat,pos.toArray(),scale,q);
+   }
+ }
+ trim.finish();housesMesh.instanceMatrix.needsUpdate=true;roofs.instanceMatrix.needsUpdate=true;
+}
+function makeHouse(i){
+ const [w,h,d]=DIM[G.houses.type[i]],type=G.houses.type[i],floors=h>6?2:1;
+ const g=new THREE.Group(),shell=new THREE.Group(),roof=new THREE.Group(),inside=new THREE.Group();g.add(shell,inside,roof);
+ g.position.copy(houseShells[i].base);g.quaternion.copy(houseShells[i].q);world.add(g);
+ const k=new Kit(shell),r=new Kit(roof),interiorKit=new Kit(inside),accent=[0xaaa18a,0x8d9e99,0xa58b62,0x788681][i%4];
+ const floorH=(h-.45)/floors;
+ k.box(M.concrete,0,-.4,0,w+.8,.8,d+.8);
+ // Actual individual brick plinth, running bond, on all four sides.
+ for(let side=0;side<4;side++){const width=side%2?d:w;for(let row=0;row<3;row++)for(let j=0;j<Math.floor(width/.62);j++){
+   const along=-width/2+.31+j*.62+(row%2)*.29;if(along>width/2-.12)continue;
+   const x=side===0?along:side===2?-along:(side===1?w/2:-w/2),z=side===0?d/2:side===2?-d/2:(side===1?-along:along);
+   k.box(M.brick,x,-.69+row*.23,z,side%2?.24:.59,.205,side%2?.59:.24,null,0x756650+(i%3)*0x030303);
+ }}
+ // Hollow four-wall shell: prefab bays assembled around genuine glass apertures.
+ for(let side=0;side<4;side++){
+  const width=side%2?d:w,depth=side%2?w:d;
+  const wall=(mat,u,v,ww,hh,thick=.22,offset=0)=>{
+    const x=side===0?u:side===2?-u:(side===1?depth/2+offset:-depth/2-offset);
+    const z=side===0?depth/2+offset:side===2?-depth/2-offset:(side===1?-u:u);
+    k.box(mat,x,v,z,side%2?thick:ww,hh,side%2?ww:thick,null,mat===M.panel?accent:null);
+  };
+  const bays=Math.floor(width/3.2),bw=width/bays;
+  for(let level=0;level<floors;level++)for(let b=0;b<bays;b++){
+   const u=-width/2+(b+.5)*bw,y=level*floorH;const door=side===0&&b===Math.floor(bays/2)&&level===0;
+   wall(M.steel,-width/2+b*bw,y+floorH/2,.14,floorH,.34,.05);
+   if(door){wall(M.panel,u,y+floorH-.35,bw-.12,.7);wall(M.dark,u,1.23,1.65,2.46,.18,.04);
+     wall(M.trim,u-1.02,1.23,.18,2.6,.32,.13);wall(M.trim,u+1.02,1.23,.18,2.6,.32,.13);
+     wall(M.glass,u,1.7,.85,.5,.09,.15);wall(M.amber,u+.58,1.1,.11,.16,.2,.22);
+     continue;}
+   const sill=.85,wh=1.65,ww=bw-.6;
+   wall(M.panel,u,y+sill/2,bw-.12,sill);wall(M.panel,u,y+(sill+wh+floorH)/2,bw-.12,floorH-sill-wh);
+   wall(M.panel,u-bw/2+.18,y+sill+wh/2,.32,wh);wall(M.panel,u+bw/2-.18,y+sill+wh/2,.32,wh);
+   wall(M.glass,u,y+sill+wh/2,ww,wh,.055,.04);
+   for(const uu of [u-ww/2,u,u+ww/2])wall(M.trim,uu,y+sill+wh/2,.075,wh+.12,.16,.12);
+   for(const yy of [y+sill,y+sill+wh])wall(M.trim,u,yy,ww+.16,.09,.23,.15);
+   wall(M.trim,u,y+sill-.08,ww+.35,.11,.45,.25); // drip sill
+   // Bolt heads and shallow corrugations in each modular panel.
+   for(const uu of [u-bw/2+.1,u+bw/2-.1])for(const yy of [y+.2,y+floorH-.2])wall(M.dark,uu,yy,.065,.065,.06,.19);
+   for(let j=0;j<5;j++)wall(M.trim,u-ww/2+j*ww/4,y+floorH-.42,.035,.56,.06,.14);
+  }
+  wall(M.steel,0,h-.12,width+.3,.24,.4);
+ }
+ // Roof shell, parapets, access hatch, vents, HVAC louvers and service walk.
+ r.box(M.steel,0,h,0,w+.55,.3,d+.55);
+ for(const z of [-d/2,d/2])r.box(M.trim,0,h+.35,z,w+.55,.65,.2);
+ for(const x of [-w/2,w/2])r.box(M.trim,x,h+.35,0,.2,.65,d);
+ r.box(M.dark,-w*.25,h+.2,0,2,.18,2.8);r.box(M.trim,-w*.25,h+.32,0,1.8,.13,2.6);
+ r.box(M.trim,w*.25,h+.8,-d*.15,3.5,1.35,2.5);
+ for(let v=0;v<11;v++)r.box(M.dark,w*.25,h+.28+v*.1,-d*.15+1.27,3.12,.045,.05);
+ for(let v=0;v<2;v++){r.add('cyl',M.dark,[w*.25-.85+v*1.7,h+1.53,-d*.15],[.61,.08,.61]);
+   for(let j=0;j<4;j++)r.box(M.trim,w*.25-.85+v*1.7,h+1.6,-d*.15,1.1,.04,.09,[0,j*Math.PI/4,0]);}
+ r.pipe(M.trim,[w*.25,h+.55,-d*.15-1.25],[w*.25,h+.55,-d*.38],.28);
+ for(const x of [-w*.28,-w*.1]){r.pipe(M.steel,[x,h,-d*.2],[x,h+1.6,-d*.2],.16);r.add('cyl',M.trim,[x,h+1.65,-d*.2],[.35,.13,.35]);}
+ for(let j=0;j<5;j++)r.box(M.trim,-w*.25,h+.22,-d*.4+j*.65,1.25,.035,.48);
+ // Continuous rain gutters, downpipes, clips and discharge boots to storm riser.
+ for(const x of [-w/2-.22,w/2+.22]){
+   k.pipe(M.steel,[x,h-.15,-d/2],[x,h-.15,d/2],.13);
+   k.pipe(M.steel,[x,h-.15,d/2],[x,-1.0,d/2],.085);
+   k.pipe(M.steel,[x,-1,d/2],[0,-1,6],.085);
+   for(let y=.3;y<h;y+=1.2)k.add('ring',M.trim,[x,y,d/2],[.11,.11,.11],[Math.PI/2,0,0]);
+ }
+ // Six proper treads from sidewalk to porch and guarded side ramp (1:12).
+ const doorX=(-w/2+(Math.floor(Math.floor(w/3.2)/2)+.5)*(w/Math.floor(w/3.2)));
+ k.box(M.concrete,doorX,-.12,d/2+1.1,3.2,.25,2.2);
+ for(let j=0;j<6;j++)k.box(M.concrete,doorX,-1.2+.1*(j+1),d/2+4.25-j*.37,2.8,.2*(j+1),.38);
+ for(const x of [doorX-1.5,doorX+1.5]){
+   k.pipe(M.trim,[x,.85,d/2+1],[x,-.12,d/2+4.4],.045);
+   for(const z of [d/2+.4,d/2+1.9,d/2+4.3])k.pipe(M.trim,[x,-.9,z],[x,z>d/2+3?-.12:.85,z],.045);
+ }
+ k.box(M.steel,doorX,2.9,d/2+1,4,.16,2.8); // shelter over airlock
+ k.box(M.glow,doorX,2.7,d/2+.25,1.6,.08,.14);
+ // Accessible ramp runs along the front facade, with landings and twin rails.
+ const rampZ=d/2+1.1,run=7.2;
+ for(let leg=0;leg<2;leg++){
+  const midX=doorX-1.6-run/2,yy=leg===0?-.9:-.3,zz=rampZ+leg*1.6;
+  k.box(M.concrete,midX,yy,zz,run,.12,1.3,[0,0,(leg===0?-1:1)*Math.atan(1/12)]);
+  for(const dz of [-.72,.72])k.pipe(M.trim,[midX-run/2,yy+(leg===0?.3:-.3)+.9,zz+dz],[midX+run/2,yy+(leg===0?-.3:.3)+.9,zz+dz],.035);
+ }
+ k.box(M.concrete,doorX-1.6-run-.65,-.6,rampZ+.8,1.3,.12,2.9);
+ k.box(M.concrete,doorX-1.6,-1.2,rampZ,1.3,.12,1.3);
+ // Pavers on frontage, with individual joints and deterministic colour variation.
+ for(let row=0;row<17;row++)for(let col=0;col<4;col++)k.box(M.concrete,(col-1.5)*.57,-1.04,d/2+4.5+row*.54,.55,.075,.52,null,0x74766a+((row+col+i)%4)*0x030303);
+ // Meter, isolator, frost jacket and all three separate wet-core connections.
+ k.box(M.trim,w/2+.35,.6,2,.7,1.2,.8);k.box(M.dark,w/2+.72,.8,2,.02,.3,.35);
+ const meter=G.utilities.nodes[G.utilities.house_nodes[i]];
+ const meterLocal=utilityPoint([meter.x,meter.y,meter.z]).sub(houseShells[i].base).applyQuaternion(houseShells[i].q.clone().invert());
+ k.pipe(M.blue,meterLocal.toArray(),[0,-1.0,6],.065);
+ k.pipe(M.blue,[0,-1.0,6],[0,.35,6],.065);k.pipe(M.blue,[0,.35,6],[w/2+.35,.35,2],.065);
+ k.add('ring',M.amber,[w/2+.4,.4,2],[.18,.18,.18],[0,Math.PI/2,0]);
+ // Underfloor wet services are connected to the common street riser.
+ const hot=material('copper',0xa36b4b,{metalness:.78,roughness:.36});
+ k.add('cyl',M.white,[w*.36,1.1,-d*.36],[.5,2.1,.5]);
+ k.pipe(M.blue,[0,-.8,6],[w*.36,-.8,-d*.36],.04);
+ k.pipe(M.blue,[w*.36,-.8,-d*.36],[w*.36,.25,-d*.36],.04);
+ for(const end of [[w/2-1.25,.95,2.4],[w*.16,.45,-d*.26],[w*.31,.4,-d*.37],[w*.4,1.8,-d*.12]]){
+   k.pipe(M.blue,[0,-.8,6],[end[0],-.8,end[2]],.025);k.pipe(M.blue,[end[0],-.8,end[2]],end,.025);
+   k.pipe(M.steel,[end[0],-.55,end[2]],[0,-1,6],.055);k.pipe(M.steel,end,[end[0],-.55,end[2]],.055);
+ }
+ k.pipe(hot,[w*.36,2.1,-d*.36],[w/2-1.25,2.1,2.4],.023);k.pipe(hot,[w/2-1.25,2.1,2.4],[w/2-1.25,.95,2.4],.023);
+ // Interior floor plates and stairs. Upper plate hides with roof in cutaway.
+ for(let level=0;level<floors;level++){
+  const y=level*floorH; const f=level===0?interiorKit:r; const fk=f;
+  if(level===0)fk.box(M.wood,0,y+.02,0,w-.35,.12,d-.35);
+  else {const left=(-w/2+.18),right=w/2-.18,back=-d/2+.18,front=d/2-.18;
+    fk.box(M.wood,(left-.1)/2,y+.02,0,-.1-left,.12,d-.35);
+    fk.box(M.wood,(1.4+right)/2,y+.02,0,right-1.4,.12,d-.35);
+    fk.box(M.wood,.65,y+.02,(back-d*.4-.25)/2,1.5,.12,-d*.4-.25-back);
+    const stairEnd=-d*.4+5.4;fk.box(M.wood,.65,y+.02,(stairEnd+front)/2,1.5,.12,front-stairEnd);
+  }
+  // Bedroom/bath partitions leave full-height door openings.
+  f.box(M.panel,-w*.05,y+1.35,-d*.25,.12,2.7,d*.46);
+  f.box(M.panel,-w*.3,y+1.35,-.6,w*.26,2.7,.12);
+  f.box(M.trim,-w*.07,y+2.5,-.6,1.1,.28,.12);
+  // Bed, separate mattress, blanket, pillow and frame.
+  const bx=-w*.29,bz=-d*.28;
+  f.box(M.wood,bx,y+.3,bz,2.4,.45,3.8);f.box(M.white,bx,y+.65,bz,2.3,.35,3.7);
+  f.box(M.fabric,bx,y+.87,bz+.4,2.32,.12,2.7,null,accent);f.box(M.white,bx,y+.96,bz-1.3,1.6,.24,.65);
+  f.box(M.wood,bx,y+.8,bz-1.95,2.6,1.5,.16);
+  f.box(M.wood,bx+1.85,y+.5,bz-1.4,.8,.9,.8);f.add('cyl',M.glow,[bx+1.85,y+1.25,bz-1.4],[.28,.35,.28]);
+  if(type===0){for(let bunk=0;bunk<1;bunk++){
+    const zz=-d*.28+bunk*4.6,xx=-w*.29;
+    f.box(M.steel,xx,y+2.25,zz,2.4,.12,3.8);f.box(M.white,xx,y+2.47,zz,2.3,.3,3.7);
+    for(const dx of [-1.17,1.17])for(const dz of [-1.82,1.82])f.box(M.steel,xx+dx,y+1.35,zz+dz,.08,2.7,.08);
+    if(bunk===1){f.box(M.steel,xx,y+.35,zz,2.4,.12,3.8);f.box(M.white,xx,y+.57,zz,2.3,.3,3.7);}
+    for(let rung=0;rung<6;rung++)f.box(M.trim,xx+1.22,y+.3+rung*.34,zz-.6,.1,.05,.8);
+  }}
+  // Sofa with actual cushions, arms and back; coffee table and rug.
+  const sx=-w*.27,sz=d*.24;
+  f.box(M.fabric,sx,y+.48,sz,3.8,.72,1.5);f.box(M.fabric,sx,y+1.12,sz-.67,3.9,1.1,.32);
+  for(const dx of [-1.85,1.85])f.box(M.fabric,sx+dx,y+.95,sz,.35,.7,1.6);
+  for(let j=0;j<3;j++)f.box(M.white,sx-1.2+j*1.2,y+.91,sz+.1,1.12,.19,1.2,null,accent);
+  f.box(M.fabric,sx,y+.1,sz+2.1,4.4,.04,2.6);f.box(M.wood,sx,y+.67,sz+2.1,2.4,.16,1.1);
+  for(const dx of [-1,1])for(const dz of [-.4,.4])f.box(M.steel,sx+dx,y+.36,sz+2.1+dz,.08,.6,.08);
+  // TV on cabinet, speakers, books.
+  f.box(M.wood,sx,y+.5,d/2-.65,3.8,.9,.8);f.box(M.dark,sx,y+1.85,d/2-.67,2.7,1.55,.15);
+  f.box(M.screen,sx,y+1.86,d/2-.77,2.52,1.34,.025);
+  for(let j=0;j<5;j++)f.box(M.fabric,sx-1.5+j*.18,y+1.1,d/2-.55,.13,.32+.06*(j%3),.3,null,[0x70594a,0x7d8959,0x536b78][j%3]);
+  // Kitchen counter, four burners, oven glazing, sink bowl/rim and tap.
+  const kx=w/2-1.25;
+  f.box(M.white,kx,y+.52,1,1.8,1.02,5.3);f.box(M.dark,kx,y+1.1,1,1.95,.14,5.5);
+  for(let j=0;j<3;j++){f.box(M.panel,kx-0.93,y+.55,-.7+j*1.6,.04,.8,1.42);f.box(M.steel,kx-.98,y+.82,-.7+j*1.6,.06,.04,.4);}
+  for(const xx of [-.4,.4])for(const zz of [-.4,.4])f.add('ring',M.trim,[kx+xx,y+1.2,-.7+zz],[.23,.23,.23],[Math.PI/2,0,0]);
+  f.box(M.glass,kx-.97,y+.52,-.7,.02,.57,1.02);
+  f.box(M.trim,kx,y+1.2,2.4,1.15,.04,.96);f.box(M.dark,kx,y+1.23,2.4,.95,.04,.76);
+  f.pipe(M.trim,[kx+.4,y+1.2,2.9],[kx+.4,y+1.7,2.9],.04);f.pipe(M.trim,[kx+.4,y+1.7,2.9],[kx+.4,y+1.7,2.5],.04);
+  // Refrigerator, front-loading laundry, bathroom sanitary fixtures.
+  f.box(M.white,kx,y+1.12,-d/2+1.1,1.8,2.25,1.8);f.box(M.steel,kx-.94,y+1.3,-d/2+1.7,.06,.7,.07);
+  f.box(M.white,w*.16,y+.63,-d*.26,1.3,1.25,1.3);
+  f.add('ring',M.steel,[w*.16,y+.65,-d*.26+.67],[.43,.43,.43]);f.add('cyl',M.glass,[w*.16,y+.65,-d*.26+.69],[.35,.03,.35],[Math.PI/2,0,0]);
+  f.add('ball',M.white,[w*.31,y+.4,-d*.37],[.48,.33,.65]);f.box(M.white,w*.31,y+.8,-d*.42,.8,1.1,.32);
+  f.box(M.white,w*.3,y+.1,-d*.1,1.6,.18,1.6);f.box(M.glass,w*.25,y+1.2,-d*.1,.04,2.3,1.6);
+  f.pipe(M.trim,[w*.4,y+.3,-d*.12],[w*.4,y+2.3,-d*.12],.035);
+  // Dining table and four chairs, kettle and plates.
+  f.box(M.wood,w*.14,y+.92,d*.21,2.4,.15,1.8);
+  for(const dx of [-.9,.9])for(const dz of [-.6,.6])f.box(M.steel,w*.14+dx,y+.47,d*.21+dz,.08,.85,.08);
+  for(const dz of [-1.25,1.25])for(const dx of [-.7,.7]){f.box(M.wood,w*.14+dx,y+.52,d*.21+dz,.65,.12,.6);f.box(M.wood,w*.14+dx,y+.98,d*.21+dz+Math.sign(dz)*.25,.65,.9,.08);}
+  for(const dx of [-.6,.6])f.add('cyl',M.white,[w*.14+dx,y+1.02,d*.21],[.23,.025,.23]);
+ }
+ if(floors>1){for(let j=0;j<16;j++)interiorKit.box(M.steel,.65,j*floorH/16+.1,-d*.4+j*.32,1.3,.12,.34);}
+ k.finish();r.finish();interiorKit.finish();
+ g.userData.house=i;g.traverse(o=>o.userData.house=i);
+ const label=textSprite(`HH / ${String(i+1).padStart(3,'0')}   ${['CREW','HAB','THERMAL','ADMIN'][type]}`,'#ddd5b8',24);label.position.set(doorX,3.4,d/2+.2);label.scale.set(4.4,.65,1);shell.add(label);
+ const litMaterials=[M.glow,M.screen].map(m=>m.clone());g.traverse(o=>{if(o.material===M.glow)o.material=litMaterials[0];else if(o.material===M.screen)o.material=litMaterials[1];});
+ return {g,shell,roof,inside,i,litMaterials};
+}
+function updateDetail(){
+ if(!housesMesh||++detailFrame%10!==0)return;
+ const near=houseShells.map((h,i)=>[camera.position.distanceTo(h.base),i]).sort((a,b)=>a[0]-b[0]);
+ const wanted=new Set(near.filter(x=>x[0]<155).slice(0,12).map(x=>x[1]));
+ if(selected?.kind==='house'&&camera.position.distanceTo(houseShells[selected.id].base)<250)wanted.add(selected.id);
+ const zero=new THREE.Matrix4().makeScale(0,0,0);
+ for(const [i,v] of houseDetails){if(!wanted.has(i)){
+   world.remove(v.g);v.litMaterials.forEach(m=>m.dispose());v.g.traverse(o=>{if(o.isInstancedMesh)o.dispose();if(o.isSprite){o.material.dispose();}});houseDetails.delete(i);
+   housesMesh.setMatrixAt(i,houseShells[i].matrix);roofProxies[i].mesh.setMatrixAt(i,roofProxies[i].matrix);
+ }}
+ for(const i of wanted){if(!houseDetails.has(i)){houseDetails.set(i,makeHouse(i));housesMesh.setMatrixAt(i,zero);roofProxies[i].mesh.setMatrixAt(i,zero);}
+  const v=houseDetails.get(i);v.roof.visible=!layers.cutaway;v.shell.visible=true;
+  if(S){v.litMaterials[0].emissiveIntensity=S.houses.power[i]?.7:0;v.litMaterials[1].emissiveIntensity=S.houses.power[i]?.6:0;}
+  // The roof and complete upper storey contents share a removable group.
+ }
+ housesMesh.instanceMatrix.needsUpdate=true;roofProxies[0].mesh.instanceMatrix.needsUpdate=true;
+}
+
+function utilityPoint(p){return sph(p[0],p[1],p[2]-terrainH(p[0],p[1]));}
+function buildUtilities(){
+ const U=G.utilities;const kit=new Kit(utilityGroup),groundKit=new Kit(streetDetail);
+ const um=(name,color)=>material(name,color,{metalness:.45,roughness:.4,depthTest:false,transparent:true,opacity:.87});
+ const waterMat=um('potable',0x4b9bb9),sewerMat=um('sewer',0xb99865),stormMat=um('storm',0x71988b),jointMat=um('coupling',0xabb8b9);
+ function run(points,r,mat,tag){const pts=[];
+   for(let j=0;j<points.length-1;j++){
+     const a=points[j],b=points[j+1],len=Math.hypot(b[0]-a[0],b[1]-a[1]),steps=Math.max(1,Math.ceil(len/12));
+     for(let t=0;t<steps;t++){const f=t/steps;pts.push(utilityPoint(a.map((v,k)=>v+(b[k]-v)*f)));}
+   }pts.push(utilityPoint(points.at(-1)));
+   for(const p of points.slice(1,-1))kit.add("ball",mat,utilityPoint(p).toArray(),[r,r,r],null,null,tag);
+   for(let j=0;j<pts.length-1;j++){kit.pipe(mat,pts[j].toArray(),pts[j+1].toArray(),r,tag);
+     if(j%3===0){const delta=pts[j+1].clone().sub(pts[j]).normalize();kit.pipe(jointMat,pts[j].clone().addScaledVector(delta,-.13).toArray(),pts[j].clone().addScaledVector(delta,.13).toArray(),r*1.4,tag);}}
+   pts.cumulative=[0];for(let j=1;j<pts.length;j++)pts.cumulative.push(pts.cumulative[j-1]+pts[j-1].distanceTo(pts[j]));
+   return pts;
+ }
+ utilityPaths=U.links.map(e=>run(e.points,Math.max(.11,e.diameter_m/2),waterMat,{system:'water',id:e.id}));
+ run(U.plant_feed,.16,waterMat,{system:'feed',id:0});
+ for(const system of U.drainage){
+   system.links.forEach((e,i)=>run(e.points,e.diameter_m/2,system.name==='sanitary'?sewerMat:stormMat,{system:system.name,id:i}));
+   run(system.rising_main,.22,system.name==='sanitary'?sewerMat:stormMat,{system:system.name,id:-1});
+   for(let j=0;j<system.nodes.length;j++){
+    const n=system.nodes[j];if(n.kind==='pump'||n.kind==='tank')continue;
+    const cover=sph(n.x,n.y,1.28),bottom=utilityPoint([n.x,n.y,n.z]);
+    if(n.kind==='tee'&&j%3===0){
+      const q=quatAt(n.x,n.y);groundKit.add('cyl',M.steel,cover.toArray(),[.64,.11,.64],q);
+      groundKit.add('ring',M.trim,cover.clone().addScaledVector(cover.clone().normalize(),.07).toArray(),[.51,.51,.51],q.clone().multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),Math.PI/2)));
+      kit.pipe(jointMat,bottom.toArray(),cover.toArray(),.54,{system:system.name,id:-1});
+      // Ladder rungs in inspection shafts.
+      const len=bottom.distanceTo(cover),v=cover.clone().sub(bottom).normalize();
+      for(let k=.5;k<len;k+=.65){const p=bottom.clone().addScaledVector(v,k);kit.pipe(stormMat,p.clone().add(new THREE.Vector3(-.23,0,0)).toArray(),p.clone().add(new THREE.Vector3(.23,0,0)).toArray(),.035);}
+    }
+    if(n.kind==='meter'){
+      // House foul and rain stacks terminate at wet core / downpipe manifold.
+      const house=n.house,a=G.houses.angle[house]*Math.PI/180;
+      const entry=houseShells[house].base.clone().add(new THREE.Vector3(0,-1,6).applyQuaternion(houseShells[house].q));
+      kit.pipe(system.name==='storm'?stormMat:sewerMat,bottom.toArray(),entry.toArray(),.09,{system:system.name,id:-1});
+    }
+    if(system.name==='storm'&&n.kind==='tee'){
+      const rr=Math.hypot(n.x,n.y),a=Math.atan2(n.y,n.x),x=n.x+Math.cos(a)*3.6,y=n.y+Math.sin(a)*3.6,q=quatAt(x,y,-a);
+      const top=sph(x,y,1.14);groundKit.add('box',M.dark,top.toArray(),[1.1,.12,.65],q);
+      for(let k=0;k<7;k++){const p=top.clone().add(new THREE.Vector3((k-3)*.145,.08,0).applyQuaternion(q));groundKit.add('box',M.trim,p.toArray(),[.055,.055,.63],q);}
+      kit.pipe(stormMat,top.toArray(),bottom.toArray(),.14,{system:'storm',id:-1});
+    }
+   }
+ }
+ for(const n of U.nodes){if(n.kind==='tee'){const p=utilityPoint([n.x,n.y,n.z]);kit.add('ball',jointMat,p.toArray(),[.145,.145,.145]);}
+ if(n.kind==='isolation'||n.kind==='meter'){
+  const p=utilityPoint([n.x,n.y,n.z]);kit.add('ball',jointMat,p.toArray(),[.23,.23,.23]);
+  const q=quatAt(n.x,n.y);const top=p.clone().addScaledVector(p.clone().normalize(),.52);
+  kit.pipe(jointMat,p.toArray(),top.toArray(),.045);kit.add('ring',waterMat,top.toArray(),[.28,.28,.28],q.clone().multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),Math.PI/2)));
+ }}
+ utilityBatches=kit.finish();groundKit.finish();utilityGroup.renderOrder=30;
+ utilityBatches.forEach(m=>{m.renderOrder=30;m.castShadow=false;});
+ utilityDrops=pointsLayer(U.links.length,TEX.dot,0xc8f6ff,1.5,true);utilityDrops.material.depthTest=false;utilityDrops.renderOrder=35;
+ utilityGroup.visible=!!layers.underground;utilityDrops.visible=!!layers.underground&&layers.water;
+}
+function updateUtilityFlow(t){
+ if(!utilityDrops||!S?.hydraulics)return;
+ const delta=utilityLastTime?Math.min(.25,t-utilityLastTime):0;utilityLastTime=t;utilityTime+=delta*clock.speed*60;
+ if(!layers.underground||!layers.water)return;
+ const a=utilityDrops.geometry.attributes.position;const h=S.hydraulics;
+ for(let i=0;i<utilityPaths.length;i++){
+  const pts=utilityPaths[i],v=h.velocity_m_s[i],L=G.utilities.links[i].length_m;
+  if(!layers.underground||!layers.water||Math.abs(v)<1e-7){a.setXYZ(i,0,-99999,0);continue;}
+  const u=((utilityTime*v/L+i*.381)%1+1)%1;
+  // Interpolate by actual segment length, never through a smoothed corner.
+  const lengths=pts.cumulative,dist=u*lengths.at(-1);let j=1;
+  while(j<lengths.length-1&&dist>lengths[j])j++;
+  const p=pts[j-1].clone().lerp(pts[j],(dist-lengths[j-1])/Math.max(lengths[j]-lengths[j-1],1e-8));a.setXYZ(i,p.x,p.y,p.z);
+ }a.needsUpdate=true;
+}
+function buildStreetLife(){
+ const c=G.cfg,k=new Kit(streetDetail);
+ for(let sector=0;sector<c.sectors;sector++){
+  const angle=sector*Math.PI/3,dir=[Math.cos(angle),Math.sin(angle)],normal=[-dir[1],dir[0]];
+  for(const side of [-1,1]){const path=[c.hub_radius,c.wall_radius-15].map(r=>[dir[0]*r+normal[0]*side*8,dir[1]*r+normal[1]*side*8]);
+    ribbon(path,3.2,1.16,0xa5a797,{map:pavingTexture,bumpMap:pavingTexture,bumpScale:.035});}
+  ribbon(arcPts(sector*60+2,(sector+1)*60-2,c.ring_road_radius+10,50),3.4,1.16,0xa5a797,{map:pavingTexture});
+ }
+ // Streets share exact spine endpoints. Curbs stop at intersections, not across them.
+ for(let s=0;s<c.sectors;s++)for(let row=0;row<=c.house_rows;row++){
+  const radius=c.house_radius_min-30+row*c.house_ring_step;
+  for(const side of [-1,1]){
+   const r=radius+side*7.2;const start=s*60+2,end=(s+1)*60-2;
+   ribbon(arcPts(start,end,r,40),3.4,1.16,0xb4b5a7,{map:pavingTexture,bumpMap:pavingTexture,bumpScale:.035});
+   // Individually laid kerb blocks and expansion joints.
+   const count=Math.floor((end-start)*Math.PI/180*r/1.15);
+   for(let j=0;j<count;j++){
+    const a=(start+(end-start)*(j+.5)/count)*Math.PI/180,[x,y]=[Math.cos(a)*(radius+side*5.1),Math.sin(a)*(radius+side*5.1)];
+    k.add('box',M.concrete,sph(x,y,1.15).toArray(),[1.1,.28,.32],quatAt(x,y,-a-Math.PI/2));
+   }
+  }
+  // Dashed lane paint and crossing marks leave junction mouths clear.
+  for(let a=s*60+3;a<(s+1)*60-3;a+=3.2){ribbon(arcPts(a,a+1,radius,2),.15,1.035,0xc6bc8c);}
+  for(const a of [s*60+1.4,(s+1)*60-1.4]){
+   for(let j=-3;j<=3;j++){const [x,y]=polar(a,radius+j*.95);k.add('box',M.white,sph(x,y,1.045).toArray(),[.52,.025,3.2],quatAt(x,y,-a*Math.PI/180));}
+  }
+  for(let b=0;b<3;b++){
+   const a=s*60+13+b*17,[x,y]=polar(a,radius+10.2),q=quatAt(x,y,-a*Math.PI/180-Math.PI/2),base=sph(x,y,1.2);
+   const local=(shape,mat,p,sz,rot=null)=>k.add(shape,mat,base.clone().add(new THREE.Vector3(...p).applyQuaternion(q)).toArray(),sz,rot?q.clone().multiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(...rot))):q);
+   for(let j=0;j<5;j++){local('box',M.wood,[0,.65,-.4+j*.2],[2.8,.12,.15]);local('box',M.wood,[0,1.0+j*.17,-.46],[2.8,.12,.12]);}
+   for(const xx of [-1,1])local('box',M.steel,[xx,.34,0],[.12,.65,.85]);
+   local('cyl',M.steel,[2.4,.7,0],[.36,1.25,.36]);local('cyl',M.dark,[2.4,1.36,0],[.3,.08,.3]);
+   // Pedestrian luminaires with base bolts, outreach and warm shielded heads.
+   local('cyl',M.steel,[-3.8,2.9,0],[.09,5.8,.09]);local('box',M.steel,[-3.4,5.75,0],[.9,.1,.12]);
+   local('box',M.glow,[-3,5.65,0],[.58,.1,.34]);local('box',M.concrete,[-3.8,.12,0],[.55,.24,.55]);
+  }
+ }
+ // Tangential neighbourhood promenades, retaining walls and human-scale plazas.
+ const names=['COMMISSARY / CANTEEN','SOCIAL CLUB','MAINTENANCE','COLONY MARKET','LAUNDRY / BATHS','RECREATION'];
+ for(let s=0;s<c.sectors;s++){
+  const a=s*60+38,[x,y]=polar(a,225),q=quatAt(x,y,-a*Math.PI/180-Math.PI/2);
+  const plaza=sph(x,y,.95);k.add('box',M.concrete,plaza.toArray(),[38,.22,27],q);
+  // Low modular civic frontage with awning, doors and sheltered waiting area.
+  const base=sph(x,y,1.1),put=(mat,p,sz)=>k.add('box',mat,base.clone().add(new THREE.Vector3(...p).applyQuaternion(q)).toArray(),sz,q);
+  put(M.panel,[0,3.1,-7],[28,6.2,10]);put(M.steel,[0,6.3,-7],[29,.35,11]);put(M.steel,[0,3.4,.2],[30,.25,5]);
+  for(let j=-3;j<=3;j++){put(M.glass,[j*3.7,2.1,-1.9],[2.7,2.1,.06]);put(M.steel,[j*4.6,1.7,2.3],[.13,3.4,.13]);}
+  const label=addLabel(names[s],x,y,10,'#c5b992','near');
+  ribbon(arcPts(s*60,a,225,30),5,1.06,0x898d80,{map:pavingTexture});
+ }
+ k.finish();
+}
+
 function build(){
   const c=G.cfg, R=c.ring_road_radius, WR=c.wall_radius, ns=c.sectors, HR=c.hub_radius, rx=c.reactor_pos[0], ry=c.reactor_pos[1];
   // ground plate of the city, lighter than the terrain
-  cap(WR+6, 0.25, 0x8d8a82, 60, 160, 0.4);
+  cityPlate=cap(WR+6, 0.25, 0x5b5d56, 60, 160, 0.12);
   // ---- roads ----
   for(let s=0;s<ns;s++){ roadMeshes.ring.push(road(arcPts(s*60,(s+1)*60,R,30), 14, 1.0, 0x30343d)); ribbon(arcPts(s*60,(s+1)*60,R,30), 0.7, 1.3, 0xd8d3b0); }
   for(let s=0;s<ns;s++){ road([polar(s*60,HR-4), polar(s*60,WR+70)], 10, 1.0, 0x30343d); ribbon([polar(s*60,HR-4), polar(s*60,WR+70)], 0.6, 1.3, 0xd8d3b0); }   // boundary streets through the gate and out
   road([[WR+70,0],[c.landing_pad_pos[0]-100,0]], 10, 1.0, 0x30343d);                              // east road to the landing pad
   for(const [k,v] of [['garage',c.garage],['medlab',c.medlab],['school',c.school]]){ const s=Math.floor(v[0]/60); ribbon(arcPts(s*60,v[0]+12,v[1],10), 6, 0.9, 0x3a3e48); }   // service lanes off the boundary streets
-  for(let s=0;s<ns;s++) for(let k=0;k<=c.house_rows;k++){ const r=c.house_radius_min-30+k*c.house_ring_step; road(arcPts(s*60+2.5,s*60+57.5,r,20), 8, 0.9, 0x3a3e48); }
-  for(let i=0;i<G.houses.x.length;i++){ const a=G.houses.angle[i], r=G.houses.radius[i]; ribbon([polar(a,r-8), polar(a,r-27)], 2.4, 1.1, 0xb8b2a4); }   // footpath from every house to its street
+  for(let s=0;s<ns;s++) for(let k=0;k<=c.house_rows;k++){ const r=c.house_radius_min-30+k*c.house_ring_step; road(arcPts(s*60,(s+1)*60,r,40), 10, 1.0, 0x3a3e48); }
+  for(let i=0;i<G.houses.x.length;i++){ const a=G.houses.angle[i], r=G.houses.radius[i]; ribbon([polar(a,r-8), polar(a,r-24)], 2.4, 1.16, 0xb8b2a4); }   // footpath from every house to its street
   road([[-WR-70,0],[rx+70,0]], 14, 1.0, 0x30343d); ribbon([[-WR-70,0],[rx+70,0]], 0.7, 1.3, 0xd8d3b0);   // trunk road
   road([[rx+70,-40],[rx+70,c.mine_pos[1]+40]], 10, 0.9, 0x30343d);      // service road along the complex
   road([[rx+70,-40],[c.solar_pos[0]+60,c.solar_pos[1]+40]], 8, 0.9, 0x30343d);
@@ -1495,30 +2198,14 @@ function build(){
   // ---- lockdown overlays: a translucent wedge over each sector, shown while it is locked ----
   lockWedges=[]; for(let s=0;s<ns;s++){ const pos=[], idx=[]; const n=24; for(let k=0;k<=n;k++){ const a=s*60+k*60/n; const p0=sph(...polar(a,HR+30),2.5), p1=sph(...polar(a,WR-6),2.5); pos.push(p0.x,p0.y,p0.z,p1.x,p1.y,p1.z); if(k<n){ const b=k*2; idx.push(b,b+1,b+2, b+1,b+3,b+2); } }
     const g=new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos,3)); g.setIndex(idx); g.computeVertexNormals(); const m=new THREE.Mesh(g, new THREE.MeshBasicMaterial({color:0xe2574d, transparent:true, opacity:0.0, depthWrite:false, side:THREE.DoubleSide})); m.visible=false; world.add(m); lockWedges.push(m); }
-  // ---- houses: bodies sized by type, parapet roofs, windows lit from the state ----
-  const HSIZE=[[26,8,16],[18,14,18],[18,12,18],[20,22,20]];
-  housesMesh=new THREE.InstancedMesh(new THREE.BoxGeometry(1,1,1), new THREE.MeshStandardMaterial({roughness:.75}), G.houses.x.length); housesMesh.castShadow=true; housesMesh.receiveShadow=true;
-  const roofs=new THREE.InstancedMesh(new THREE.BoxGeometry(1,1,1), new THREE.MeshStandardMaterial({color:0x3f3b36, roughness:.9}), G.houses.x.length);
-  const m4=new THREE.Matrix4(); windowSlots=[]; const winPos=[];
-  for(let i=0;i<G.houses.x.length;i++){ const x=G.houses.x[i], y=G.houses.y[i]; flatHouses.push([x,y]); const [w,h,d]=HSIZE[G.houses.type[i]]; const yaw=-G.houses.angle[i]*Math.PI/180;
-    m4.compose(sph(x,y,h/2+0.6), quatAt(x,y,yaw), new THREE.Vector3(w,h,d)); housesMesh.setMatrixAt(i,m4); housesMesh.setColorAt(i,new THREE.Color(0xc9a27a));
-    m4.compose(sph(x,y,h+1.0), quatAt(x,y,yaw), new THREE.Vector3(w+1.6,1.2,d+1.6)); roofs.setMatrixAt(i,m4);
-    const floors=Math.max(1,Math.round(h/7)); const q=quatAt(x,y,yaw); const base=sph(x,y,0.6);
-    for(let f=0;f<floors;f++) for(let side=0;side<4;side++) for(let k=0;k<2;k++){ const local=new THREE.Vector3(); const along=(k-0.5)*(side%2?d:w)*0.45; const yy=3.2+f*7; if(side===0) local.set(along,yy,d/2+0.15); else if(side===1) local.set(w/2+0.15,yy,along); else if(side===2) local.set(along,yy,-d/2-0.15); else local.set(-w/2-0.15,yy,along);
-      const pos=base.clone().add(local.applyQuaternion(q)); const rot=q.clone().multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0), side*Math.PI/2)); winPos.push({pos,rot}); windowSlots.push(i); } }
-  housesMesh.instanceMatrix.needsUpdate=true; world.add(housesMesh); roofs.instanceMatrix.needsUpdate=true; world.add(roofs);
-  windowsMesh=new THREE.InstancedMesh(new THREE.PlaneGeometry(2.6,2.2), new THREE.MeshBasicMaterial({color:0xffffff, side:THREE.DoubleSide}), winPos.length);
-  winPos.forEach((wp,i)=>{ m4.compose(wp.pos, wp.rot, new THREE.Vector3(1,1,1)); windowsMesh.setMatrixAt(i,m4); windowsMesh.setColorAt(i,new THREE.Color(0x333844)); }); world.add(windowsMesh);
-  // benches along the row streets
-  { const list=[]; for(let s=0;s<ns;s++) for(let k=0;k<=c.house_rows;k++){ const r=c.house_radius_min-30+k*c.house_ring_step+6; for(let m=0;m<4;m++){ const a=s*60+9+m*13; list.push([a,r]); } }
-    benchMesh=new THREE.InstancedMesh(new THREE.BoxGeometry(6,1.6,2), new THREE.MeshStandardMaterial({color:0x8a6a3a}), list.length);
-    list.forEach(([a,r],i)=>{ const [x,y]=polar(a,r); m4.compose(sph(x,y,1.2), quatAt(x,y,-a*Math.PI/180), new THREE.Vector3(1,1,1)); benchMesh.setMatrixAt(i,m4); }); world.add(benchMesh); }
+  buildNeighborhood(); buildStreetLife(); buildUtilities();
+  const m4=new THREE.Matrix4();
   // ---- poles, arms, lamps, cables ----
   const P=G.poles.x.length;
   polesMesh=new THREE.InstancedMesh(new THREE.CylinderGeometry(0.9,1.2,24,8), new THREE.MeshStandardMaterial({color:0x9a9a9a}), P);
   armsMesh=new THREE.InstancedMesh(new THREE.BoxGeometry(7,0.8,0.8), new THREE.MeshStandardMaterial({color:0x777}), P);
   lampsMesh=new THREE.InstancedMesh(new THREE.SphereGeometry(1.3,8,8), new THREE.MeshBasicMaterial({color:0xffe9a8}), P);
-  markers.lampGlow=pointsLayer(P, TEX.glow, 0xffe08a, 60, true);
+  markers.lampGlow=pointsLayer(P, TEX.glow, 0xffe08a, 12, true);
   for(let i=0;i<P;i++){ const x=G.poles.x[i], y=G.poles.y[i]; const yaw=G.poles.kind[i]===0? -G.poles.angle[i]*Math.PI/180+Math.PI/2 : -G.poles.angle[i]*Math.PI/180;
     m4.compose(sph(x,y,12), quatAt(x,y,yaw), new THREE.Vector3(1,1,1)); polesMesh.setMatrixAt(i,m4); m4.compose(sph(x,y,23), quatAt(x,y,yaw), new THREE.Vector3(1,1,1)); armsMesh.setMatrixAt(i,m4); m4.compose(sph(x,y,21), quatAt(x,y,yaw), new THREE.Vector3(1,1,1)); lampsMesh.setMatrixAt(i,m4); }
   world.add(polesMesh); world.add(armsMesh); world.add(lampsMesh);
@@ -1541,9 +2228,8 @@ function build(){
     const tpts=[sph(c.tower_junction[0]+7,8,28), ...towerPoles.map(([x,y])=>sph(x,y,28)), sph(c.tower_pos[0]+7,c.tower_pos[1]+40,28)]; towerCurves=[]; for(let i=0;i<tpts.length-1;i++) towerCurves.push(catenary(tpts[i],tpts[i+1],5)); hub.towerLayer=new LineLayer(towerCurves,0xf2c14e);
     const npts=tpts.map(p=>p.clone().addScaledVector(p.clone().normalize(),-3)); cableTowerCurves=[]; for(let i=0;i<npts.length-1;i++) cableTowerCurves.push(catenary(npts[i],npts[i+1],6)); cableTowerCurves.push(...trunkPts.map(p=>p.clone().addScaledVector(p.clone().normalize(),-3)).map((p,i,arr)=> i<arr.length-1? catenary(p,arr[i+1],6):null).filter(Boolean)); cableTowerCurves.push(flat3([[-WR-40,8],[-HR+10,8]],21)); hub.cableTowerLayer=new LineLayer(cableTowerCurves,0x4fd1c5);
     solarCurves=[flat3([[c.solar_pos[0]+70,c.solar_pos[1]+30],[rx+40,-60]],1.2)]; hub.solarLayer=new LineLayer(solarCurves,0xf2c14e); }
-  // ---- water: main pipe on the ground from the plant along the trunk road to the pump station, sector mains along boundary streets, branches along row streets ----
-  waterMainPts=flat3([[c.water_plant_pos[0]-10,c.water_plant_pos[1]-40],[rx+40,-10],[-WR-40,-10],[-HR+30,-10],[-60,-40]],1.6); pipes.main=flowTube(waterMainPts,2.6,polyLen(waterMainPts));
-  waterSectorPts=[]; pipes.sectors=[]; for(let s=0;s<ns;s++){ const a=s*60-1.4; const pts=flat3([polar(a,HR-30), polar(a,R-20)],1.2); waterSectorPts.push(pts); pipes.sectors.push(flowTube(pts,1.9,polyLen(pts))); for(let k=0;k<=c.house_rows;k++){ const r=c.house_radius_min-30+k*c.house_ring_step-3; tube(flat3(arcPts(a,s*60+57,r,16),0.9),0.7,0x2f5f9e); } }
+  // Pipe rendering comes exclusively from /geometry utilities.
+  waterMainPts=[]; waterSectorPts=[];
   // ---- hub: substation with transformers and a fenced yard, ups, comms, ops, pump station and tank ----
   { const yard=localGroup(0,-70,0,0); const fence=new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(70,6,44)), new THREE.LineBasicMaterial({color:0x9aa3b5})); fence.position.y=3; yard.add(fence);
     for(let i=0;i<3;i++){ const tr=new THREE.Mesh(new THREE.BoxGeometry(12,10,9), new THREE.MeshStandardMaterial({color:0x6a6d78})); tr.position.set(-22+i*22,5,0); yard.add(tr); for(let j=0;j<3;j++){ const b=new THREE.Mesh(new THREE.CylinderGeometry(0.6,0.6,6,6), new THREE.MeshStandardMaterial({color:0xdddddd})); b.position.set(-22+i*22-3+j*3,13,0); yard.add(b); } }
@@ -1552,7 +2238,7 @@ function build(){
     hub.comms=clickable(box(88,10,22,14,18,0x4a4f5c,0x4fd1c5),'comms','comms'); const mast=cyl(88,10,1.2,44,0x9aa3b5); const dish=new THREE.Mesh(new THREE.ConeGeometry(4,3,12,1,true), new THREE.MeshStandardMaterial({color:0xdddddd, side:THREE.DoubleSide})); dish.position.copy(sph(88,10,40)); dish.quaternion.copy(quatAt(88,10)); dish.rotateX(-1.2); world.add(dish); addLabel('comms node', 88, 10, 52, '#4fd1c5', 'near', true).userData.role='comms';
     hub.ops=clickable(box(0,80,44,16,26,0x666a78,0xc9cfdb),'ops','ops'); addLabel('operations center', 0, 80, 26, '#c9cfdb', 'near');
     hub.pump=clickable(box(-40,-40,18,9,14,0x2a4a6a,0x5aa9ff),'pump','pump'); hub.tank=clickable(cyl(-70,-45,16,26,0x2a4a6a),'tank','tank'); addLabel('pump station', -40, -40, 20, '#5aa9ff', 'near', true).userData.role='pump'; addLabel('water tank', -70, -45, 38, '#5aa9ff', 'near', true).userData.role='tank';
-    pipes.hub=flowTube(flat3([[-60,-40],[-40,-40],[-70,-45]],2),2.2,40); pipes.manifold=[]; for(let s=0;s<ns;s++){ const a=s*60-1.4; const pts=flat3([[-70,-45],polar(a,HR-30)],1.4); pipes.manifold.push(flowTube(pts,1.6,polyLen(pts))); }
+
     // water level inside the tank
     hub.tankLevel=new THREE.Mesh(new THREE.CylinderGeometry(16.5,16.5,1,18), new THREE.MeshBasicMaterial({color:0x5aa9ff, transparent:true, opacity:.8})); hub.tankLevel.quaternion.copy(quatAt(-70,-45)); world.add(hub.tankLevel); }
   // ---- reactor complex ----
@@ -1587,7 +2273,7 @@ function build(){
     complex.dishGroup=dishG; clickable(dg,'tower','tower'); addLabel('deep-space dish: uplink to Weyland-Yutani', tx+70, ty+10, 60, '#4fd1c5', 'mid', true).userData.role='tower'; }
   // ---- flows, markers, rovers, sector labels ----
   flowPower=new FlowLayer([...spanCurves, ...feederCurves, ...trunkCurves, ...towerCurves, ...solarCurves], 0xfff2b0, 8, 2, 45);
-  flowWater=new FlowLayer([waterMainPts, ...waterSectorPts], 0x9ad0ff, 7, 4, 30);
+  flowWater=new FlowLayer([], 0x9ad0ff, 7, 4, 30);
   packetsPts=pointsLayer(80, TEX.dot, 0x4fd1c5, 9, false); markers.packetsRed=pointsLayer(20, TEX.dot, 0xe2574d, 9, false);
   markers.issues=pointsLayer(60, TEX.bang, 0xffffff, 22, false); markers.nonet=pointsLayer(300, TEX.nonet, 0xffffff, 12, false); markers.heater=pointsLayer(300, TEX.flame, 0xffffff, 8, false);
   markers.people=pointsLayer(80, TEX.person, 0xffffff, 9, false); markers.xenos=pointsLayer(20, TEX.diamond, 0xffffff, 20, false); markers.marines=pointsLayer(8, TEX.marine, 0xffffff, 11, false); markers.ups=pointsLayer(8, TEX.bolt, 0xffffff, 20, false);
@@ -1604,10 +2290,10 @@ function build(){
     for(let k=0;k<4;k++){ const a=8+k*9; const [x,y]=polar(a,205); const tk=cyl(x,y,6,16,0xb8bcc4); tk.castShadow=true; } addLabel('oxygen and fuel tanks', ...polar(22,205), 24, '#c9cfdb','near');
     for(let k=0;k<2;k++){ const [x,y]=polar(ga-4+k*5, gr-18); const v=box(x,y,12,5,7,k?0x9bd36a:0x5aa9ff,null,-ga*Math.PI/180); v.castShadow=true; } }
   // ---- landing pad east of the city ----
-  { const [lx,ly]=c.landing_pad_pos; cap(90,0.9,0x4a4f5a,6,48); const ring=new THREE.Mesh(new THREE.TorusGeometry(88,1.2,6,64), new THREE.MeshBasicMaterial({color:0xf2c14e})); ring.position.copy(sph(lx,ly,1.6)); ring.quaternion.copy(quatAt(lx,ly)); ring.rotateX(Math.PI/2); world.add(ring);
+  { const [lx,ly]=c.landing_pad_pos; cap(90,0.9,0x4a4f5a,6,48,0,lx,ly); const ring=new THREE.Mesh(new THREE.TorusGeometry(88,1.2,6,64), new THREE.MeshBasicMaterial({color:0xf2c14e})); ring.position.copy(sph(lx,ly,1.6)); ring.quaternion.copy(quatAt(lx,ly)); ring.rotateX(Math.PI/2); world.add(ring);
     complex.padLights=pointsLayer(12, TEX.glow, 0xffb060, 30, true); setPoints(complex.padLights, Array.from({length:12},(_,k)=>{ const [px,py]=polar(k*30,86); return [lx+px, ly+py]; }), 2);
     const beacon=cyl(lx+95,ly-95,1.5,50,0xc9cfdb); complex.beacon=new THREE.Sprite(new THREE.SpriteMaterial({map:TEX.red, transparent:true, depthTest:false})); complex.beacon.scale.set(16,16,1); complex.beacon.position.copy(sph(lx+95,ly-95,52)); world.add(complex.beacon);
-    clickable(cap(90,1.0,0x4a4f5a,6,48),'pad','pad'); addLabel('landing field', lx, ly, 30, '#f2c14e','mid'); }
+    clickable(cap(90,1.0,0x4a4f5a,6,48,0,lx,ly),'pad','pad'); addLabel('landing field', lx, ly, 30, '#f2c14e','mid'); }
   // ---- rocks and drifts outside the wall ----
   { const rocks=new THREE.InstancedMesh(new THREE.DodecahedronGeometry(1,0), new THREE.MeshStandardMaterial({color:0x5a544c, roughness:1}), 500); let seed=7; const rnd=()=>{ seed=(seed*16807)%2147483647; return seed/2147483647; };
     for(let i=0;i<500;i++){ const a=rnd()*360, r=WR+40+rnd()*900; const [x,y]=polar(a,r); if(Math.abs(y)<40 && x<-WR) { continue; } const s=2+rnd()*9; m4.compose(sph(x,y,s*0.4), quatAt(x,y,rnd()*6.3), new THREE.Vector3(s,s*0.6,s)); rocks.setMatrixAt(i,m4); } rocks.instanceMatrix.needsUpdate=true; rocks.castShadow=true; world.add(rocks);
@@ -1625,7 +2311,7 @@ function build(){
   markers.ctrl=(()=>{ const n=300; const g=new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(n*3).fill(-99999),3)); g.setAttribute('color', new THREE.Float32BufferAttribute(new Float32Array(n*3),3)); const m=new THREE.Points(g, new THREE.PointsMaterial({map:TEX.dot, vertexColors:true, size:9, transparent:true, depthWrite:false, sizeAttenuation:true})); m.frustumCulled=false; world.add(m); return m; })();
   applyLayers();
 }
-function applyLayers(){ if(!markers.issues) return; markers.issues.visible=layers.issues; markers.nonet.visible=layers.nonet; markers.ups.visible=layers.ups; markers.heater.visible=layers.heater; flowPower.mesh.visible=layers.power; flowWater.mesh.visible=layers.water; packetsPts.visible=layers.packets; markers.packetsRed.visible=layers.packets; markers.people.visible=layers.people; markers.xenos.visible=layers.threats; markers.marines.visible=layers.threats; labelGroup.visible=layers.labels; if(markers.ctrl) markers.ctrl.visible=layers.ctrl; renderer.shadowMap.enabled=layers.shadows; sun.castShadow=layers.shadows; }
+function applyLayers(){ updateMapKey();if(!markers.issues) return;spanLines.mesh.visible=!!layers.power;netLines.mesh.visible=!!layers.packets;for(const key of ["feederLayer","trunkLayer","towerLayer","solarLayer"])if(hub[key])hub[key].mesh.visible=!!layers.power;if(hub.cableTowerLayer)hub.cableTowerLayer.mesh.visible=!!layers.packets;utilityGroup.visible=!!layers.underground;if(utilityDrops)utilityDrops.visible=!!layers.underground&&layers.water;for(const v of houseDetails.values())v.roof.visible=!layers.cutaway; markers.issues.visible=layers.issues; markers.nonet.visible=layers.nonet; markers.ups.visible=layers.ups; markers.heater.visible=layers.heater; flowPower.mesh.visible=layers.power; flowWater.mesh.visible=layers.water; packetsPts.visible=layers.packets; markers.packetsRed.visible=layers.packets; markers.people.visible=layers.people; markers.xenos.visible=layers.threats; markers.marines.visible=layers.threats; labelGroup.visible=layers.labels; if(markers.ctrl) markers.ctrl.visible=layers.ctrl; renderer.shadowMap.enabled=layers.shadows; sun.castShadow=layers.shadows; }
 
 // ---------- per state update ----------
 const tmpC=new THREE.Color();
@@ -1635,9 +2321,8 @@ function onState(s, first){
   if(!G) return; if(!housesMesh) build();
   const now=performance.now();
   const c=G.cfg, ns=c.sectors, hs=s.houses, P=G.poles.x.length, m4=new THREE.Matrix4();
-  for(let i=0;i<flatHouses.length;i++){ const col=tempColor(hs.t[i]).clone().lerp(new THREE.Color(0xc9a27a),0.55); if(!hs.power[i]) col.multiplyScalar(0.5).lerp(new THREE.Color(0x203050),0.3); else if(hs.ups[i]) col.lerp(new THREE.Color(0x4fd1c5),0.35); else if(hs.limit[i]>0) col.lerp(new THREE.Color(0xe0b04a),0.25); housesMesh.setColorAt(i,col); }
+  for(let i=0;i<flatHouses.length;i++){ const col=new THREE.Color([0x898674,0x999786,0x7e8c85,0xb0a48a][G.houses.type[i]]);if(!hs.power[i])col.multiplyScalar(.65);housesMesh.setColorAt(i,col); }
   housesMesh.instanceColor.needsUpdate=true;
-  { const lit=s.env.night||s.env.storm||s.env.daylight<0.08; for(let k=0;k<windowSlots.length;k++){ const i=windowSlots[k]; let col; if(!hs.power[i]||s.sectors[G.houses.sector[i]].lockdown>0) col=0x141821; else if(!lit) col=0x5a6a80; else if(hs.heater[i]) col=0xffc978; else col=0xd8c9a0; if(hs.power[i]&&lit&&((k*7+i)%5===0)) col=0x3a3f4a; windowsMesh.setColorAt(k,new THREE.Color(col)); } windowsMesh.instanceColor.needsUpdate=true; }
   { const pal=['#f2c14e','#5ec07a','#5aa9ff','#b48ead','#e2574d','#4fd1c5']; const names=[...new Set(s.control.programs.filter(Boolean))]; const a=markers.ctrl.geometry.attributes.position, cc=markers.ctrl.geometry.attributes.color; const counts={};
     for(let i=0;i<300;i++){ const p=s.control.programs[i]; if(p&&s.control.ext[i]){ const pt=sph(flatHouses[i][0],flatHouses[i][1],HSIZE_H(G.houses.type[i])+6); a.setXYZ(i,pt.x,pt.y,pt.z); const col=new THREE.Color(pal[names.indexOf(p)%pal.length]); cc.setXYZ(i,col.r,col.g,col.b); counts[p]=(counts[p]||0)+1; } else a.setXYZ(i,0,-99999,0); } a.needsUpdate=true; cc.needsUpdate=true;
     const mq=s.control.mqtt; document.getElementById('ctrl').innerHTML = mq.enabled ? `bus ${mq.connected?'<span class="ok">connected</span>':'<span class="bad">disconnected</span>'} ${mq.broker}, ${mq.controlled}/300 houses under external programs, ${mq.sent} sensor msgs, ${mq.received} actuator msgs<br>`+names.map((n,k)=>`<span style="color:${pal[k%pal.length]}">&#9679;</span> ${n} ${counts[n]||0}`).join(' &nbsp; ') : 'bus off: every house runs the built-in thermostat (start with --mqtt host:port and houses_runtime.py)'; }
@@ -1648,9 +2333,7 @@ function onState(s, first){
   for(let i=0;i<nTw;i++){ hub.towerLayer.setColor(i, s.power.tower_line?0xf2c14e:0x5a2a2a); flowPower.active[P+ns+nT+i]=s.power.tower_line&&s.power.trunk&&reactorUp; }
   hub.solarLayer.setColor(0, s.power.solar_kw>0?0xf2c14e:0x6a5a3a); flowPower.active[P+ns+nT+nTw]=s.power.solar_kw>0;
   for(let i=0;i<cableTowerCurves.length;i++) hub.cableTowerLayer.setColor(i, s.net.uplink?0x4fd1c5:0x5a2a2a);
-  const waterOn=s.water.tank_m3>0&&s.water.pump; flowWater.active[0]=s.water.plant; pipes.main.material.userData.rate=s.water.plant?0.25+s.water.plant_m3_h/12:0; pipes.hub.material.userData.rate=waterOn?0.5+s.water.flow_m3_h/6:0;
-  for(let i=0;i<ns;i++){ const on=waterOn&&s.sectors[i].water_ok>0; flowWater.active[1+i]=on; pipes.sectors[i].material.userData.rate=on?0.4+s.water.sector_m3_h[i]:0; pipes.manifold[i].material.userData.rate=on?0.4+s.water.sector_m3_h[i]:0; }
-  for(const m of pipeMats){ m.color.setHex(m.userData.rate>0?0xffffff:0x556070); }
+  const waterOn=s.water.tank_m3>0&&s.water.pump;
   // lamps and poles
   setPoints(markers.lampGlow, G.poles.x.map((x,i)=>s.poles.lamp[i]?[x,G.poles.y[i]]:null).filter(Boolean), 21);
   for(let i=0;i<P;i++){ const st=s.poles.state[i]; if(st===prevPole[i]) continue; prevPole[i]=st; const x=G.poles.x[i], y=G.poles.y[i]; const yaw=G.poles.kind[i]===0? -G.poles.angle[i]*Math.PI/180+Math.PI/2 : -G.poles.angle[i]*Math.PI/180; const q=quatAt(x,y,yaw); if(st===2) q.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),1.45)); else if(st===1) q.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1,0,0),0.3));
@@ -1698,10 +2381,10 @@ function onState(s, first){
   const fin=document.getElementById('finished'); if(s.finished){ fin.style.display='flex'; fin.textContent='COLONY LOST: '+s.finish_reason+'. A new colony is founded in two minutes.'; } else fin.style.display='none';
   const m=s.time.match(/(\d\d):(\d\d)$/); clock.hour=m?(+m[1]+(+m[2])/60):12; clock.speed=s.paused?0:s.speed; clock.at=now; clock.daylight=e.daylight; weather.wind=e.wind; weather.precip=e.precip; weather.storm=e.storm; weather.tornadoOn=e.storm&&e.wind>30;
   planetMat.uniforms.uCold.value=Math.min(1,Math.max(0,(-e.t_out-30)/35)); planetMat.uniforms.uStorm.value=e.storm?1:(e.precip==='snow'?0.4:0);
-  if(first){ speedEl.value=speedToSlider(s.speed); speedV.textContent=s.speed+' min/s'; }
+  if(first){ const focus=Number(new URLSearchParams(location.search).get('house'));if(Number.isInteger(focus)&&focus>=1&&focus<=G.houses.x.length){selected={kind:'house',id:focus-1};flyTo(G.houses.x[focus-1],G.houses.y[focus-1],42);renderInfo();}speedEl.value=speedToSlider(s.speed); speedV.textContent=s.speed+' min/s'; }
 }
 const prevPole=new Array(1000).fill(-1);
-const HSIZE_H=t=>[8,14,12,22][t];
+const HSIZE_H=t=>DIM[t][1]+2;
 const clock={hour:12, speed:20, at:0, night:false, daylight:0.1}; const sunDir=new THREE.Vector3(1,0.3,0);
 
 // ---------- packets ----------
@@ -1717,27 +2400,30 @@ function updatePackets(){ const now=performance.now(); const good=[], bad=[]; fo
 // ---------- camera, picking, info panel ----------
 let flyAnim=null;
 function flyTo(x,y,dist){ const p=sph(x,y), n=p.clone().normalize(); const side=new THREE.Vector3().crossVectors(n, new THREE.Vector3(0,0,1)).normalize(); if(side.lengthSq()<1e-6) side.set(1,0,0); const back=new THREE.Vector3().crossVectors(side,n).normalize(); const pos=p.clone().add(n.multiplyScalar(dist*0.85)).add(back.multiplyScalar(dist*0.55)); flyAnim={from:camera.position.clone(), to:pos, tfrom:controls.target.clone(), tto:p, t0:performance.now()}; }
-document.querySelectorAll('#fly button').forEach(b=>b.onclick=()=>{ const c=G.cfg; const f=b.dataset.f; if(f==='hub') flyTo(0,0,420); else if(f==='gate') flyTo(-c.wall_radius,0,300); else if(f==='reactor') flyTo(c.reactor_pos[0],c.reactor_pos[1],420); else if(f==='solar') flyTo(c.solar_pos[0],c.solar_pos[1],320); else if(f==='tower') flyTo(c.tower_pos[0],c.tower_pos[1],320); else if(f==='mine') flyTo(c.mine_pos[0],c.mine_pos[1],320); else if(f==='city') flyTo(0,0,1900); else flyAnim={from:camera.position.clone(), to:new THREE.Vector3(1200,RP+4200,3800), tfrom:controls.target.clone(), tto:new THREE.Vector3(0,RP,0), t0:performance.now()}; });
+document.querySelectorAll('#fly button').forEach(b=>b.onclick=()=>{ const c=G.cfg; const f=b.dataset.f; if(f==='home'){const i=selected?.kind==='house'?selected.id:0;selected={kind:'house',id:i};flyTo(G.houses.x[i],G.houses.y[i],42);renderInfo();} else if(f==='street') flyTo(...polar(17,270),90); else if(f==='hub') flyTo(0,0,420); else if(f==='gate') flyTo(-c.wall_radius,0,300); else if(f==='reactor') flyTo(c.reactor_pos[0],c.reactor_pos[1],420); else if(f==='solar') flyTo(c.solar_pos[0],c.solar_pos[1],320); else if(f==='tower') flyTo(c.tower_pos[0],c.tower_pos[1],320); else if(f==='mine') flyTo(c.mine_pos[0],c.mine_pos[1],320); else if(f==='city') flyTo(0,0,1900); else flyAnim={from:camera.position.clone(), to:new THREE.Vector3(1200,RP+4200,3800), tfrom:controls.target.clone(), tto:new THREE.Vector3(0,RP,0), t0:performance.now()}; });
 const ray=new THREE.Raycaster(); const mouse=new THREE.Vector2(); ray.params.Points.threshold=8; 
 let downAt=null;
 renderer.domElement.addEventListener('pointerdown', ev=>{ downAt=[ev.clientX,ev.clientY]; });
 renderer.domElement.addEventListener('pointerup', ev=>{ if(!downAt) return; const moved=Math.hypot(ev.clientX-downAt[0], ev.clientY-downAt[1]); downAt=null; if(moved>4) return; pick(ev, true); });
 renderer.domElement.addEventListener('dblclick', ev=>{ setMouse(ev); ray.setFromCamera(mouse,camera); const hit=ray.intersectObject(planetMesh,false)[0]; if(hit){ const d=camera.position.distanceTo(controls.target); const to=camera.position.clone().sub(controls.target).add(hit.point); flyAnim={from:camera.position.clone(), to, tfrom:controls.target.clone(), tto:hit.point, t0:performance.now()}; } });
-renderer.domElement.addEventListener('mousemove', ev=>{ pick(ev, false); });
+let lastHover=0;renderer.domElement.addEventListener('mousemove', ev=>{const now=performance.now();if(now-lastHover<80)return;lastHover=now;pick(ev,false);});
 function setMouse(ev){ const r=renderer.domElement.getBoundingClientRect(); mouse.set(((ev.clientX-r.left)/r.width)*2-1, -((ev.clientY-r.top)/r.height)*2+1); return [ev.clientX-r.left, ev.clientY-r.top]; }
 let selected=null;
 function pick(ev, click){ const [mx,my]=setMouse(ev); const tip=document.getElementById('tip'); if(!housesMesh||!S){ tip.style.display='none'; return; } ray.setFromCamera(mouse,camera);
+  if(layers.underground){const hit=ray.intersectObjects(utilityBatches,false)[0];if(hit){const tag=hit.object.userData.tags[hit.instanceId];if(tag&&tag.id>=0){if(click){selected={kind:'pipe',id:tag.id,extra:tag.system};renderInfo();}tipHtml(tip,mx,my,`<b>${tag.system} pipe ${tag.id+1}</b><br>click for material, diameter and flow`);return;}}}
+  const detailHits=ray.intersectObjects([...houseDetails.values()].map(v=>v.g),true);if(detailHits.length){const i=detailHits[0].object.userData.house;if(i!==undefined){if(click){selected={kind:'house',id:i};renderInfo();}tipHtml(tip,mx,my,houseInfo(i,true));return;}}
   const hh=ray.intersectObject(housesMesh,false)[0]; if(hh){ const i=hh.instanceId; if(click){ selected={kind:'house', id:i}; renderInfo(); } tipHtml(tip,mx,my,houseInfo(i,true)); return; }
   const hits=ray.intersectObjects(clickables,true); if(hits.length){ const cl=hits[0].object.userData.click||hits[0].object.parent?.userData.click; if(cl){ if(click){ selected={kind:cl.kind, id:cl.id, extra:cl.extra}; renderInfo(); } tipHtml(tip,mx,my,`<b>${cl.id}</b><br><span class="dim">click for live stats</span>`); return; } }
   const pp=ray.intersectObject(markers.people,false)[0]; if(pp){ const i=pp.index; const per=S.people[i]; if(per){ if(click){ selected={kind:'person', id:i}; renderInfo(); } tipHtml(tip,mx,my,personInfo(per)); return; } }
   tip.style.display='none'; }
 function tipHtml(tip,mx,my,html){ tip.innerHTML=html; tip.style.display='block'; tip.style.left=(mx+14)+'px'; tip.style.top=(my+14)+'px'; }
-function houseInfo(i, short){ const h=S.houses, ctl=S.control; const prog=ctl.ext[i]?`${ctl.programs[i]}: ${ctl.reasons[i]} (target ${ctl.targets[i]} C)`:`built-in thermostat, target ${ctl.targets[i]} C`; return `<b>House ${i+1}</b> (Sector ${G.houses.sector[i]+1}, ${G.types[G.houses.type[i]]}, ${G.houses.residents[i]} residents)<br>indoor ${h.t[i]} C, heater ${h.heater[i]?'on':'off'}, draw ${h.draw[i]} W${h.limit[i]?' (limit '+h.limit[i]+' W)':''}<br>power ${h.power[i]?(h.ups[i]?'sector UPS':'grid'):'<span class="bad">none</span>'}, water ${h.water[i]?'ok':'<span class="bad">no</span>'}${h.burst[i]?', <span class="bad">pipes burst</span>':''}<br>internet ${h.net[i]?'online':'<span class="warn">offline</span>'}, aeration sludge ${Math.round(h.sludge[i]*100)}%<br><span class="dim">program:</span> ${prog}`+(short?'':`<br>pole ${G.houses.pole[i]}`); }
+function houseInfo(i, short){ const h=S.houses, ctl=S.control; const prog=ctl.ext[i]?`${ctl.programs[i]}: ${ctl.reasons[i]} (target ${ctl.targets[i]} C)`:`built-in thermostat, target ${ctl.targets[i]} C`; return `<b>House ${i+1}</b> (Sector ${G.houses.sector[i]+1}, ${G.types[G.houses.type[i]]}, ${G.houses.residents[i]} residents)<br>indoor ${h.t[i]} C, heater ${h.heater[i]?'on':'off'}, draw ${h.draw[i]} W${h.limit[i]?' (limit '+h.limit[i]+' W)':''}<br>power ${h.power[i]?(h.ups[i]?'sector UPS':'grid'):'<span class="bad">none</span>'}, water ${h.water[i]?'ok':'<span class="bad">no</span>'}${h.burst[i]?', <span class="bad">pipes burst</span>':''}<br>pressure ${S.hydraulics.pressure_kpa[i]} kPa · delivered ${S.hydraulics.delivered_l[i]} L/tick · leak ${S.hydraulics.leak_l[i]} L/tick<br>internet ${h.net[i]?'online':'<span class="warn">offline</span>'}, aeration sludge ${Math.round(h.sludge[i]*100)}%<br><span class="dim">program:</span> ${prog}`+(short?'':`<br>pole ${G.houses.pole[i]}`); }
 function personInfo(per){ const st=['at home','walking to the hub','at the hub','walking home'][per[2]]; return `<b>Colonist</b> from house ${per[3]+1}, ${st}`; }
 function rows(pairs){ return '<table>'+pairs.map(([k,v])=>`<tr><td class="dim">${k}</td><td><b>${v}</b></td></tr>`).join('')+'</table>'; }
 function renderInfo(){ const box=document.getElementById('info'); if(!selected||!S){ box.style.display='none'; return; } const s=S, c=G.cfg; let title='', body='';
   const k=selected.kind, x=selected.extra;
   if(k==='house'){ title=`House ${selected.id+1}`; body=houseInfo(selected.id,false)+`<div style="margin-top:6px"><a href="/house?id=${selected.id+1}" target="_blank" style="color:#5aa9ff">open the house page: gauges, history, log</a></div>`; }
+  else if(k==='pipe'){const e=x==='water'?G.utilities.links[selected.id]:G.utilities.drainage.find(d=>d.name===x)?.links[selected.id];title=`${x} / pipe ${selected.id+1}`;if(e){body=rows([['material',e.material],['internal diameter',Math.round(e.diameter_m*1000)+' mm'],['length',e.length_m.toFixed(2)+' m'],...(x==='water'?[['flow',s.hydraulics.flow_l_s[selected.id]+' L/s'],['velocity',s.hydraulics.velocity_m_s[selected.id]+' m/s'],['head loss',s.hydraulics.headloss_m[selected.id]+' m'],['insulation',e.insulation_mm+' mm / heat traced']]:[['inflow',(s.hydraulics.drainage_l_s[x==='sanitary'?0:1][selected.id])+' L/s'],['grade',(e.slope*100).toFixed(1)+' %'],['full-bore capacity',(e.capacity_m3_s*1000).toFixed(2)+' L/s']])]);}}
   else if(k==='person'){ const per=s.people[selected.id]; title='Colonist'; body=per?personInfo(per):'went home'; }
   else if(k==='substation'){ title='Main substation'; body=rows([['available',s.power.available_kw+' kW'],['load',s.power.demand_kw+' kW'],['deficit',s.power.deficit_kw+' kW'],['shedding level',s.power.shedding],['trunk line',s.power.trunk?'ok':'CUT'],['feeders online',s.power.feeder.filter(Boolean).length+'/6'],['solar in',s.power.solar_kw+' kW'],['mine',s.power.infra.mine+' kW'],['road heating',s.power.infra.road_heating+' kW'],['lamps',s.power.infra.lamps+' kW'],['ups charging',s.power.infra.ups_charge+' kW']]); }
   else if(k==='upsc'){ title='UPS center'; body=rows([['state',s.power.ups_center],['charge',s.power.ups_center_kwh+' / 800 kWh'],['feeds','ops center, comms node, pump station']]); }
@@ -1746,7 +2432,7 @@ function renderInfo(){ const box=document.getElementById('info'); if(!selected||
   else if(k==='cabinet'){ const sec=s.sectors[x]; title=`Sector ${x+1} internet cabinet`; body=rows([['online',sec.cabinet?'yes':'no'],['cabinet ups',sec.cabinet_ups_h+' h'],['houses online',sec.net_ok+'/50']]); }
   else if(k==='comms'){ title='Comms node'; body=rows([['houses online',s.net.houses_online+'/300'],['traffic',s.net.packets_per_min+' packets/min'],['uplink',s.net.uplink?'OK':'LOST'],['reactor link',s.net.reactor_link?'ok':'lost'],['tower line power',s.power.tower_line?'ok':'cut']]); }
   else if(k==='ops'){ title='Operations center'; body=rows([['time',s.time],['open issues',s.issues_total],['colony budget',s.finance.colony+' cr'],['month income',s.finance.month_income+' cr'],['month expense',s.finance.month_expense+' cr']]); }
-  else if(k==='pump'||k==='tank'){ title=k==='pump'?'Pump station':'Water tank'; body=rows([['tank',s.water.tank_m3+' / '+s.water.tank_cap+' m3'],['flow to houses',s.water.flow_m3_h+' m3/h'],['from the plant',s.water.plant_m3_h+' m3/h'],['pump power',s.water.pump?'ok':'NONE'],['houses with water',s.water.houses_ok+'/300'],['frozen / burst',s.water.frozen+' / '+s.water.burst]].concat(s.water.sector_m3_h.map((v,i)=>['sector '+(i+1), v+' m3/h']))); }
+  else if(k==='pump'||k==='tank'){ title=k==='pump'?'Pump station':'Water tank'; body=rows([['tank',s.water.tank_m3+' / '+s.water.tank_cap+' m3'],['hydraulic solve',s.hydraulics.converged?'converged':'residual '+s.hydraulics.residual_m.toFixed(3)+' m'],['sewage held',s.hydraulics.sewer_storage_m3+' m3'],['storm water held',s.hydraulics.storm_storage_m3+' m3'],['overflow total',s.hydraulics.overflow_m3+' m3'],['flow to houses',s.water.flow_m3_h+' m3/h'],['from the plant',s.water.plant_m3_h+' m3/h'],['pump power',s.water.pump?'ok':'NONE'],['houses with water',s.water.houses_ok+'/300'],['frozen / burst',s.water.frozen+' / '+s.water.burst]].concat(s.water.sector_m3_h.map((v,i)=>['sector '+(i+1), v+' m3/h']))); }
   else if(k==='reactor'){ const r=s.reactor; title='Reactor, atmosphere processor'; body=rows([['mode',r.mode],['electric',r.power_mw+' MW (setpoint '+r.setpoint_mw+')'],['thermal',r.thermal_mw+' MW'],['to grid',r.available_mw+' MW'],['core',r.core_temp+' C'],['coolant',r.coolant_temp+' C, flow '+Math.round(r.flow*100)+'%'],['decay heat',r.decay_mw+' MW'],['pumps A / B',r.pump_a+' / '+r.pump_b],['heat exchanger',r.hx],['pump batteries',r.battery_h+' h'],['control link',r.link?'ok':'LOST'],['faults',r.faults.join(', ')||'none'],['marines',r.marines?'in the sublevels':'no']]); }
   else if(k==='solar'){ title='Solar field'; body=rows([['output',s.power.solar_kw+' kW'],['daylight',Math.round(s.env.daylight/0.3*100)+'% of a clear day'],['dust',Math.round(s.env.dust*100)+'%']]); }
   else if(k==='wplant'){ title='Water plant'; body=rows([['state',s.water.plant?'melting ice':'stopped'],['reactor heat',s.water.heat?'available':'none'],['output',s.water.plant_m3_h+' m3/h'],['tank in the city',s.water.tank_m3+' m3']]); }
@@ -1772,7 +2458,7 @@ window.addEventListener('resize', resize); resize();
 let t0=performance.now();
 function frame(){ const now=performance.now(); const t=(now-t0)/1000;
   if(flyAnim){ const u=Math.min(1,(now-flyAnim.t0)/1200); const k=u*u*(3-2*u); camera.position.lerpVectors(flyAnim.from, flyAnim.to, k); controls.target.lerpVectors(flyAnim.tfrom, flyAnim.tto, k); if(u>=1) flyAnim=null; }
-  controls.update();
+  controls.update(); updateDetail(); updateUtilityFlow(t);
   { const hour=(clock.hour + clock.speed*(now-clock.at)/1000/60)%24; const a=(hour-6)/24*Math.PI*2; sunDir.set(Math.cos(a)*12000, 3200, Math.sin(a)*12000).normalize(); sun.position.copy(sunDir).multiplyScalar(12000); sunSprite.position.copy(sunDir).multiplyScalar(48000);
     const dl=Math.max(0, Math.sin(Math.PI*(hour-6)/12))*(weather.storm?0.2:1); sun.intensity=0.8+1.6*dl; sun.color.setHSL(0.08, 0.6, 0.55+0.25*dl); planetMat.uniforms.uSun.value.copy(sun.position).normalize(); planetMat.uniforms.uTime.value=t;
     const wantFog = weather.storm ? 0.00055 : (weather.precip==='snow' ? 0.00018 : 0.0); scene.fog.density += (wantFog-scene.fog.density)*0.05; scene.fog.color.setHex(weather.storm?0x3a3e48:0x2a2e38);
@@ -1792,12 +2478,12 @@ function frame(){ const now=performance.now(); const t=(now-t0)/1000;
     complex.towerLight.material.opacity=0.5+0.5*Math.sin(t*4); if(complex.wheel) complex.wheel.rotation.z+= (S&&S.power.mine)?0.05:0;
     if(complex.steamOn!==undefined){ const c=G.cfg; const pts=[]; for(let k=0;k<12;k++){ const u=((t*0.25)+k/12)%1; for(const [tx,ty] of [[c.reactor_pos[0]-90,c.reactor_pos[1]-60],[c.reactor_pos[0]-90,c.reactor_pos[1]+60]]) pts.push(sph(tx+Math.sin(k*3+t)*6*u, ty+Math.cos(k*2)*6*u, 95+u*60)); } const a=complex.steam.geometry.attributes.position; for(let i=0;i<a.count;i++){ if(complex.steamOn&&i<pts.length) a.setXYZ(i,pts[i].x,pts[i].y,pts[i].z); else a.setXYZ(i,0,-99999,0);} a.needsUpdate=true; } }
   if(housesMesh){ for(const m of pipeMats){ if(m.userData.rate>0) m.userData.tex.offset.x-=m.userData.rate*0.02; } if(complex.beacon) complex.beacon.material.opacity=0.4+0.6*Math.abs(Math.sin(t*2)); }
-  sunTarget.position.copy(controls.target); const sd=camera.position.distanceTo(controls.target); const ext=Math.min(2600, Math.max(400, sd*1.2)); sun.shadow.camera.left=-ext; sun.shadow.camera.right=ext; sun.shadow.camera.top=ext; sun.shadow.camera.bottom=-ext; sun.shadow.camera.updateProjectionMatrix(); sun.position.copy(controls.target).add(sunDir.clone().multiplyScalar(8000));
+  sunTarget.position.copy(controls.target); const sd=camera.position.distanceTo(controls.target); const desiredNear=Math.max(.1,Math.min(20,sd*.002));if(Math.abs(camera.near-desiredNear)>.01){camera.near=desiredNear;camera.updateProjectionMatrix();}const ext=Math.min(2600, Math.max(90, sd*1.2)); sun.shadow.camera.left=-ext; sun.shadow.camera.right=ext; sun.shadow.camera.top=ext; sun.shadow.camera.bottom=-ext; sun.shadow.camera.updateProjectionMatrix(); sun.position.copy(controls.target).add(sunDir.clone().multiplyScalar(8000));
   if(layers.bloom) composer.render(); else renderer.render(scene,camera); requestAnimationFrame(frame); }
 
 // ---------- side panel ----------
 function cls(ok, warn){ return ok?'ok':(warn?'warn':'bad'); }
-function renderSide(s){
+function renderSide(s){ if(G)sectorCards(s);
   document.getElementById('time').textContent=s.time; document.getElementById('pause').textContent=s.paused?'Resume':'Pause';
   if(document.activeElement!==speedEl){ speedEl.value=speedToSlider(s.speed); speedV.textContent=s.speed+' min/s'; }
   const p=s.power, r=s.reactor, w=s.water, f=s.finance;
@@ -1827,6 +2513,7 @@ function renderSide(s){
   const mp=s.month_progress; if(mp && !s.report){ document.getElementById('report').textContent=`month ${s.finance.month} in progress, day ${mp.day} of ${mp.days} (the report closes on day ${mp.days})\nso far: ${mp.kwh} kWh, ${mp.water_m3} m3 water, repairs billed to owners ${mp.repairs} cr\nsector income ${mp.sector_income.join(' | ')}\nsector expense ${mp.sector_expense.join(' | ')}\ncolony income ${mp.colony_income}, expense ${mp.colony_expense}`; }
   const rp=s.report; if(rp){ document.getElementById('report').textContent=`Month ${rp.month}: owners paid ${Math.round(rp.houses_total)} cr (energy ${Math.round(rp.energy_total)}, water ${Math.round(rp.water_total)}, repairs ${Math.round(rp.repairs_total)}), ${Math.round(rp.kwh_total)} kWh\ncolony: income ${rp.colony_income}, expense ${rp.colony_expense}, budget ${rp.colony_budget}, unpaid ${rp.unpaid}\nsector income ${rp.sector_income.join(' | ')}\nsector expense ${rp.sector_expense.join(' | ')}\nexpense by cause: ${Object.entries(rp.by_cause).map(([k,v])=>k+' '+v).join(', ')}\ntop houses: ${rp.top_houses.map(h=>`#${h.house} (S${h.sector}) ${h.total}`).join(', ')}`; }
 }
+if(new URLSearchParams(location.search).has('inspect'))window.HH={camera,controls,scene,renderer,flyTo,houseDetails,utilityGroup,get geometry(){return G},get state(){return S}};
 loadGeom().then(()=>{ poll(); frame(); });
 </script></body></html>
 """
@@ -1856,7 +2543,7 @@ HTMLBUS = r"""<!doctype html>
   .prog { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:4px; }
 </style></head>
 <body>
-<div class="row" style="margin-bottom:8px"><a href="/" class="tab">3D planet</a><a href="/flat" class="tab">flat map</a><a href="/bus" class="tab on">bus and programs</a><a href="/house" class="tab">house</a><a href="/graph" class="tab">system graph</a></div>
+<div class="row" style="margin-bottom:8px"><a href="/" class="tab">3D planet</a><a href="/flat" class="tab">flat map</a><a href="/bus" class="tab on">bus and programs</a><a href="/house" class="tab">house</a><a href="/graph" class="tab">systems</a><a href="/attractors" class="tab">Attractors</a></div>
 <h1>Hadley's Hope: MQTT bus and house controllers &nbsp; <span id="time" class="dim" style="font-weight:400"></span></h1>
 <div class="kpi" id="kpi"></div>
 <h2>Program comparison, this month</h2>
@@ -1910,11 +2597,11 @@ poll();
 # ------------------------------------------------------------------------------------
 
 NAV_CSS = r"""
-  nav.hh { display:flex; gap:6px; align-items:center; padding:6px 10px; background:#12151c; border-bottom:1px solid #262b36; font-size:12px; }
+  nav.hh { overflow-x:auto;white-space:nowrap;min-height:52px;flex-shrink:0;display:flex; gap:6px; align-items:center; padding:6px 10px; background:#12151c; border-bottom:1px solid #262b36; font-size:12px; }
   nav.hh a { color:#d9dde6; text-decoration:none; padding:4px 10px; border:1px solid #262b36; border-radius:6px; background:#1c212c; }
-  nav.hh a.on { border-color:#5aa9ff; color:#5aa9ff; } nav.hh a:hover { background:#2d3444; } nav.hh .t { margin-left:auto; color:#8a93a6; }
+  nav.hh a.on { border-color:#9fbca9; color:#d3e0c6; background:#20352e; } nav.hh a:hover { background:#2d3444; } nav.hh .t { margin-left:auto; color:#8a93a6; }
 """
-NAV_HTML = r"""<nav class="hh"><a href="/" id="nav-3d">3D planet</a><a href="/flat" id="nav-flat">flat map</a><a href="/bus" id="nav-bus">bus and programs</a><a href="/house" id="nav-house">house</a><a href="/graph" id="nav-graph">system graph</a><a href="/attractors" id="nav-attr">attractors</a><span class="t" id="navtime"></span></nav>
+NAV_HTML = r"""<nav class="hh"><a href="/" id="nav-3d">3D planet</a><a href="/flat" id="nav-flat">map</a><a href="/bus" id="nav-bus">controllers</a><a href="/house" id="nav-house">house</a><a href="/graph" id="nav-graph">systems</a><a href="/attractors" id="nav-attr">Attractors</a><span class="t" id="navtime"></span></nav>
 <script>(function(){ const p=location.pathname.replace(/\/$/,'')||'/'; const id={'/':'nav-3d','/flat':'nav-flat','/bus':'nav-bus','/house':'nav-house','/graph':'nav-graph','/attractors':'nav-attr'}[p]; if(id) document.getElementById(id).classList.add('on'); })();</script>"""
 
 HTMLHOUSE = r"""<!doctype html>
@@ -2083,17 +2770,27 @@ HTMLATTR = r"""<!doctype html>
   .dim { color:var(--dim); } .ok { color:var(--ok); } .warn { color:var(--warn); } .bad { color:var(--bad); }
   #tip { position:absolute; display:none; background:rgba(18,21,28,.95); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font-size:11.5px; pointer-events:none; max-width:300px; z-index:4; }
   @media (max-width:1100px){ #body { flex-direction:column; } #side { width:auto; flex:0 0 auto; max-height:45vh; border-left:0; border-top:1px solid var(--line); } }
+  #phase-toolbar{position:absolute;left:18px;right:18px;top:14px;z-index:5;display:flex;gap:10px;align-items:center;flex-wrap:wrap;pointer-events:none}
+  #phase-toolbar button,#phase-toolbar select{pointer-events:auto;background:#162527;color:#bfcfc5;border:1px solid #3d5750;border-radius:4px;padding:8px 10px;font:11px sans-serif}
+  #phase-toolbar button[aria-pressed=true]{background:#304739;color:#e3eccb;border-color:#98b18c}
+  #phase-toolbar label{font-size:10px;color:#9caf9f;pointer-events:auto}#phase-help{position:absolute;left:18px;top:58px;color:#a3b6aa;font-size:10px;z-index:3;pointer-events:none}
+  #connection{position:absolute;right:18px;bottom:15px;font-size:10px;z-index:4;color:#9eb7a8;background:#10191be6;padding:5px 8px;border-radius:3px}
+  #legend{left:18px;bottom:20px;max-width:380px;background:#10191bee;border-color:#334840;border-radius:5px;line-height:1.55}
+  #side{background:#11191c;border-color:#30443c;padding:12px}.pn{border-radius:5px;background:#152023;border-color:#2e4540;margin-bottom:12px;padding:12px}.pn h3{font-size:12px;color:#dce4d4}.pn .v{line-height:1.55;color:#b3c4b8}.pn .ax{font-size:9px!important}
+  @media(max-width:650px){#phase-toolbar{gap:4px;left:10px;right:10px}#phase-toolbar button,#phase-toolbar select{font-size:10px;padding:6px}#phase-help{top:85px;font-size:9px;max-width:85%}#legend{font-size:9px;max-width:270px;bottom:10px}#connection{display:none}}
   NAVCSS
 </style></head>
 <body>
 NAVHTML
 <div id="body">
 <div id="wrap"><canvas id="trail"></canvas><canvas id="bg"></canvas><canvas id="top"></canvas>
-<div id="legend"><b>Attractors: phase space of the 300 houses</b><br>
-<span class="dim">x: indoor temperature, y: how fast it changes. Every house is a bright dot, the dust is the same physics run forward. Things flow to where they will end up.</span><br>
-<span class="sw" style="background:#5ec07a"></span>warm basin <span class="sw" style="background:#e0b04a"></span>cool, cannot reach target <span class="sw" style="background:#e2574d"></span>will freeze <span class="sw" style="background:#8a7aa6"></span>pipes burst<br>
+<div id="phase-toolbar"><div role="group" aria-label="Phase-space view"><button data-phase="thermal" aria-pressed="true">Thermal phase</button><button data-phase="coupled" aria-pressed="false">3D · water coupling</button></div><label>Colour <select id="phase-colour"><option value="basin">Thermal basin</option><option value="sector">District</option><option value="pressure">Water pressure</option></select></label></div>
+<div id="phase-help">Thermal phase portrait · click a house to open its details</div><div id="connection" role="status">Connecting…</div>
+<div id="legend"><b>Attractor observatory</b><br>
+<span class="dim">Dots show measured house states. Thermal view: temperature × °C/h. Flow previews hold current weather and power fixed; basins are conditional equilibria, not guaranteed forecasts.</span><br>
+<span id="phase-colour-key"><span class="sw" style="background:#5ec07a"></span>warm basin <span class="sw" style="background:#e0b04a"></span>cannot hold target <span class="sw" style="background:#e2574d"></span>will freeze <span class="sw" style="background:#8a7aa6"></span>pipes burst</span><br>
 <span id="counts" class="dim"></span><br>
-<label><input type="checkbox" id="oDust" checked> flow</label><label><input type="checkbox" id="oCurves" checked> curves</label><label><input type="checkbox" id="oHouses" checked> houses</label>
+<label><input type="checkbox" id="oDust" checked> flow preview</label><label><input type="checkbox" id="oCurves" checked> curves</label><label><input type="checkbox" id="oHouses" checked> houses</label>
 </div>
 <div id="tip"></div></div>
 <div id="side">
@@ -2108,7 +2805,7 @@ const $=id=>document.getElementById(id);
 const BG=$('bg'), TR=$('trail'), TP=$('top'), bgc=BG.getContext('2d'), trc=TR.getContext('2d'), tpc=TP.getContext('2d'), tip=$('tip');
 const COL=['#5ec07a','#e0b04a','#e2574d','#8a7aa6'], DUST=['rgba(79,209,197,','rgba(224,176,74,','rgba(226,87,77,','rgba(138,122,166,'];
 const TMIN=-58, TMAX=35, RMIN=-3.2, RMAX=2.2, C0=21, SQ=1.5;
-let A=null, H=null, W=0, Hh=0, dpr=1, pad={l:46,r:18,t:18,b:34}, pollN=0, dirty=true;
+let A=null, H=null, W=0, Hh=0, dpr=1, pad={l:46,r:18,t:100,b:34}, pollN=0, dirty=true;
 const opt={dust:true, curves:true, houses:true};
 [['oDust','dust'],['oCurves','curves'],['oHouses','houses']].forEach(([id,k])=>$(id).onchange=e=>{ opt[k]=e.target.checked; dirty=true; if(k==='dust'){ trc.fillStyle='#0f1115'; trc.fillRect(0,0,W,Hh); } });
 const asinh=Math.asinh, u0=asinh((TMIN-C0)/SQ), u1=asinh((TMAX-C0)/SQ);
@@ -2130,14 +2827,14 @@ function drawBg(){ const c=bgc; c.clearRect(0,0,W,Hh); if(!A) return; const h=A.
   dirty=false; }
 let dust=[];
 function seedDust(n){ dust=[]; for(let i=0;i<n;i++) dust.push(spawn({})); }
-function spawn(p){ p.j=(Math.random()*300)|0; p.T=TMIN+Math.random()*(TMAX-TMIN); p.on=Math.random()<.5; p.age=0; p.life=200+Math.random()*500; p.x=null;
-  if(A){ const h=A.houses, j=p.j; if(h.eq_on[j]<h.target[j]) p.on=true; p.r=((p.on?h.eq_on[j]:h.eq_off[j])-p.T)/h.tau[j]+(Math.random()-.5)*0.6; } else p.r=0; return p; }
-function stepDust(){ if(!A) return; const h=A.houses, dt=0.07; const c=trc;
+function spawn(p){ p.j=(Math.random()*(A?.houses.t.length||300))|0; p.T=TMIN+Math.random()*(TMAX-TMIN); p.on=Math.random()<.5; p.age=0; p.life=200+Math.random()*500; p.x=null;
+  if(A){ const h=A.houses, j=p.j; if(h.eq_on[j]<h.target[j]) p.on=true; p.r=((p.on?h.eq_on[j]:h.eq_off[j])-p.T)/h.tau[j]; } else p.r=0; return p; }
+function stepDust(){ if(!A||A.paused) return; const h=A.houses, dt=0.07; const c=trc;
   c.globalCompositeOperation='source-over'; c.fillStyle='rgba(15,17,21,0.085)'; c.fillRect(0,0,W,Hh); c.globalCompositeOperation='lighter';
-  if(!opt.dust) return;
+  if(!opt.dust){c.globalCompositeOperation='source-over';return;}
   for(const p of dust){ const j=p.j, tg=h.target[j], eqOn=h.eq_on[j], eqOff=h.eq_off[j], tau=h.tau[j];
     if(p.T<tg-0.5) p.on=true; else if(p.T>tg+0.5) p.on=false; if(eqOn<tg) p.on=true;
-    const want=((p.on?eqOn:eqOff)-p.T)/tau; p.r+=(want-p.r)*0.18; p.T+=p.r*dt; p.age++;
+    const want=((p.on?eqOn:eqOff)-p.T)/tau; const eq=p.on?eqOn:eqOff;p.T=eq+(p.T-eq)*Math.exp(-dt/tau);p.r=(eq-p.T)/tau; p.age++;
     const x=X(p.T), y=Y(p.r); if(p.x!==null){ const a=Math.min(1,p.age/40)*Math.min(1,(p.life-p.age)/60)*0.55; c.strokeStyle=DUST[h.basin[j]]+a+')'; c.beginPath(); c.moveTo(p.x,p.y); c.lineTo(x,y); c.stroke(); }
     p.x=x; p.y=y; if(p.age>p.life) spawn(p); }
   c.globalCompositeOperation='source-over'; }
@@ -2150,17 +2847,17 @@ function drawTop(){ const c=tpc; c.clearRect(0,0,W,Hh); if(!A) return; const h=A
   c.lineWidth=1;
   if(!opt.houses) return;
   for(let i=0;i<h.t.length;i++){ const tx=X(h.t[i]), ty=Y(h.rate[i]); if(!hp[i]) hp[i]={x:tx,y:ty}; const q=hp[i]; q.x+=(tx-q.x)*0.12; q.y+=(ty-q.y)*0.12;
-    const col=COL[h.basin[i]]; c.beginPath(); c.arc(q.x,q.y,i===hover?6:3.2,0,7); c.fillStyle=col; c.globalAlpha=0.95; c.fill(); c.globalAlpha=0.18; c.beginPath(); c.arc(q.x,q.y,8,0,7); c.fill(); c.globalAlpha=1; }
+    const col=phaseColor(i); c.beginPath(); c.arc(q.x,q.y,i===hover?6:3.2,0,7); c.fillStyle=col; c.globalAlpha=0.95; c.fill(); c.globalAlpha=0.18; c.beginPath(); c.arc(q.x,q.y,8,0,7); c.fill(); c.globalAlpha=1; }
   if(hover>=0){ const q=hp[hover]; c.strokeStyle='#fff'; c.beginPath(); c.arc(q.x,q.y,7,0,7); c.stroke(); } }
-const BASIN=['warm: settles at its target','cool: heat is capped, settles below target','freezing: no heat to hold it above 0°','pipes burst, waiting for the plumber'];
-TP.addEventListener('pointermove', ev=>{ if(!A||!opt.houses) return; const r=TP.getBoundingClientRect(), mx=ev.clientX-r.left, my=ev.clientY-r.top; let best=-1, bd=10;
+const BASIN=['warm: settles at its target','target cannot be maintained at the current heat gains','freezing: no heat to hold it above 0°','pipes burst, waiting for the plumber'];
+TP.addEventListener('pointermove', ev=>{ if(!A||!opt.houses||phaseDrag) return; const r=TP.getBoundingClientRect(), mx=ev.clientX-r.left, my=ev.clientY-r.top; let best=-1, bd=10;
   hp.forEach((q,i)=>{ const d=Math.hypot(q.x-mx,q.y-my); if(d<bd){ bd=d; best=i; } }); hover=best; TP.style.cursor=best>=0?'pointer':'default';
   if(best<0){ tip.style.display='none'; return; } const h=A.houses, i=best;
-  tip.innerHTML=`<b>House ${i+1}</b>, sector ${h.sector[i]+1}<br>${h.t[i].toFixed(1)}° now, ${h.rate[i]>0?'+':''}${h.rate[i].toFixed(2)}°/h<br>heading to <b>${h.att[i]}°</b> (heater on ${h.eq_on[i]}°, off ${h.eq_off[i]}°, time constant ${h.tau[i]} h)<br><span style="color:${COL[h.basin[i]]}">${BASIN[h.basin[i]]}</span>${h.ttf[i]>0?`<br>reaches 0° in <b>${h.ttf[i]} h</b>`:''}`;
+  tip.innerHTML=`<b>House ${i+1}</b>, sector ${h.sector[i]+1}<br>${h.t[i].toFixed(1)}° now, ${h.rate[i]>0?'+':''}${h.rate[i].toFixed(2)}°/h<br>water <b>${h.pressure_kpa[i]} kPa</b>, ${h.water_l_min[i]} L/min<br>conditional equilibrium <b>${h.att[i]}°</b> (heater on ${h.eq_on[i]}°, off ${h.eq_off[i]}°, time constant ${h.tau[i]} h)<br><span style="color:${COL[h.basin[i]]}">${BASIN[h.basin[i]]}</span>${h.ttf[i]>0?`<br>reaches 0° in <b>${h.ttf[i]} h</b>`:''}`;
   tip.style.display='block'; tip.style.left=Math.min(mx+14,W-310)+'px'; tip.style.top=(my+14)+'px'; });
 TP.addEventListener('pointerleave',()=>{ hover=-1; tip.style.display='none'; });
-TP.addEventListener('click',()=>{ if(hover>=0) window.open('/house?id='+(hover+1),'_blank'); });
-function panel(id){ const cv=$(id), r=cv.getBoundingClientRect(); const d=devicePixelRatio||1; if(cv.width!==Math.round(r.width*d)){ cv.width=Math.round(r.width*d); cv.height=Math.round(r.height*d); } const c=cv.getContext('2d'); c.setTransform(d,0,0,d,0,0); c.clearRect(0,0,r.width,r.height); return [c,r.width,r.height]; }
+TP.addEventListener('click',()=>{ if(!phaseMoved&&hover>=0) window.open('/house?id='+(hover+1),'_blank'); });
+function panel(id){ const cv=$(id), r=cv.getBoundingClientRect(); const d=devicePixelRatio||1; if(cv.width!==Math.round(r.width*d)||cv.height!==Math.round(r.height*d)){ cv.width=Math.round(r.width*d); cv.height=Math.round(r.height*d); } const c=cv.getContext('2d'); c.setTransform(d,0,0,d,0,0); c.clearRect(0,0,r.width,r.height); return [c,r.width,r.height]; }
 function frame(c,w,h,xr,yr,xl,yl){ const P={l:34,r:8,t:8,b:16}; const sx=v=>P.l+(v-xr[0])/(xr[1]-xr[0])*(w-P.l-P.r), sy=v=>P.t+(yr[1]-v)/(yr[1]-yr[0])*(h-P.t-P.b);
   c.strokeStyle='#222834'; c.lineWidth=1; c.strokeRect(P.l,P.t,w-P.l-P.r,h-P.t-P.b); c.fillStyle='#5d6576'; c.font='10px sans-serif'; c.textAlign='right';
   c.fillText(yl(yr[1]),P.l-4,P.t+8); c.fillText(yl(yr[0]),P.l-4,h-P.b); c.textAlign='left'; c.fillText(xl(xr[0]),P.l,h-3); c.textAlign='right'; c.fillText(xl(xr[1]),w-P.r,h-3);
@@ -2175,7 +2872,7 @@ function drawPanels(){ if(!A) return; const F=(H&&H.fast)||[], S=(H&&H.slow)||[]
   { const [c,w,h]=panel('cw'); const wa=A.water, iT=col('tank'), iI=col('water_in'), iU=col('water_use'); const pts=F.map(r=>[r[iT], r[iI]-r[iU]]); const m=Math.max(3,...pts.map(p=>Math.abs(p[1])))*1.2;
     const xsw=pts.map(p=>p[0]).concat([wa.v_star, wa.tank]); const wx0=Math.max(0,Math.min(...xsw)-15), wx1=Math.min(wa.cap,Math.max(...xsw)+8);
     const [sx,sy]=frame(c,w,h,[wx0,wx1],[-m,m],v=>Math.round(v)+'',v=>v.toFixed(0));
-    c.strokeStyle='rgba(90,169,255,.35)'; c.beginPath(); for(let v=wx0;v<=wx1;v+=(wx1-wx0)/120){ const inflow=A.water.v_star>0||wa.in>0?12*Math.max(.15,Math.min(1,(wa.cap-v)/60)):0; const y=sy(Math.max(-m,Math.min(m,inflow-wa.use))); v>wx0?c.lineTo(sx(v),y):c.moveTo(sx(v),y); } c.stroke();
+    c.strokeStyle='rgba(90,169,255,.35)'; c.beginPath(); for(let v=wx0;v<=wx1;v+=(wx1-wx0)/120){ const inflow=wa.plant_ok?Math.min(wa.max_m3_h*Math.max(.15,Math.min(1,(wa.cap-v)/60)),Math.max(0,(wa.cap-v)*60)):0; const y=sy(Math.max(-m,Math.min(m,inflow-wa.use))); v>wx0?c.lineTo(sx(v),y):c.moveTo(sx(v),y); } c.stroke();
     comet(c,pts,sx,sy,'rgba(90,169,255,A)'); if(wa.v_star>0) ring(c,sx(wa.v_star),sy(0),'#5ec07a','settles '+Math.round(wa.v_star)); else ring(c,sx(0),sy(0),'#e2574d','empty');
     setPill('pw',wa.verdict); $('vw').textContent=wa.verdict[1]; }
   { const [c,w,h]=panel('cp'); const iA=col('avail_kw'), iD=col('demand_kw'), iU=col('ups'); const pts=F.map(r=>[r[iA]-r[iD], r[iU]*100]); const m=Math.max(500,...pts.map(p=>Math.abs(p[0])))*1.15;
@@ -2193,8 +2890,39 @@ function drawPanels(){ if(!A) return; const F=(H&&H.fast)||[], S=(H&&H.slow)||[]
     comet(c,pts,sx,sy,'rgba(94,192,122,A)'); if(mo.b_star) ring(c,sx(mo.b_star/1000),sy(0),'#5ec07a','settles '+Math.round(mo.b_star/1000)+'k');
     setPill('pm',mo.verdict); $('vm').textContent=mo.verdict[1]+(mo.last_levy?`, last levy ${Math.round(mo.last_levy/1000)}k`:''); } }
 function counts(){ const h=A.houses, k=h.counts; $('counts').innerHTML=`<span class="ok">${k[0]} warm</span>, <span class="warn">${k[1]} cool</span>, <span class="bad">${k[2]} freezing</span>, ${k[3]} burst${h.first_freeze_h>0?`; first pipes freeze in <b class="bad">${h.first_freeze_h} h</b>`:''}. Outside ${A.t_out}°, wind ${A.wind} m/s.`; $('navtime').textContent=A.time; }
-async function poll(){ try{ const want=(pollN++%10===0); const d=await (await fetch('/attractors.json'+(want?'?hist=1':''))).json(); if(want) H=d; const first=!A; A=d; if(first) seedDust(2600); dirty=true; counts(); }catch(e){} setTimeout(poll,1000); }
-let fr=0; function loop(){ if(dirty) drawBg(); stepDust(); drawTop(); if(fr++%6===0) drawPanels(); requestAnimationFrame(loop); }
+// The original thermal phase portrait remains the default. The 3D view plots
+// measured state dimensions, rather than adding an unrelated chaotic oscillator.
+const BASIN_KEY=$('phase-colour-key').innerHTML;
+let phaseView='thermal',phaseColour='basin',phaseYaw=-.65,phasePitch=.35,phaseDrag=null,phaseMoved=false,phaseSamples=[],phaseLastTick=-1;
+const SECTOR_COL=['#72c6ba','#b3bd80','#e0ad72','#b394c7','#7aaee2','#cc929b'];
+function phaseColor(i){const h=A.houses;if(phaseColour==='sector')return SECTOR_COL[h.sector[i]%6];if(phaseColour==='pressure'){const t=Math.max(0,Math.min(1,h.pressure_kpa[i]/600));return `hsl(${12+t*173},65%,${56+t*8}%)`;}return COL[h.basin[i]];}
+function phasePoint(T,rate,pressure){const x=(T-10)/35,y=rate/2.4,z=pressure/300-1;
+ const xx=x*Math.cos(phaseYaw)-z*Math.sin(phaseYaw),zz=x*Math.sin(phaseYaw)+z*Math.cos(phaseYaw),yy=y*Math.cos(phasePitch)-zz*Math.sin(phasePitch),depth=y*Math.sin(phasePitch)+zz*Math.cos(phasePitch);
+ const scale=Math.min(W*.23,Hh*.28),perspective=3.8/(3.8+depth*.28);return{x:W*.5+xx*scale*perspective,y:Hh*.47-yy*scale*perspective,depth};}
+function setPhaseView(name){phaseView=name;phaseMoved=false;dirty=true;hp=[];hover=-1;tip.style.display='none';trc.clearRect(0,0,W,Hh);bgc.clearRect(0,0,W,Hh);document.querySelectorAll('[data-phase]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.phase===name)));$('oDust').disabled=name==='coupled';$('oCurves').disabled=name==='coupled';$('phase-help').textContent=name==='thermal'?'Thermal phase portrait · click a house to open its details':'Temperature × thermal rate × pressure · drag to rotate · click a house to inspect';}
+document.querySelectorAll('[data-phase]').forEach(b=>b.onclick=()=>setPhaseView(b.dataset.phase));
+$('phase-colour').onchange=e=>{phaseColour=e.target.value;dirty=true;$('phase-colour-key').innerHTML=phaseColour==='pressure'?'Colour: red 0 kPa → cyan 600 kPa':phaseColour==='sector'?SECTOR_COL.map((c,i)=>`<span style="color:${c}">● District ${i+1}</span>`).join(' · '):BASIN_KEY;};
+function capturePhase(d){if(d.t===phaseLastTick)return;if(d.t<phaseLastTick)phaseSamples=[];phaseLastTick=d.t;phaseSamples.push({t:d.t,T:d.houses.t,R:d.houses.rate,P:d.houses.pressure_kpa});if(phaseSamples.length>90)phaseSamples.shift();}
+function drawCoupled(){const c=tpc;c.clearRect(0,0,W,Hh);bgc.clearRect(0,0,W,Hh);if(!A)return;
+ const line=(a,b,color,width=1)=>{const p=phasePoint(...a),q=phasePoint(...b);c.beginPath();c.moveTo(p.x,p.y);c.lineTo(q.x,q.y);c.strokeStyle=color;c.lineWidth=width;c.stroke();};
+ for(let t=-40;t<=40;t+=20)line([t,0,0],[t,0,600],'#243637');for(let p=0;p<=600;p+=150)line([-40,0,p],[40,0,p],'#243637');
+ line([-40,0,0],[40,0,0],'#b2ba86',1.5);line([-40,-2.4,0],[-40,2.4,0],'#b3a0cb',1.5);line([-40,0,0],[-40,0,600],'#73bfc4',1.5);
+ c.font='11px sans-serif';c.textAlign='center';for(const [pt,label,color] of [[[43,0,0],'Temperature °C','#b2ba86'],[[-40,2.6,0],'Change °C / h','#b3a0cb'],[[-40,0,650],'Pressure kPa','#73bfc4']]){const q=phasePoint(...pt);c.fillStyle=color;c.fillText(label,q.x,q.y-8);}
+ for(const T of [-40,0,40]){const q=phasePoint(T,0,0);c.fillStyle='#b2ba86';c.fillText(String(T),q.x,q.y+15);}
+ for(const rate of [-2,0,2]){const q=phasePoint(-40,rate,0);c.fillStyle='#b3a0cb';c.fillText(String(rate),q.x-12,q.y);}
+ for(const pressure of [0,300,600]){const p=phasePoint(-40,0,pressure);c.fillStyle='#92a7a3';c.fillText(String(pressure),p.x-10,p.y+15);}
+ // Recent real trajectories for the hovered house (or six district exemplars).
+ const focus=hover>=0?[hover]:Array.from({length:6},(_,k)=>k*Math.floor(A.houses.t.length/6));
+ for(const i of focus)for(let k=1;k<phaseSamples.length;k++){const a=phaseSamples[k-1],b=phaseSamples[k];if(b.t-a.t>Math.max(120,A.speed*4))continue;const p=phasePoint(a.T[i],a.R[i],a.P[i]),q=phasePoint(b.T[i],b.R[i],b.P[i]);c.globalAlpha=.08+.48*k/phaseSamples.length;c.strokeStyle=phaseColor(i);c.lineWidth=i===hover?2:1;c.beginPath();c.moveTo(p.x,p.y);c.lineTo(q.x,q.y);c.stroke();}
+ c.globalAlpha=1;const h=A.houses;hp=h.t.map((t,i)=>phasePoint(t,h.rate[i],h.pressure_kpa[i]));
+ if(opt.houses)hp.map((p,i)=>({p,i})).sort((a,b)=>b.p.depth-a.p.depth).forEach(({p,i})=>{const color=phaseColor(i);c.fillStyle=color;c.globalAlpha=.13;c.beginPath();c.arc(p.x,p.y,i===hover?12:7,0,Math.PI*2);c.fill();c.globalAlpha=.95;c.beginPath();c.arc(p.x,p.y,i===hover?5.5:3.3,0,Math.PI*2);c.fill();if(i===hover){c.strokeStyle='#fff';c.stroke();}});c.globalAlpha=1;
+ c.fillStyle='#8ca49b';c.font='10px sans-serif';c.textAlign='left';c.fillText(`${phaseSamples.length} observed samples · trails ${hover>=0?'selected house':'one house per district'}`,pad.l,54);
+}
+TP.addEventListener('pointerdown',e=>{if(phaseView!=='coupled')return;phaseDrag={x:e.clientX,y:e.clientY,yaw:phaseYaw,pitch:phasePitch};phaseMoved=false;TP.setPointerCapture(e.pointerId);});
+TP.addEventListener('pointermove',e=>{if(!phaseDrag)return;const dx=e.clientX-phaseDrag.x,dy=e.clientY-phaseDrag.y;if(Math.hypot(dx,dy)>4)phaseMoved=true;phaseYaw=phaseDrag.yaw+dx*.006;phasePitch=Math.max(-1.1,Math.min(1.1,phaseDrag.pitch+dy*.005));tip.style.display='none';});
+TP.addEventListener('pointerup',()=>{phaseDrag=null;});TP.addEventListener('pointercancel',()=>{phaseDrag=null;phaseMoved=true;});
+async function poll(){ try{ const want=(pollN++%10===0); const d=await (await fetch('/attractors.json'+(want?'?hist=1':''))).json(); if(want) H=d; const first=!A; A=d;capturePhase(d);$("connection").textContent=d.paused?"Simulation paused":"Live · tick "+d.t; if(first) seedDust(2600); dirty=true; counts(); }catch(e){$("connection").textContent="Connection lost · retrying";} setTimeout(poll,1000); }
+let fr=0,lastFrame=0;function loop(now=0){requestAnimationFrame(loop);if(now-lastFrame<33)return;lastFrame=now;if(phaseView==='thermal'){if(dirty)drawBg();stepDust();drawTop();}else drawCoupled();if(fr++%3===0)drawPanels();}
 resize(); poll(); loop();
 </script></body></html>
 """.replace("NAVCSS", NAV_CSS).replace("NAVHTML", NAV_HTML)
@@ -3175,14 +3903,15 @@ def _houses_attractors(w: World):
     ua = w.h_ua * (1.0 + 0.006 * w.wind)
     q_now = (w.h_draw_w - w.h_heat_w) * 0.8 + w.h_residents * 80.0
     rate = (w.h_heat_w + q_now - ua * (w.h_t_in - w.t_out)) / w.h_cap * 3600.0          # C per hour, same law as houses_step
-    q_int = w.h_residents * 80.0 + np.where(w.h_power_ok, w.h_base_w * 0.8, 0.0)
-    p_on = np.where(w.h_power_ok, np.where(w.h_limit_w > 0, np.clip(w.h_limit_w - w.h_base_w, 0, w.h_heater_w), w.h_heater_w), 0.0)
+    q_int = q_now
+    nonheater = np.maximum(0.0, w.h_draw_w - w.h_heat_w)
+    p_on = np.where(w.h_power_ok, np.where(w.h_limit_w > 0, np.clip(w.h_limit_w - nonheater, 0, w.h_heater_w), w.h_heater_w), 0.0)
     eq_on = w.t_out + (p_on + q_int) / ua        # where the house settles with the heater always on
     eq_off = w.t_out + q_int / ua                # ... and with it always off
     tau_h = w.h_cap / ua / 3600.0                # how fast it gets there, hours
     target = w.h_target
-    att = np.where(eq_on >= target, target, eq_on)
-    basin = np.where(w.h_burst, 3, np.where(att >= target - 1.0, 0, np.where(att >= 0.0, 1, 2)))
+    att = np.clip(target, eq_off, eq_on)
+    basin = np.where(w.h_burst, 3, np.where(np.abs(att-target)<=1.0, 0, np.where(att >= 0.0, 1, 2)))
     with np.errstate(divide="ignore", invalid="ignore"):
         ttf = np.where((basin == 2) & (w.h_t_in > 0), tau_h * np.log((w.h_t_in - eq_on) / (0.0 - eq_on)), -1.0)
     return {
@@ -3190,6 +3919,8 @@ def _houses_attractors(w: World):
         "eq_on": np.round(eq_on, 1).tolist(), "eq_off": np.round(eq_off, 1).tolist(), "tau": np.round(tau_h, 1).tolist(),
         "target": np.round(target, 1).tolist(), "att": np.round(att, 1).tolist(), "basin": basin.tolist(),
         "ttf": np.round(np.nan_to_num(ttf, nan=-1.0), 1).tolist(), "sector": w.h_sector.tolist(),
+        "pressure_kpa": np.round(w.utilities.pressure, 2).tolist(),
+        "water_l_min": np.round(w.utilities.delivered * 60000 / w.cfg["tick_seconds"], 4).tolist(),
         "counts": [int((basin == k).sum()) for k in range(4)],
         "first_freeze_h": round(float(ttf[ttf > 0].min()), 1) if (ttf > 0).any() else -1,
     }
@@ -3268,15 +3999,20 @@ def attractor_snapshot(w: World, with_hist: bool):
         mv = ("ok", "collecting history")
     elif net_month <= 0:
         mv = ("warn", f"losing {-net_month:.0f} cr a month, {runway_m:.0f} days of payroll left")
+    elif f <= 0:
+        mv = ("warn", "no company levy: positive income has no finite budget equilibrium")
     else:
         b_star = tgt + net_month / f - net_month
         mv = ("ok", f"settles near {b_star / 1000:.0f}k cr; {runway_m:.0f} days of payroll if income stops")
 
     out = {
         "time": w.time_str(), "t": w.t, "t_out": round(w.t_out, 1), "wind": round(w.wind, 1),
+        "paused": bool(w.paused), "speed": w.speed,
         "houses": _houses_attractors(w),
         "water": {"tank": round(w.water_tank_m3, 1), "cap": cap, "in": round(w.water_plant_m3_h, 2), "use": round(use, 2),
-                  "v_star": round(v_star, 1), "runway_h": round(runway_w, 1), "verdict": wv},
+                  "v_star": round(v_star, 1), "runway_h": round(runway_w, 1), "verdict": wv,
+                  "max_m3_h": vmax, "plant_ok": bool(w.water_plant_ok),
+                  "leak_m3_h": round(float(w.utilities.leaks.sum())*3600/c["tick_seconds"],4)},
         "power": {"margin": round(margin), "ups": round(ups_kwh / ups_cap, 3), "shedding": w.shedding, "mode": w.r_mode,
                   "verdict": pv},
         "repairs": {"lam": lam, "mu": round(mu, 1), "rho": round(rho, 2), "backlog": backlog, "unfunded": unfunded,
@@ -3344,12 +4080,12 @@ def world_tick(w: World):
     house_events(w)
     if w.t % 60 == 0:
         pipes_audit(w)
-    if w.t % 10 == 0:
-        attractor_sample(w)
     if w.t % w.cfg["ticks_per_day"] == 0:
         finance_day_close(w)
     if w.t % (w.cfg["ticks_per_day"] * w.cfg["days_per_month"]) == 0:
         finance_month_close(w)
+    if w.t % 10 == 0:
+        attractor_sample(w)
     if bridge:
         bridge.publish()
 
@@ -3464,6 +4200,7 @@ def snapshot(w: World):
                     "pump_a": round(w.r_pump_a, 2), "pump_b": round(w.r_pump_b, 2), "hx": round(w.r_hx, 2),
                     "battery_h": round(w.r_battery_h, 1), "faults": w.r_faults, "link": w.r_link_ok,
                     "marines": w.marines_active > 0, "thermal_mw": round(w.r_power_mw / 0.3, 1)},
+        "hydraulics": w.utilities.state(),
         "water": {"tank_m3": round(w.water_tank_m3, 1), "tank_cap": c["water_tank_m3"], "plant": w.water_plant_ok,
                   "heat": w.water_plant_heat, "plant_m3_h": round(w.water_plant_m3_h, 2), "flow_m3_h": round(w.water_flow_m3_h, 2),
                   "pump": w.pump_station_ok, "houses_ok": int(w.h_water_ok.sum()),
@@ -3549,6 +4286,9 @@ def house_snapshot(w: World, i: int):
             "power_ok": bool(w.h_power_ok[i]), "on_ups": bool(w.h_on_ups[i]), "limit_w": int(w.h_limit_w[i]),
             "ups_kwh": round(float(w.ups_kwh[w.h_sector[i]]), 0), "ups_cap": c["ups_sector_kwh"], "ups_state": w.ups_state[w.h_sector[i]],
             "water_ok": bool(w.h_water_ok[i]), "pipes_ok": bool(w.h_pipes_ok[i]), "burst": bool(w.h_burst[i]), "valve_open": bool(w.h_valve_open[i]),
+            "pressure_kpa": round(float(w.utilities.pressure[i]), 2),
+            "delivered_l": round(float(w.utilities.delivered[i])*1000, 4),
+            "leak_l": round(float(w.utilities.leaks[i])*1000, 4),
             "water_month_m3": round(float(w.h_water_month[i]), 2), "tank_m3": round(w.water_tank_m3, 0), "tank_cap": c["water_tank_m3"],
             "net_online": bool(w.h_net_online[i]), "terminal_ok": bool(w.h_terminal_ok[i]), "cabinet": bool(w.cabinet_online[w.h_sector[i]]),
             "sludge": round(float(w.h_sludge[i]), 2), "aeration_ok": bool(w.h_aeration_ok[i]), "appliances_on": bool(w.h_appliances_on[i]),
@@ -3565,7 +4305,7 @@ def house_snapshot(w: World, i: int):
 def house_geometry(w: World):
     c = w.cfg
     return {
-        "houses": {"x": [round(float(x)) for x in w.h_x], "y": [round(float(y)) for y in w.h_y],
+        "houses": {"x": [round(float(x), 5) for x in w.h_x], "y": [round(float(y), 5) for y in w.h_y],
                    "angle": [round(float(a), 2) for a in w.h_angle], "radius": [round(float(r)) for r in w.h_radius],
                    "sector": w.h_sector.tolist(), "type": w.h_type.tolist(), "pole": w.h_pole.tolist(),
                    "residents": w.h_residents.tolist()},
@@ -3577,6 +4317,7 @@ def house_geometry(w: World):
                                   "wall_radius", "spine_radii", "reactor_pos", "solar_pos", "water_plant_pos",
                                   "radwaste_pos", "mine_pos", "waste_station_pos", "tower_junction", "tower_pos",
                                   "landing_pad_pos", "garage", "medlab", "school", "sectors", "water_tank_m3")},
+        "utilities": w.utilities.geometry(w),
         "types": TYPE_NAMES,
     }
 
@@ -3674,7 +4415,10 @@ class MqttBridge:
                        "power_ok": bool(w.h_power_ok[i]), "on_ups": bool(w.h_on_ups[i]), "limit_w": int(w.h_limit_w[i]),
                        "water_ok": bool(w.h_water_ok[i]), "pipes_ok": bool(w.h_pipes_ok[i]), "burst": bool(w.h_burst[i]),
                        "net_online": bool(w.h_net_online[i]), "sludge": round(float(w.h_sludge[i]), 2), "draw_w": int(w.h_draw_w[i]),
-                       "heater_on": bool(w.h_heater_on[i]), "residents": int(w.h_residents[i])}
+                       "heater_on": bool(w.h_heater_on[i]), "residents": int(w.h_residents[i]),
+                       "pressure_kpa": round(float(w.utilities.pressure[i]), 2),
+                       "water_l_min": round(float(w.utilities.delivered[i])*60000/w.cfg["tick_seconds"], 4),
+                       "leak_l_min": round(float(w.utilities.leaks[i])*60000/w.cfg["tick_seconds"], 4)}
             body = json.dumps(payload)
             c.publish(f"hh/house/{int(i)}/sensors", body, qos=0, retain=True)
             self.rate_out.append(time.time())
@@ -3743,13 +4487,12 @@ class Store:
     @staticmethod
     def migrate(w: World):
         """Fill in attributes a newer version added since the world was saved, using a fresh world's defaults."""
-        for k, v in CFG.items():
-            w.cfg.setdefault(k, v)
+        w.cfg = {**CFG, **w.cfg}
         fresh = World(w.cfg)
         added = []
         for k, v in fresh.__dict__.items():
             if k not in w.__dict__:
-                setattr(w, k, v)
+                setattr(w, k, UtilityNetwork(w) if k == "utilities" else v)
                 added.append(k)
         for k, v in fresh.cfg.items():
             w.cfg.setdefault(k, v)
