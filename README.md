@@ -2,14 +2,14 @@
 
 [![Русская версия](https://img.shields.io/badge/lang-RU-blue)](README_RU.md)
 
-One-file simulation of the LV-426 mining colony: 300 smart houses in six sectors,
+Modular Python/JavaScript simulation of the LV-426 mining colony: 300 smart houses in six sectors,
 reactor and power grid, water, internet, sewage, waste, roads, gates, incidents,
 repairs and money. Numpy for the house physics, a browser UI on plain canvas.
 
 ## Run locally
 
 ```
-pip install numpy
+pip install -r requirements.txt
 python3 hadleys_hope.py
 ```
 
@@ -55,28 +55,14 @@ and restored on the next start, so a hosted colony keeps living across deploys. 
 metrics, the event log and monthly reports go to `history.db` (sqlite) and are served at
 `/history?hours=720`.
 
-## Hosting
+## Hosting and source layout
 
-### Railway (fastest)
+Existing commands, Compose services and the `infra/rst` Git-pull deployment
+remain supported. Docker copies `hadleys/`, `web/` and `vendor/`; no frontend
+build or Node runtime is needed on the server.
 
-1. Push this folder to a GitHub repo.
-2. railway.app: New Project, Deploy from GitHub repo. The Dockerfile is picked up automatically.
-3. Service settings: Networking, Generate Domain (public https url). Variables: `ADMIN_TOKEN=your-secret`,
-   `DATA_DIR=/data`. Volumes: add a volume mounted at `/data`.
-4. Every push to `main` redeploys. The saved world on the volume survives the restart.
-
-### Own VPS with GitHub Actions
-
-1. On a fresh Ubuntu server as root: `git clone` this repository, `cd` into it and run `sh deploy/server-setup.sh`.
-   It creates a user, a venv with numpy, a systemd service listening on port 80, a data directory and opens
-   ports 22 and 80 in ufw. Put your token into `/opt/hadleys-hope/env`.
-2. `systemctl start hadleys-hope`, watch it with `journalctl -u hadleys-hope -f`.
-3. In the GitHub repo add secrets `SSH_HOST`, `SSH_USER`, `SSH_KEY` (a deploy user that can `sudo systemctl restart hadleys-hope`
-   and write `/opt/hadleys-hope/`). `.github/workflows/deploy.yml` then smoke-tests, copies the file and restarts the service on every push.
-4. Optional https: point a domain at the server, install Caddy and proxy the domain to port 80 (or set `PORT=8000` in the unit and proxy to it).
-
-Vercel, Netlify and other serverless hosts do not fit: the simulation is a long-running process
-with state in memory, and they end the process after each request.
+- [Source map, models, numerical code and performance notes](docs/ARCHITECTURE_RU.md)
+- [Git deployment, CI, save compatibility and rollback](docs/DEPLOYMENT_RU.md)
 
 ## What you see
 
@@ -132,7 +118,7 @@ load shedding level, reactor telemetry, per-sector table, open issues, event log
 - Repairs: issues are funded sector-first, then colony; rovers drive to the target by road (blocked roads and lockdowns delay them; crews in dark sectors get attacked). Nothing gets fixed without money.
 - Finance: sector budgets 10 000, colony 100 000. Owners pay energy and water daily and fees plus repair reimbursements monthly; the mine earns for the colony while powered. Monthly report by cause.
 
-All constants are in `CFG` and `COSTS` at the top of the file.
+All constants are in `CFG` and `COSTS` in `hadleys/config.py`.
 
 ## Where the VM goes
 

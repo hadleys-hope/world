@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Hadley's Hope</title>
+<link rel="stylesheet" href="/static/css/navigation.css">
+<link rel="stylesheet" href="/static/css/map.css">
+</head>
+<body>
+<div id="map"><canvas id="c"></canvas>
+  <div id="banner">connecting...</div>
+  <div id="legend"><b>Map</b>: house colour = indoor temperature (blue cold, orange warm), red frame = no power, blue frame = on sector UPS, x = burst pipes.<br>
+  Yellow lines = power (moving dashes = energised), blue = water, cyan = internet cable, cyan dots = packets, red dot = packet with no uplink.<br>
+  Poles: dot; orange = tilted, red x = fallen; glow = street lamp on. Gates on the ring road: green open, grey closed, red lockdown.<br>
+  Rovers: G garbage, S sludge hauler, E engineers, P plumber. Red diamonds = xenomorphs. ! = open issue.</div>
+  <div id="finished"></div>
+  <div id="tip" style="position:absolute;display:none;background:rgba(23,26,33,.95);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:11px;pointer-events:none"></div>
+</div>
+<div id="side">
+  <div class="row" style="margin-bottom:8px"><a href="/" class="tab">3D planet</a><a href="/flat" class="tab on">flat map</a><a href="/bus" class="tab">bus and programs</a><a href="/house" class="tab">house</a><a href="/graph" class="tab">systems</a><a href="/attractors" class="tab">Attractors</a></div>
+  <h1>Hadley's Hope, LV-426</h1>
+  <div class="row"><span id="time" style="font-weight:600;min-width:120px"></span>
+    <button id="pause">Pause</button>
+    <span class="dim">speed</span><button data-s="1">1x</button><button data-s="20">20x</button><button data-s="120">120x</button><button data-s="600">600x</button></div>
+  <h2>Inject</h2>
+  <div class="row">
+    <button data-i="span">break span</button><button data-i="pole">fell pole</button><button data-i="xeno">xenomorphs</button>
+    <button data-i="storm">storm</button><button data-i="trunk">cut trunk</button><button data-i="pump">pump trip</button>
+    <button data-i="marines">marines fire</button><button data-i="scram">SCRAM</button><button data-i="road">break road</button><button data-i="money">+50k cr</button>
+  </div>
+  <h2>Colony</h2>
+  <div class="kpi" id="kpi"></div>
+  <h2>Reactor and power</h2>
+  <div id="reactor" class="card"></div>
+  <h2>Sectors</h2>
+  <table id="sectors"><thead><tr><th>#</th><th>cr</th><th>kW</th><th>avg C</th><th>min C</th><th>pwr</th><th>water</th><th>net</th><th>UPS</th><th>waste</th><th>san</th><th>gate</th><th>road</th></tr></thead><tbody></tbody></table>
+  <h2>Open issues <span id="nissues" class="dim"></span></h2>
+  <div id="issues" class="dim" style="font-size:11px;max-height:120px;overflow-y:auto"></div>
+  <h2>Events</h2>
+  <div id="log"></div>
+  <h2>Last monthly report</h2>
+  <pre id="report">no month closed yet</pre>
+</div>
+<script src="/static/js/pages/map.js"></script></body></html>

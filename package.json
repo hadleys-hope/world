@@ -1,0 +1,15 @@
+{
+  "name": "hadleys-hope-viewer",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node scripts/check-web.mjs",
+    "test:browser": "node tests/browser-smoke.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "playwright": "1.62.1"
+  }
+}

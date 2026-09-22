@@ -5,17 +5,47 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
-  smoke:
+  test-and-image:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: install deps
-        run: pip install numpy paho-mqtt
-      - name: compile
-        run: python3 -m py_compile hadleys_hope.py houses_runtime.py
-      - name: one simulated day headless
-        run: python3 hadleys_hope.py --headless 1440 | tail -5
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Python dependencies
+        run: pip install -r requirements.txt
+      - name: Compile all application modules
+        run: python3 -m compileall -q hadleys hadleys_hope.py houses_runtime.py
+      - name: Regression, legacy saves, MQTT contract and HTTP tests
+        run: python3 -m unittest discover -s tests -v
+      - name: JavaScript syntax and import graph
+        run: npm run check
+      - name: Install browser test tools (CI only)
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Real browser smoke, including Attractors and procedural houses
+        run: npm run test:browser
+      - name: Upload browser screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-smoke
+          path: test-results/
+          if-no-files-found: ignore
+      - name: Build the same image used by Compose
+        run: docker build -t hadleys-world:test .
+      - name: One simulated day inside the built image
+        run: docker run --rm hadleys-world:test python3 hadleys_hope.py --headless 1440
+      - name: Both runtime entry points exist in the image
+        run: docker run --rm hadleys-world:test python3 houses_runtime.py --help

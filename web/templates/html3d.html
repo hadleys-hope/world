@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Hadley's Hope</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<script type="importmap">{"imports":{"three":"__THREE_BASE__build/three.module.js","three/addons/":"__THREE_BASE__examples/jsm/"}}</script>
+<link rel="stylesheet" href="/static/css/navigation.css">
+<link rel="stylesheet" href="/static/css/map3d.css">
+</head>
+<body class="panel-collapsed">
+<header id="commandbar">
+ <div class="brand"><span class="brand-mark" aria-hidden="true">HH</span><div><strong>HADLEY'S HOPE</strong><small>LV–426 · COLONY OPERATIONS</small></div></div>
+ <nav class="main-nav" aria-label="Main navigation"><a href="/" aria-current="page">3D map</a><a href="/flat">Map</a><a href="/attractors" class="attr-link">Attractors</a><a href="/graph">Systems</a><a href="/bus">Controllers</a><a href="/house">House</a></nav>
+ <div class="transport"><span id="time"></span><button id="pause" title="Pause or resume simulation">Pause</button><label for="speed">Speed</label><input type="range" id="speed" min="0" max="100" value="45"><span id="speedv"></span><button id="panel-toggle" aria-expanded="false" aria-controls="side" title="Show or hide management panel">M · Console</button></div>
+</header>
+<div id="map">
+ <div id="banner" role="status">Connecting to colony…</div>
+ <div id="hint">DRAG pan · RMB orbit · WASD / ↑↓←→ move · Q/E altitude · SHIFT fast · PINCH zoom · F focus · M console</div>
+ <div id="tip"></div>
+ <div id="info"><button class="close" id="infoclose" aria-label="Close inspector">Close</button><h3 id="infotitle"></h3><div id="infobody"></div></div>
+ <div id="alerts" role="status"></div><div id="toast" role="status"></div><div id="finished"></div>
+ <div id="view-tools"><div class="view-presets" role="group" aria-label="Map view"><button data-key="01" data-view="colony" aria-pressed="true">Colony</button><button data-key="02" data-view="water" aria-pressed="false">Water</button><button data-key="03" data-view="power" aria-pressed="false">Power</button><button data-key="04" data-view="network" aria-pressed="false">Network</button></div><div id="map-key" class="map-key" aria-label="Map legend"></div></div>
+</div>
+<aside id="side" aria-label="Colony management">
+ <div class="panel-tabs" role="tablist" aria-label="Management panels"><button id="tab-overview" role="tab" aria-controls="panel-overview" aria-selected="true" data-panel="overview">Overview</button><button id="tab-layers" role="tab" aria-controls="panel-layers" aria-selected="false" data-panel="layers" tabindex="-1">Layers</button><button id="tab-places" role="tab" aria-controls="panel-places" aria-selected="false" data-panel="places" tabindex="-1">Places</button><button id="tab-operations" role="tab" aria-controls="panel-operations" aria-selected="false" data-panel="operations" tabindex="-1">Operations</button></div>
+ <section id="panel-overview" class="hud-panel" role="tabpanel" aria-labelledby="tab-overview">
+  <div class="section-kicker">Colony telemetry</div><h2>Current situation</h2><div class="kpi" id="kpi"></div>
+  <h3>Districts</h3><div id="sector-cards" class="sector-grid"></div>
+  <details><summary>Reactor &amp; power</summary><div id="reactor" class="card"></div></details>
+  <details><summary>District data</summary><div class="table-scroll"><table id="sectors"><thead><tr><th>#</th><th>cr</th><th>kW</th><th>avg °C</th><th>min °C</th><th>power</th><th>water</th><th>net</th><th>UPS</th><th>waste</th><th>san.</th><th>gate</th><th>road</th></tr></thead><tbody></tbody></table></div></details>
+  <details open><summary>Maintenance <span id="nissues" class="dim"></span></summary><div id="issues" class="dim" style="font-size:11px;max-height:150px;overflow:auto"></div></details>
+  <details><summary>Event log</summary><div id="log"></div></details><details><summary>Monthly report</summary><pre id="report">No month closed yet.</pre></details>
+ </section>
+ <section id="panel-layers" class="hud-panel" role="tabpanel" aria-labelledby="tab-layers" hidden>
+  <div class="section-kicker">Display controls</div><h2>Read the city</h2>
+  <div id="layers">
+   <fieldset><legend>World</legend><div class="layer-grid"><label class="chk"><input type="checkbox" data-l="people" checked>Colonists</label><label class="chk"><input type="checkbox" data-l="threats" checked>Threats &amp; marines</label><label class="chk"><input type="checkbox" data-l="labels">Place labels</label><label class="chk"><input type="checkbox" data-l="cutaway">Roof transparency</label></div></fieldset>
+   <fieldset><legend>Infrastructure</legend><div class="layer-grid"><label class="chk"><input type="checkbox" data-l="underground">Buried utilities</label><label class="chk"><input type="checkbox" data-l="water" checked>Water flow</label><label class="chk"><input type="checkbox" data-l="power" checked>Power flow</label><label class="chk"><input type="checkbox" data-l="packets" checked>Data packets</label></div></fieldset>
+   <fieldset><legend>Indicators</legend><div class="layer-grid"><label class="chk"><input type="checkbox" data-l="issues" checked>Faults</label><label class="chk"><input type="checkbox" data-l="nonet">Offline homes</label><label class="chk"><input type="checkbox" data-l="ups">UPS activity</label><label class="chk"><input type="checkbox" data-l="heater">Heating</label><label class="chk"><input type="checkbox" data-l="ctrl">House programs</label></div></fieldset>
+   <fieldset><legend>Graphics</legend><div class="layer-grid"><label class="chk"><input type="checkbox" data-l="bloom" checked>Light bloom</label><label class="chk"><input type="checkbox" data-l="shadows" checked>Shadows</label></div></fieldset>
+  </div><p class="muted-copy">Select Water below the map to inspect underground pipes. Colours identify separate networks; click a pipe for its material, diameter and live flow.</p>
+ </section>
+ <section id="panel-places" class="hud-panel" role="tabpanel" aria-labelledby="tab-places" hidden>
+  <div class="section-kicker">Camera navigation</div><h2>Explore the colony</h2>
+  <div id="fly"><button data-f="home" class="destination-primary">Inspect selected home</button><button data-f="city">Colony overview</button><button data-f="street">Residential street</button><button data-f="hub">Operations hub</button><button data-f="gate">West gate</button><button data-f="reactor">Reactor</button><button data-f="solar">Solar field</button><button data-f="dish">Space dish</button><button data-f="intake">Ocean intake</button><button data-f="cargo">Freight</button><button data-f="tower">Comms tower</button><button data-f="mine">Mine</button><button data-f="planet">Planet</button></div>
+  <p class="muted-copy">Close views reveal furnished rooms and building services. Enable Roof transparency in Layers to adjust roof translucency; roofs and equipment always remain present.</p>
+  <h3>Research</h3><a href="/attractors" class="tab">Open attractor observatory →</a>
+ </section>
+ <section id="panel-operations" class="hud-panel" role="tabpanel" aria-labelledby="tab-operations" hidden>
+  <div class="section-kicker">Operator console</div><h2>Simulation controls</h2>
+  <details><summary>Operator access <span id="tokenstate" class="dim"></span></summary><label for="token" class="muted-copy">Admin token</label><input type="password" id="token" placeholder="Enter token" autocomplete="off"><button id="tokenbtn">Enable controls</button></details>
+  <details><summary>House controllers</summary><div id="ctrl" class="dim" style="font-size:11px"></div><p><a href="/bus">Controller messages &amp; programs →</a></p></details>
+  <details><summary>Scenario events</summary><p class="muted-copy">These actions change the running simulation.</p><div class="ops-actions"><button data-i="storm">Storm</button><button data-i="xeno">Xenomorphs</button><button data-i="span">Break power span</button><button data-i="pole">Fell pole</button><button data-i="trunk">Cut main cable</button><button data-i="pump">Pump trip</button><button data-i="marines">Marine response</button><button data-i="road">Damage road</button><button data-i="money">Add 50k credits</button><button data-i="scram" class="danger">Reactor SCRAM</button><button id="reset" class="danger">Found new colony</button></div></details>
+ </section>
+</aside>
+<script type="module" src="/static/js/map3d/main.js"></script></body></html>

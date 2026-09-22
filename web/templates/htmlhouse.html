@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Hadley's Hope: house</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/css/navigation.css">
+<link rel="stylesheet" href="/static/css/house.css">
+</head>
+<body>
+NAVHTML
+<main>
+<div class="row"><h1 id="title">House</h1><button id="prev">&larr; prev</button><input id="hid" size="4"><button id="go">open</button><button id="next">next &rarr;</button><span id="sub" class="dim"></span></div>
+<div class="gauges" id="gauges"></div>
+<div class="grid">
+  <div>
+    <h2>Power draw right now</h2><div class="card row"><canvas id="pie" width="180" height="180"></canvas><div id="pielegend"></div></div>
+    <h2>Last 24 hours</h2><div class="card"><div class="dim" style="font-size:11px">indoor temperature, C</div><canvas id="spark" width="600" height="110" style="width:100%"></canvas><div class="dim" style="font-size:11px;margin-top:6px">draw, W</div><canvas id="spark2" width="600" height="70" style="width:100%"></canvas></div>
+    <h2>Facts</h2><div class="card"><table id="facts"></table></div>
+  </div>
+  <div>
+    <h2>Controller</h2><div class="card" id="ctrl"></div>
+    <h2>House log</h2><div id="log"></div>
+  </div>
+</div>
+</main>
+<script src="/static/js/pages/house.js"></script></body></html>

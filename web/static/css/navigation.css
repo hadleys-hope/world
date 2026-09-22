@@ -1,0 +1,4 @@
+
+  nav.hh { overflow-x:auto;white-space:nowrap;min-height:52px;flex-shrink:0;display:flex; gap:6px; align-items:center; padding:6px 10px; background:#12151c; border-bottom:1px solid #262b36; font-size:12px; }
+  nav.hh a { color:#d9dde6; text-decoration:none; padding:4px 10px; border:1px solid #262b36; border-radius:6px; background:#1c212c; }
+  nav.hh a.on { border-color:#9fbca9; color:#d3e0c6; background:#20352e; } nav.hh a:hover { background:#2d3444; } nav.hh .t { margin-left:auto; color:#8a93a6; }

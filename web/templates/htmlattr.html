@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Hadley's Hope: attractors</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/css/navigation.css">
+<link rel="stylesheet" href="/static/css/attractors.css">
+</head>
+<body>
+NAVHTML
+<div id="body">
+<div id="wrap"><canvas id="trail"></canvas><canvas id="bg"></canvas><canvas id="top"></canvas>
+<div id="phase-toolbar"><div role="group" aria-label="Phase-space view"><button data-phase="thermal" aria-pressed="true">Thermal phase</button><button data-phase="coupled" aria-pressed="false">3D · water coupling</button></div><label>Colour <select id="phase-colour"><option value="basin">Thermal basin</option><option value="sector">District</option><option value="pressure">Water pressure</option></select></label></div>
+<div id="phase-help">Thermal phase portrait · click a house to open its details</div><div id="connection" role="status">Connecting…</div>
+<div id="legend"><b>Attractor observatory</b><br>
+<span class="dim">Dots show measured house states. Thermal view: temperature × °C/h. Flow previews hold current weather and power fixed; basins are conditional equilibria, not guaranteed forecasts.</span><br>
+<span id="phase-colour-key"><span class="sw" style="background:#5ec07a"></span>warm basin <span class="sw" style="background:#e0b04a"></span>cannot hold target <span class="sw" style="background:#e2574d"></span>will freeze <span class="sw" style="background:#8a7aa6"></span>pipes burst</span><br>
+<span id="counts" class="dim"></span><br>
+<label><input type="checkbox" id="oDust" checked> flow preview</label><label><input type="checkbox" id="oCurves" checked> curves</label><label><input type="checkbox" id="oHouses" checked> houses</label>
+</div>
+<div id="tip"></div></div>
+<div id="side">
+  <div class="pn"><h3>Water tank <span class="pill" id="pw"></span><span class="ax">x tank m3, y net m3/h</span></h3><canvas id="cw"></canvas><div class="v" id="vw"></div></div>
+  <div class="pn"><h3>Power and UPS <span class="pill" id="pp"></span><span class="ax">x margin kW, y UPS %</span></h3><canvas id="cp"></canvas><div class="v" id="vp"></div></div>
+  <div class="pn"><h3>Repairs queue <span class="pill" id="pr"></span><span class="ax">x open issues, y burst houses</span></h3><canvas id="cr"></canvas><div class="v" id="vr"></div></div>
+  <div class="pn"><h3>Colony money <span class="pill" id="pm"></span><span class="ax">x budget k cr, y k cr/day</span></h3><canvas id="cm"></canvas><div class="v" id="vm"></div></div>
+</div>
+</div>
+<script src="/static/js/pages/attractors.js"></script></body></html>

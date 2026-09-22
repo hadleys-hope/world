@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Hadley's Hope: bus</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/css/navigation.css">
+<link rel="stylesheet" href="/static/css/controllers.css">
+</head>
+<body>
+<div class="row" style="margin-bottom:8px"><a href="/" class="tab">3D planet</a><a href="/flat" class="tab">flat map</a><a href="/bus" class="tab on">bus and programs</a><a href="/house" class="tab">house</a><a href="/graph" class="tab">systems</a><a href="/attractors" class="tab">Attractors</a></div>
+<h1>Hadley's Hope: MQTT bus and house controllers &nbsp; <span id="time" class="dim" style="font-weight:400"></span></h1>
+<div class="kpi" id="kpi"></div>
+<h2>Program comparison, this month</h2>
+<div class="card"><table id="progs"><thead><tr><th class="l">program</th><th>houses</th><th>avg indoor C</th><th>kWh per house per day</th><th>cost cr per house per day</th><th>time below 16 C</th></tr></thead><tbody></tbody></table>
+<div class="dim" style="margin-top:6px">Each house reports its sensors to the bus, its program answers with actuators, the world applies them. Same weather, same grid, same houses, only the program differs. "thermostat" is the built-in fallback for houses without a live controller.</div></div>
+<div class="grid">
+  <div>
+    <h2>Houses <span class="dim" style="text-transform:none;font-weight:400">(click a header to sort)</span></h2>
+    <div class="row" style="margin-bottom:6px"><label>sector <select id="fsec"><option value="">all</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option></select></label>
+      <label>program <select id="fprog"><option value="">all</option></select></label><label>house # <input id="fid" size="5"></label><span id="count" class="dim"></span></div>
+    <div id="houses"><table id="ht"><thead><tr><th>#</th><th>sec</th><th class="l">program</th><th class="l">last decision</th><th>target</th><th>indoor</th><th>heater</th><th>W</th><th>power</th><th>limit W</th><th>water</th><th>net</th><th>appl</th><th>valve</th><th>sensor age</th><th>decision age</th></tr></thead><tbody></tbody></table></div>
+  </div>
+  <div>
+    <h2>Bus tail <span class="dim" style="text-transform:none;font-weight:400">(every 7th house sampled)</span></h2>
+    <div id="tail"></div>
+    <h2>Topics</h2>
+    <div class="card dim" style="font-size:11.5px">
+      <div><b class="out">hh/house/{id}/sensors</b> world to controller, retained, on change or every 10 min: t_in, power_ok, on_ups, limit_w, water_ok, pipes_ok, burst, net_online, sludge, draw_w, heater_on, residents</div>
+      <div><b class="in">hh/house/{id}/actuators</b> controller to world: heater_on, target_c, valve_open, appliances_on, program, reason</div>
+      <div><b class="out">hh/env/weather</b> t_out, wind, storm, precip, hour, night, daylight &nbsp; <b class="out">hh/env/power</b> available_kw, demand_kw, shedding, reactor_mode, tariff_kwh &nbsp; <b class="out">hh/tick</b> t, time</div>
+      <div style="margin-top:6px">Shell: <code>mosquitto_sub -h localhost -t 'hh/#' -v</code></div>
+    </div>
+  </div>
+</div>
+<script src="/static/js/pages/controllers.js"></script></body></html>

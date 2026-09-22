@@ -1,7 +1,10 @@
 .git/
 .github/
-deploy/
 data/
+deploy/
 *.pkl
 *.db
-__pycache__/
+**/__pycache__/
+node_modules/
+test-results/
+playwright-report/
