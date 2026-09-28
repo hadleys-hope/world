@@ -709,6 +709,31 @@ input[type="checkbox"] {
   width: 100%;
   margin: 8px 0;
 }
+#colonist-tools {
+  position: absolute;
+  right: 24px;
+  bottom: 15px;
+  display: flex;
+  gap: 8px;
+  z-index: 5;
+}
+#colonist-tools button, #colonist-tools select {
+  background: #14242e;
+  color: #e5efd9;
+  border: 1px solid #809985;
+  padding: 8px 12px;
+}
+#colonist-tools [hidden] { display: none; }
+#time-stop-tools { position: absolute; right: 24px; bottom: 64px; z-index: 5; max-width: calc(100% - 48px); padding: 8px; background: #14242eef; border: 1px solid #809985; color: #e5efd9; }
+#time-stop-tools > div { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+#time-stop-tools input { color: #e5efd9; background: #14242e; border: 1px solid #809985; padding: 5px; }
+#time-stop-status { display: block; font-size: 11px; margin-top: 5px; }
+#time-stop-tools [hidden] { display: none; }
+#colonist-tools select { max-width: 240px; }
+@media (max-width: 850px) {
+  #time-stop-tools { right: 12px; bottom: 184px; max-width: calc(100% - 24px); }
+  #colonist-tools { right: 12px; bottom: 90px; flex-wrap: wrap; max-width: calc(100% - 24px); justify-content: flex-end; }
+}
 #view-tools {
   position: absolute;
   left: 24px;

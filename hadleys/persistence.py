@@ -81,6 +81,7 @@ class Store:
     def migrate(w: World):
         """Fill in attributes a newer version added since the world was saved, using a fresh world's defaults."""
         previous_layout = getattr(w, "layout_version", 3)
+        migrate_citizens = not hasattr(w, "citizens")
         for key, old in [("ocean_center", (-2350, 550)), ("ocean_radii", (900, 1150))]:
             if tuple(w.cfg.get(key, old)) == old:
                 w.cfg[key] = CFG[key]
@@ -89,8 +90,11 @@ class Store:
             if tuple(w.cfg.get(key, old)) == old:
                 w.cfg[key] = CFG[key]
         w.cfg = {**CFG, **w.cfg}
+        if migrate_citizens:
+            from hadleys.domains.citizens import initialize_citizens
+            initialize_citizens(w, migrate=True)
         fresh = World(w.cfg)
-        added = []
+        added = ["citizens", "citizens_version"] if migrate_citizens else []
         for k, v in fresh.__dict__.items():
             if k not in w.__dict__:
                 setattr(w, k, UtilityNetwork(w) if k == "utilities" else v)

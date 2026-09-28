@@ -57,6 +57,8 @@ CFG = {
     "medlab": (195.0, 244.0),
     "school": (315.0, 244.0),
     "walkers": 60,
+    "citizen_count": 300,
+    "citizen_walk_mps": 1.3,
     # environment (LV-426: minus 40..60, permanent dusk, storms)
     "t_mean": -45.0,
     "t_daily_amp": 8.0,

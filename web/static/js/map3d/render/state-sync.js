@@ -1,5 +1,6 @@
 /** render/state-sync: procedural colony viewer. */
 import { state } from "../state.js";
+import { syncColonists } from '../models/colonists.js';
 import { build } from "../build.js";
 import { xyNormal } from "../geometry/planet.js";
 import { setPoints } from "../geometry/objects.js";
@@ -42,7 +43,8 @@ export function applyLayers() {
   state.flowWater.mesh.visible = state.layers.water;
   state.packetsPts.visible = state.layers.packets;
   state.markers.packetsRed.visible = state.layers.packets;
-  state.markers.people.visible = state.layers.people;
+  state.markers.people.visible = false;
+  if (state.colonistGroup) state.colonistGroup.visible = !!state.layers.people;
   state.markers.xenos.visible = state.layers.threats;
   state.markers.marines.visible = state.layers.threats;
   state.labelGroup.visible = state.layers.labels;
@@ -223,7 +225,7 @@ export function onState(s, first) {
     state.flatHouses.filter((p, i) => hs.heater[i] && hs.power[i]),
     15,
   );
-  setPoints(state.markers.people, s.people, 3);
+  syncColonists(s.people);
   setPoints(state.markers.marines, s.marines, 6);
   setPoints(
     state.markers.ups,
@@ -553,6 +555,15 @@ export function onState(s, first) {
     if (!state.packetsSeen.has(key)) state.packetsSeen.set(key, { t0: now, p });
   }
   const e = s.env;
+  document.getElementById('pause').textContent = s.paused ? 'Resume' : 'Pause';
+  const stop = document.getElementById('time-stop-status');
+  document.getElementById('cancel-time-stop').hidden = s.pause_at == null;
+  if (s.pause_at != null) {
+    const day = state.G.cfg.ticks_per_day;
+    const minute = s.pause_at % day;
+    const clock = `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}`;
+    stop.textContent = `Остановка ${Math.floor(s.pause_at / day) > Math.floor(s.t / day) ? 'завтра' : 'сегодня'} в ${clock}${s.paused ? ' · сейчас пауза' : ''}`;
+  } else stop.textContent = s.paused ? 'Пауза. Выберите жителя, затем продолжите на 1 мин/с.' : 'Если время уже прошло, остановка будет на следующие сутки.';
   document.getElementById("banner").innerHTML =
     `<b>${s.time}</b> &nbsp; ${e.t_out} C, wind ${e.wind} m/s${e.storm ? ' <span class="bad">STORM</span>' : ""}${e.precip === "snow" ? " snow" : ""}${e.night ? " night" : " day"}${s.paused ? ' <span class="warn">PAUSED</span>' : ""} &nbsp; ${s.speed} min/s`;
   const fin = document.getElementById("finished");

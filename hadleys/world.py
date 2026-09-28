@@ -27,6 +27,7 @@ class World:
         self.t = 0
         self.speed = cfg["default_speed"]
         self.paused = False
+        self.pause_at = None  # absolute simulation tick; persisted with the world
         self.finished = False
         self.finish_reason = ""
         self.events = deque(maxlen=400)
@@ -338,6 +339,10 @@ class World:
         self.w_timer = self.rng.integers(30, 600, W)
         self.w_x = self.h_x[self.w_home].copy()
         self.w_y = self.h_y[self.w_home].copy()
+        # Keep legacy walker arrays for old-save and golden-physics compatibility.
+        # Persistent profiles now own all resident behaviour.
+        from hadleys.domains.citizens import initialize_citizens
+        initialize_citizens(self)
 
         # ---- finance ----
         self.sector_budget = np.full(S, cfg["sector_budget"])

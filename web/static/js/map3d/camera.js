@@ -218,6 +218,15 @@ export function focusPoint(point, distance = 12, normal = null) {
 
 export function focusSelection() {
   if (!state.selected) return;
+  if (state.selected.kind === 'person') {
+    const model = state.colonists?.get(state.selected.id);
+    if (model) focusPoint(
+      model.root.position.clone().add(new THREE.Vector3(0, 1.1, 0).applyQuaternion(model.root.quaternion)),
+      4,
+      new THREE.Vector3(.5, .18, 1).applyQuaternion(model.root.quaternion),
+    );
+    return;
+  }
   if (state.selected.kind === "rover") {
     const rv = state.rovers[state.selected.extra || state.selected.id];
     if (rv) focusPoint(rv.g.position, 12);
@@ -242,7 +251,7 @@ export function focusSelection() {
     return;
   }
   const obj = state.clickables.find(
-    (o) => o.userData.click?.id === state.selected.id,
+    (o) => o.userData.click?.id === state.selected.id && o.userData.click?.kind === state.selected.kind,
   );
   if (obj) {
     const bounds = new THREE.Box3().setFromObject(obj),

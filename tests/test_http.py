@@ -93,6 +93,16 @@ class HTTPTests(unittest.TestCase):
                     self.request(path, {"Accept-Encoding": "gzip;q=0"})[2], body
                 )
 
+    def test_resident_profiles_are_available_while_indoors(self):
+        status, _, body = self.request('/state')
+        self.assertEqual(status, 200)
+        data = json.loads(body)
+        self.assertEqual(len(data['citizens']), 300)
+        self.assertEqual(len({c['id'] for c in data['citizens']}), 300)
+        self.assertEqual(data['people'], [])
+        self.assertTrue(all(c['state'] == 'HOME' and c['indoors'] for c in data['citizens']))
+        self.assertEqual({c['workplace'] for c in data['citizens']}, {'garage', 'medlab'})
+
     def test_path_containment(self):
         for path in [
             "/static/../../hadleys_hope.py",
@@ -108,3 +118,19 @@ class HTTPTests(unittest.TestCase):
             self.request("/cmd", body={"cmd": "pause", "token": "test-token"})[0], 200
         )
         self.assertFalse(self.world.paused)
+
+    def test_scheduled_pause_command_requires_auth_and_validates_time(self):
+        old = self.world.pause_at, self.world.paused, self.world.speed
+        try:
+            self.assertEqual(self.request('/cmd', body={'cmd': 'pause_at', 'value': '07:30'})[0], 403)
+            self.assertIsNone(self.world.pause_at)
+            self.assertEqual(self.request('/cmd', body={'cmd': 'pause_at', 'value': '07:30', 'token': 'test-token'})[0], 200)
+            self.assertEqual(self.world.pause_at, 450)
+            self.assertFalse(self.world.paused)
+            self.assertEqual(json.loads(self.request('/state')[2])['pause_at'], 450)
+            self.assertEqual(self.request('/cmd', body={'cmd': 'pause_at', 'value': '25:00', 'token': 'test-token'})[0], 400)
+            self.assertEqual(self.world.pause_at, 450)
+            self.assertEqual(self.request('/cmd', body={'cmd': 'pause_at', 'value': None, 'token': 'test-token'})[0], 200)
+            self.assertIsNone(self.world.pause_at)
+        finally:
+            self.world.pause_at, self.world.paused, self.world.speed = old

@@ -1,6 +1,10 @@
 /** Shared live scene state. Each subsystem initializes its own fields explicitly.
  * Functions and model builders use named ES-module imports, never window globals. */
 export const state = {
+  colonists: undefined, // models/colonists
+  colonistGroup: undefined,
+  colonistLastFrame: undefined,
+  followColonist: null,
   ADMIN: undefined, // ui/controls
   G: undefined, // ui/controls
   S: undefined, // ui/controls

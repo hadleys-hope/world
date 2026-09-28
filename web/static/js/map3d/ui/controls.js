@@ -1,6 +1,7 @@
 /** ui/controls: procedural colony viewer. */
 import { state } from "../state.js";
-import { polar } from "../geometry/planet.js";
+import { focusSelection } from '../camera.js';
+import { polar, sph } from "../geometry/planet.js";
 import { resize } from "../render/frame.js";
 import { applyLayers, onState } from "../render/state-sync.js";
 import { flyTo, renderInfo } from "./inspection.js";
@@ -105,6 +106,17 @@ export async function poll() {
     state.lastPoll = now;
     renderSide(s);
     onState(s, first);
+    const roster = document.getElementById('colonist-roster');
+    if (s.citizens) {
+      if (roster.options.length !== s.citizens.length) {
+        roster.replaceChildren(...s.citizens.map(c => new Option('', String(c.id))));
+      }
+      s.citizens.forEach((c, i) => {
+        const label = `#${c.id} · ${c.profession} · ${c.state}`;
+        if (roster.options[i].text !== label) roster.options[i].text = label;
+      });
+      if (state.selected?.kind === 'person') roster.value = String(state.selected.id);
+    }
     renderInfo();
   } catch (e) {
     console.error("poll failed", e);
@@ -143,8 +155,53 @@ export function initialize() {
       state.tokenState.textContent = "view only: paste the admin token above";
       state.tokenState.className = "bad";
     }
+    return r;
   };
   document.getElementById("pause").onclick = () => state.post({ cmd: "pause" });
+  const timeCommand = async command => {
+    try {
+      const response = await state.post(command);
+      if (!response.ok) toast(response.status === 403 ? 'Нужен токен управления.' : 'Проверьте время: формат ЧЧ:ММ.');
+    } catch { toast('Не удалось связаться с сервером.'); }
+  };
+  document.getElementById('run-until').onclick = () => {
+    const input = document.getElementById('pause-at-time');
+    if (input.reportValidity()) timeCommand({ cmd: 'pause_at', value: input.value });
+  };
+  document.getElementById('cancel-time-stop').onclick = () => timeCommand({ cmd: 'pause_at', value: null });
+  document.getElementById('slow-resume').onclick = () => timeCommand({ cmd: 'speed', value: 1 });
+  const stopFollowing = () => {
+    state.followColonist = null;
+    document.getElementById('stop-colonist-follow').hidden = true;
+  };
+  document.getElementById('stop-colonist-follow').onclick = stopFollowing;
+  const inspectCitizen = id => {
+    if (state.drive) { toast('Park the vehicle before inspecting a colonist.'); return; }
+    const profile = state.S?.citizens?.find(c => c.id === id);
+    if (!profile) { toast('Residents are loading.'); return; }
+    state.activeBody = 2;
+    state.systemView = false;
+    state.world.visible = true;
+    state.layers.people = true;
+    document.querySelector('[data-l="people"]').checked = true;
+    state.colonistGroup.visible = true;
+    state.selected = { kind: 'person', id };
+    const model = state.colonists.get(id);
+    if (model) focusSelection();
+    else flyTo(profile.x, profile.y, 35);
+    state.followColonist = { id, position: model ? model.root.position.clone() : sph(profile.x, profile.y, .1) };
+    document.getElementById('colonist-roster').value = String(id);
+    document.getElementById('stop-colonist-follow').hidden = false;
+    renderInfo();
+    toast(profile.indoors ? `Resident #${id} is inside. Profile remains available; Escape stops following.` : 'Following colonist. Click Inspect colonist again for the next one. Escape stops following.');
+  };
+  document.getElementById('colonist-roster').onchange = e => inspectCitizen(Number(e.target.value));
+  document.getElementById('inspect-colonist').onclick = () => {
+    const outdoors = [...(state.colonists?.keys() || [])].sort((a, b) => a - b);
+    const ids = outdoors.length ? outdoors : (state.S?.citizens || []).map(c => c.id);
+    const current = state.selected?.kind === 'person' ? ids.indexOf(state.selected.id) : -1;
+    inspectCitizen(ids[(current + 1) % ids.length]);
+  };
   document.querySelectorAll("button[data-i]").forEach(
     (b) =>
       (b.onclick = async () => {
@@ -289,6 +346,7 @@ export function initialize() {
     )
       return;
     const k = e.key.toLowerCase();
+    if (['escape', 'w', 'a', 's', 'd', 'q', 'e', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright', 'home', '0', '1', '2', '3', '4'].includes(k)) stopFollowing();
     if (k === "m") {
       document.getElementById("panel-toggle").click();
     }

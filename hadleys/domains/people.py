@@ -1,16 +1,10 @@
-"""domains / people: colony simulation components."""
-
-from __future__ import annotations
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from hadleys.world import World
-
+"""Resident workday and the existing security agents."""
 import math
+from hadleys.domains.citizens import citizens_step
 from hadleys.domains.security import squad_step, xeno_step
 
 
-def walker_path_point(w: World, i, p):
+def walker_path_point(w, i, p):
     """House -> along its row street to the boundary street of the sector -> down the boundary street to the hub."""
     c = w.cfg
     h = w.w_home[i]
@@ -30,42 +24,7 @@ def walker_path_point(w: World, i, p):
     return rr * math.cos(math.radians(a)), rr * math.sin(math.radians(a))
 
 
-def people_step(w: World):
-    W = len(w.w_home)
-    night = w.is_night()
-    storm = w.storm_ticks > 0
-    speed = 1.0 / 400.0
-    for i in range(W):
-        st = w.w_state[i]
-        h = w.w_home[i]
-        if st == 0:
-            w.w_timer[i] -= 1
-            if (
-                w.w_timer[i] <= 0
-                and not storm
-                and not (night and w.rng.random() < 0.9)
-                and not w.lockdown_ticks[w.h_sector[h]]
-                and w.h_power_ok[h]
-            ):
-                w.w_state[i] = 1
-                w.w_prog[i] = 0.0
-            else:
-                continue
-        if st == 1:
-            w.w_prog[i] = min(1.0, w.w_prog[i] + speed)
-            if w.w_prog[i] >= 1.0:
-                w.w_state[i] = 2
-                w.w_timer[i] = int(w.rng.integers(30, 240))
-        elif st == 2:
-            w.w_timer[i] -= 1
-            if w.w_timer[i] <= 0 or storm:
-                w.w_state[i] = 3
-        elif st == 3:
-            w.w_prog[i] = max(0.0, w.w_prog[i] - speed * 1.3)
-            if w.w_prog[i] <= 0.0:
-                w.w_state[i] = 0
-                w.w_timer[i] = int(w.rng.integers(120, 900))
-        x, y = walker_path_point(w, i, float(w.w_prog[i]))
-        w.w_x[i], w.w_y[i] = x, y
+def people_step(w):
+    citizens_step(w)
     xeno_step(w)
     squad_step(w)

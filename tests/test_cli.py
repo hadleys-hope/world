@@ -16,6 +16,7 @@ from hadleys.web import ROOT
 
 
 class CliTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "Windows terminate() uses TerminateProcess, bypassing Python SIGTERM handlers")
     def test_external_cwd_static_assets_and_current_world_shutdown(self):
         with tempfile.TemporaryDirectory() as directory:
             store = Store(directory)

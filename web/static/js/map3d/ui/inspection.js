@@ -6,6 +6,8 @@ import * as THREE from "three";
 
 export function flyTo(x, y, dist) {
   if (state.drive) return;
+  state.followColonist = null;
+  document.getElementById('stop-colonist-follow').hidden = true;
   state.activeBody = 2;
   state.systemView = false;
   state.world.visible = true;
@@ -78,7 +80,10 @@ export function pick(ev, click) {
     id: h.instanceId,
   }));
   add(
-    state.ray.intersectObjects(state.clickables, true),
+    state.ray.intersectObjects(state.clickables.filter(o => {
+      for (let parent = o; parent; parent = parent.parent) if (!parent.visible) return false;
+      return true;
+    }), true),
     (h) => h.object.userData.click || h.object.parent?.userData.click,
   );
   if (
@@ -140,7 +145,8 @@ export function personInfo(per) {
   const st = ["at home", "walking to the hub", "at the hub", "walking home"][
     per[2]
   ];
-  return `<b>Colonist</b> from house ${per[3] + 1}, ${st}`;
+  const profession = ['Engineer', 'Electrician', 'Scientist'][per[4] % 3];
+  return `<b>${profession || 'Colonist'} #${per[4] ?? '?'}</b> from house ${per[3] + 1}, ${st}`;
 }
 
 export function rows(pairs) {
@@ -221,9 +227,18 @@ export function renderInfo() {
       ]);
     }
   } else if (k === "person") {
-    const per = s.people[state.selected.id];
+    const per = s.citizens?.find(p => p.id === state.selected.id);
     title = "Colonist";
-    body = per ? personInfo(per) : "went home";
+    const time = minute => `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}`;
+    const reasons = { storm: 'Sheltering from storm', sector_lockdown: 'Sector locked down', seeking_shelter: 'Heading to shelter', outside_shift: 'Outside working hours', before_shift: 'Waiting for shift start' };
+    body = per ? rows([
+      ['ID', per.id], ['Profession', per.profession], ['Home', `House ${per.home + 1}`],
+      ['Assignment', per.workplace_name], ['Shift', `${time(per.shift_start)}–${time(per.shift_end)}`],
+      ['State', per.state], ['Location', per.indoors ? 'Inside building' : 'Outside'],
+      ['Destination', typeof per.destination === 'number' ? `House ${per.destination + 1}` : per.workplace_name],
+      ['Route progress (home → work)', `${Math.round(per.progress * 100)}%`],
+      ['Reason', reasons[per.wait_reason] || '—'],
+    ]) : 'Resident not found';
   } else if (k === "substation") {
     title = "Main substation";
     body = rows([

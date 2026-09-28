@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Optional
 
 import time
+import re
 from hadleys.config import CFG
 from hadleys.domains.attractors import attractor_sample
 from hadleys.domains.energy import power_step, reactor_scram, reactor_step
@@ -20,8 +21,37 @@ from hadleys.numerics import polar
 from hadleys.world import World
 
 
+def schedule_pause(w: World, clock):
+    """Run to the next HH:MM, or cancel without changing the current pause state."""
+    if clock is None:
+        w.pause_at = None
+        return
+    if not isinstance(clock, str) or not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", clock):
+        raise ValueError("Use HH:MM, from 00:00 to 23:59")
+    hour, minute = map(int, clock.split(':'))
+    day = w.cfg['ticks_per_day']
+    target = (w.t // day) * day + hour * 60 + minute
+    if target < w.t:
+        target += day
+    w.pause_at = target if target > w.t else None
+    w.paused = target == w.t
+    if not w.paused and w.speed <= 0:
+        w.speed = w.cfg['default_speed']
+
+
+def pause_if_due(w: World):
+    target = getattr(w, 'pause_at', None)
+    if target is not None and w.t >= target:
+        w.pause_at = None
+        w.paused = True
+        return True
+    return False
+
+
 def world_tick(w: World):
-    if w.finished:
+    if w.finished or w.paused:
+        return
+    if pause_if_due(w):
         return
     w.t += 1
     bridge = getattr(w, "bridge", None)
@@ -47,6 +77,7 @@ def world_tick(w: World):
         attractor_sample(w)
     if bridge:
         bridge.publish()
+    pause_if_due(w)
 
 
 def inject(w: World, cmd: str):

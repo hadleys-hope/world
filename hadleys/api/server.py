@@ -10,7 +10,7 @@ from hadleys.domains.attractors import attractor_snapshot
 from hadleys.domains.energy import reactor_scram
 from hadleys.domains.driving import driver_command
 from hadleys.numerics import clamp
-from hadleys.simulation import inject, new_colony
+from hadleys.simulation import inject, new_colony, schedule_pause
 from hadleys.web import HTMLATTR, HTMLBUS, HTMLGRAPH, HTMLHOUSE
 
 from hadleys.web import STATIC_ROOT
@@ -148,7 +148,13 @@ def make_handler(
                         json.dumps(result).encode(),
                     )
                     return
-                if cmd == "pause":
+                if cmd == "pause_at":
+                    try:
+                        schedule_pause(w, req.get('value'))
+                    except ValueError as e:
+                        self._send(400, 'application/json', json.dumps({'ok': False, 'error': str(e)}).encode())
+                        return
+                elif cmd == "pause":
                     w.paused = not w.paused
                 elif cmd == "speed":
                     w.speed = int(clamp(int(req.get("value", 20)), 0, 600))

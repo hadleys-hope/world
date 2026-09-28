@@ -8,6 +8,7 @@ if TYPE_CHECKING:
 
 import numpy as np
 from hadleys.config import TYPE_NAMES
+from hadleys.domains.citizens import citizen_snapshot, STATES
 from hadleys.geometry.roads import colony_layout, traffic_junctions
 from hadleys.geometry.terrain import RIVER_PROFILE
 from hadleys.models import Issue
@@ -75,6 +76,7 @@ def snapshot(w: World):
         "t": w.t,
         "time": w.time_str(),
         "paused": w.paused,
+        "pause_at": w.pause_at,
         "speed": w.speed,
         "finished": w.finished,
         "finish_reason": w.finish_reason,
@@ -236,10 +238,11 @@ def snapshot(w: World):
             None if a is None else round(float(a), 1) for a in w.wall_breach
         ],
         "people": [
-            [round(float(x)), round(float(y)), int(s), int(h)]
-            for x, y, s, h in zip(w.w_x, w.w_y, w.w_state, w.w_home)
-            if s != 0
+            [round(c.x, 2), round(c.y, 2), STATES.index(c.state), c.home, c.id,
+             c.profession, c.wait_reason == "sector_lockdown"]
+            for c in w.citizens if c.state in ("WALK_TO_WORK", "WALK_HOME")
         ],
+        "citizens": citizen_snapshot(w),
         "marines": (
             [
                 [

@@ -13,6 +13,8 @@
  <div class="transport"><span id="time"></span><button id="pause" title="Pause or resume simulation">Pause</button><label for="speed">Speed</label><input type="range" id="speed" min="0" max="100" value="45"><span id="speedv"></span><button id="panel-toggle" aria-expanded="false" aria-controls="side" title="Show or hide management panel">M · Console</button></div>
 </header>
 <div id="map">
+ <div id="time-stop-tools"><div><label for="pause-at-time">Пауза в</label> <input id="pause-at-time" type="time" value="07:30" step="60" required><button id="run-until">До этого времени</button><button id="cancel-time-stop" hidden>Отменить</button><button id="slow-resume">Продолжить · 1 мин/с</button></div><span id="time-stop-status" role="status"></span></div>
+ <div id="colonist-tools"><select id="colonist-roster" aria-label="Choose resident"><option value="">Residents loading...</option></select><button id="inspect-colonist" title="Select the next colonist and follow at close range">Inspect colonist</button><button id="stop-colonist-follow" hidden>Stop following</button></div>
  <div id="banner" role="status">Connecting to colony…</div>
  <div id="hint">DRAG orbit · PINCH zoom · SHIFT toggle free flight · WASD fly · F inspect · M console</div>
  <div id="navigation-deck" aria-label="Planet navigation"><button data-planet="-1">0 · SYSTEM</button><button data-planet="0">1 · HEPHAESTUS</button><button data-planet="1">2 · RUSSET</button><button data-planet="2" aria-pressed="true">3 · ACHERON</button><button data-planet="3">4 · NIX</button><button id="camera-toggle"><span id="camera-mode">PLANET ORBIT</span><span id="camera-shortcut"> · SHIFT</span></button></div>

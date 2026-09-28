@@ -11,3 +11,8 @@ Source SHA-256: `287f32bbddc9c563a0648114993f599669fba9427c19826265eea4d1772069d
 These are trusted synthetic test fixtures, not production saves. They verify
 compatibility with the supplied source. Regenerate deliberately when physics
 changes; do not regenerate merely to make a failing refactor test pass.
+
+The workday FSM replaces random walkers. `legacy_people.py` freezes the former
+walker step only for the original golden-physics test, preserving its RNG draws.
+The production resident domain is covered independently in `test_citizens.py`;
+the golden test does not validate the new resident behaviour.

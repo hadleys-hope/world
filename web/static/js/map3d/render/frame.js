@@ -1,5 +1,6 @@
 /** render/frame: procedural colony viewer. */
 import { state } from "../state.js";
+import { updateColonists } from '../models/colonists.js';
 import { surfaceClearance, updateCameraMotion } from "../camera.js";
 import { quatAt, sph } from "../geometry/planet.js";
 import { updateUtilityFlow } from "../models/drainage.js";
@@ -21,6 +22,23 @@ export function resize() {
 
 export function frame() {
   const now = performance.now();
+  updateColonists(now);
+  if (state.followColonist) {
+    const follow = state.followColonist;
+    const model = state.colonists?.get(follow.id);
+    const profile = state.S?.citizens?.find(c => c.id === follow.id);
+    if ((!model && !profile) || state.selected?.kind !== 'person' || state.selected.id !== follow.id || state.activeBody !== 2 || state.systemView || state.drive) {
+      state.followColonist = null;
+      document.getElementById('stop-colonist-follow').hidden = true;
+    } else {
+      const position = model ? model.root.position : sph(profile.x, profile.y, .1);
+      const delta = position.clone().sub(follow.position);
+      state.camera.position.add(delta);
+      state.controls.target.add(delta);
+      if (state.flyAnim) for (const key of ['from', 'to', 'tfrom', 'tto']) state.flyAnim[key].add(delta);
+      follow.position.copy(position);
+    }
+  }
   const t = (now - state.t0) / 1000;
   updateSolarSystem(now, Math.max(0, (now - state.cameraLast) / 1000));
   if (state.flyAnim) {
