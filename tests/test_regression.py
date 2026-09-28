@@ -10,6 +10,10 @@ from hadleys.api.snapshots import snapshot, bus_snapshot, house_snapshot
 from hadleys.domains.attractors import attractor_snapshot
 
 FIXTURES = Path(__file__).parent / "fixtures"
+# Transit vehicles re-route along arcs whose step count is int(abs(d) / step) with d a hair from 60 degrees;
+# a libm whose sin() is 1 ULP off (macOS) flips 30 steps to 29 and one car ends a few millimetres elsewhere.
+# The fixture was made with a correctly rounding libm (glibc). Only these kinematic leaves get a tolerance.
+KINEMATIC_TOLERANCE = {"x": 0.05, "y": 0.05, "distance_m": 0.05, "heading": 0.02}
 
 
 class SimulationRegression(unittest.TestCase):
@@ -32,6 +36,14 @@ class SimulationRegression(unittest.TestCase):
             self.assertEqual(value["report"].pop("households")["debtors"], 0)
         return value
 
+    def snap_kinematics(self, actual, expected):
+        """Replace rover kinematics that differ from the fixture by less than the tolerance."""
+        for mine, theirs in zip(actual["rovers"], expected["rovers"]):
+            for key, tol in KINEMATIC_TOLERANCE.items():
+                if abs(mine[key] - theirs[key]) <= tol:
+                    mine[key] = theirs[key]
+        return actual
+
     def legacy_house(self, value):
         finance = value.pop("finance")
         self.assertEqual(finance["status"], "normal")
@@ -52,6 +64,7 @@ class SimulationRegression(unittest.TestCase):
                 )
                 # Normalize tuples and string enums exactly as the HTTP JSON boundary does.
                 actual = json.loads(json.dumps(actual, allow_nan=False))
+                self.snap_kinematics(actual["snapshot"], expected[str(tick)]["snapshot"])
                 with self.subTest(tick=tick):
                     self.assertEqual(actual, expected[str(tick)])
             if tick < 120:
@@ -59,8 +72,10 @@ class SimulationRegression(unittest.TestCase):
         w.t = 1439
         world_tick(w)
         with self.subTest(tick="day"):
-            self.assertEqual(json.loads(json.dumps(self.legacy_snapshot(snapshot(w)))), expected["day"])
+            actual = json.loads(json.dumps(self.legacy_snapshot(snapshot(w))))
+            self.assertEqual(self.snap_kinematics(actual, expected["day"]), expected["day"])
         w.t = w.cfg["ticks_per_day"] * w.cfg["days_per_month"] - 1
         world_tick(w)
         with self.subTest(tick="month"):
-            self.assertEqual(json.loads(json.dumps(self.legacy_snapshot(snapshot(w)))), expected["month"])
+            actual = json.loads(json.dumps(self.legacy_snapshot(snapshot(w))))
+            self.assertEqual(self.snap_kinematics(actual, expected["month"]), expected["month"])
