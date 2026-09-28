@@ -9,7 +9,7 @@ if TYPE_CHECKING:
 
 import math
 import numpy as np
-from hadleys.domains.finance import finance_record, finance_reserve
+from hadleys.domains.finance import finance_record, finance_release, finance_reserve
 from hadleys.geometry.roads import plan_route
 from hadleys.numerics import polar
 
@@ -87,10 +87,12 @@ def _crew_fits(r: Rover, iss: Issue):
 
 
 def _pipes_blocked(w: World, iss: Issue):
-    """Fixing pipes in a house that still has no wiring is wasted: it freezes and bursts again."""
+    """Fixing pipes in a house that cannot hold heat is wasted: it freezes, bursts again and the household is
+    billed again. Wait until the house has wiring, power and is above freezing."""
     if iss.kind != "pipes_burst":
         return 0
-    return 0 if w.h_wiring_ok[int(iss.target.split(":")[1])] else 1
+    i = int(iss.target.split(":")[1])
+    return 0 if (w.h_wiring_ok[i] and w.h_power_ok[i] and w.h_t_in[i] >= 1.0) else 1
 
 
 def _repair_rover(w: World, r: Rover):
@@ -102,7 +104,11 @@ def _repair_rover(w: World, r: Rover):
             r.state = TransportState.IDLE
         return
     if r.state == TransportState.IDLE:
-        cands = [i for i in w.issues if i.status == "funded" and _crew_fits(r, i)]
+        cands = [
+            i
+            for i in w.issues
+            if i.status == "funded" and _crew_fits(r, i) and not _pipes_blocked(w, i)
+        ]
         if not cands:
             _go_home(w, r)
         if cands:
@@ -140,7 +146,7 @@ def _repair_rover(w: World, r: Rover):
     elif r.state == TransportState.REPAIRING:
         r.timer -= 1
         if r.timer <= 0:
-            resolve_issue(w, r.job)
+            resolve_issue(w, r.job, r)
             r.job = None
             r.state = TransportState.IDLE
 
@@ -354,7 +360,7 @@ def damage_target(w: World, target: str, cause: str, severity: float):
         )
 
 
-def resolve_issue(w: World, iss: Issue):
+def resolve_issue(w: World, iss: Issue, crew: Rover = None):
     kind, _, arg = iss.target.partition(":")
     if kind == "span":
         w.s_health[int(arg)] = 1.0
@@ -364,6 +370,13 @@ def resolve_issue(w: World, iss: Issue):
         i = int(arg)
         w.p_state[i] = 0
         w.p_lamp_ok[i] = True
+        # the new pole comes with a working lamp: the lamp job on it is done, nobody pays for it twice
+        for other in w.issues:
+            if other.target == f"lamp:{i}" and other.status != "resolved" and other.status != "in_progress":
+                finance_release(w, other)
+                other.status = "resolved"
+                other.resolved_t = w.t
+                w.log("INFO", f"Lamp at pole {i} replaced together with the pole")
     elif kind == "lamp":
         w.p_lamp_ok[int(arg)] = True
     elif kind == "house":
@@ -407,9 +420,21 @@ def resolve_issue(w: World, iss: Issue):
         w.ups_health[int(arg)] = 1.0
     iss.status = "resolved"
     iss.resolved_t = w.t
+    house = int(arg) if kind in HOUSE_TARGETS else -1
+    crew_house = w.crew_house.get(str(crew.name), -1) if crew is not None else -1
     finance_record(
-        w, iss.cost, iss.payer, iss.sector, iss.cause, f"repair {iss.kind} {iss.target}"
+        w,
+        iss.cost,
+        iss.payer,
+        iss.sector,
+        iss.cause,
+        f"repair {iss.kind} {iss.target}",
+        house=house,
+        crew_house=crew_house,
+        funded_by=getattr(iss, "funded_by", ""),
+        labour=w.cfg["crew_pay_per_repair_tick"] * iss.duration,
     )
+    iss.funded_by = ""
     w.log("INFO", f"Repaired {iss.kind} at {iss.target}, {iss.cost:.0f} cr")
 
 

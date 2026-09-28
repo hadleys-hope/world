@@ -9,6 +9,7 @@ from hadleys.domains.attractors import attractor_sample
 from hadleys.domains.energy import power_step, reactor_scram, reactor_step
 from hadleys.domains.environment import env_step
 from hadleys.domains.finance import finance_day_close, finance_month_close
+from hadleys.domains.households import book, finance_tick
 from hadleys.domains.houses import house_events, houses_step
 from hadleys.domains.incidents import damage_target, incidents_step, pipes_audit
 from hadleys.domains.internet import internet_step
@@ -39,6 +40,7 @@ def world_tick(w: World):
     house_events(w)
     if w.t % 60 == 0:
         pipes_audit(w)
+    finance_tick(w)
     if w.t % w.cfg["ticks_per_day"] == 0:
         finance_day_close(w)
     if w.t % (w.cfg["ticks_per_day"] * w.cfg["days_per_month"]) == 0:
@@ -115,8 +117,23 @@ def inject(w: World, cmd: str):
         }
     elif cmd == "money":
         w.colony_budget += 50000
+        w.colony_month_income += 50000
+        w.fin_ext["company"] += 50000
+        book(w, "ext:company", "colony", 50000.0, "operator grant")
         w.log("INFO", "[manual] corporation transferred 50 000 cr to the colony")
         return {"text": "50 000 cr received"}
+    elif cmd == "mine":
+        days = c["mine_flood_days"]
+        w.mine_closed_until = max(w.mine_closed_until, w.t) + days * c["ticks_per_day"]
+        w.log(
+            "ALARM",
+            f"[manual] mine flooded: no ore for {days} days, miners are on standby pay",
+        )
+        return {
+            "x": c["mine_pos"][0],
+            "y": c["mine_pos"][1],
+            "text": f"Mine flooded for {days} days: miners' wages drop",
+        }
     elif cmd == "road":
         s = int(rng.integers(0, w.S))
         damage_target(w, f"road:{s}", "impact", 1.0)

@@ -47,6 +47,17 @@ def main():
         help="run N ticks without the server, print a summary and exit",
     )
     ap.add_argument(
+        "--scenario",
+        default="",
+        help="set up a named scenario in a new world: finance-demo (houses A, B, C; docs/FINANCE_RU.md)",
+    )
+    ap.add_argument(
+        "--warp-days",
+        type=int,
+        default=0,
+        help="before serving, run this many simulated days as fast as possible (saved if --data is set)",
+    )
+    ap.add_argument(
         "--mqtt",
         default=os.environ.get("MQTT_URL", ""),
         help="broker host:port; enables the sensor/actuator bus for external house controllers",
@@ -57,7 +68,26 @@ def main():
     w = None if (args.fresh or not store) else store.load_world()
     if w is None:
         w = World(CFG)
+        if args.scenario:
+            from hadleys.scenarios import SCENARIOS
+
+            chosen = SCENARIOS[args.scenario](w)
+            print(
+                f"scenario {args.scenario}: "
+                + ", ".join(f"{k} = house {v + 1} (/house?id={v + 1})" for k, v in chosen.items())
+            )
+    elif args.scenario:
+        print(f"resumed a saved world, scenario {args.scenario} not applied (use --fresh)")
     w.speed = args.speed
+    if args.warp_days:
+        t0 = time.time()
+        end = w.t + args.warp_days * w.cfg["ticks_per_day"]
+        while w.t < end:
+            world_tick(w)
+            if w.t % w.cfg["ticks_per_day"] == 0:
+                print(f"warp: {w.time_str()} ({time.time() - t0:.0f} s)", flush=True)
+        if store:
+            store.save_world(w)
     admin_token = os.environ.get("ADMIN_TOKEN", "")
     w.bridge = None
     if args.mqtt:

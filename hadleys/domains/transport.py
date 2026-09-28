@@ -333,12 +333,16 @@ def _garbage_rover(w: World, r: Rover):
             take = min(1.0 - r.load, float(w.waste_level[s]))
             w.waste_level[s] -= take
             r.load += take
+            # a collection is paid by the share of a full bin it takes, so topping up a nearly full
+            # rover is not billed as a whole trip
             if finance_pay(
                 w,
                 "waste_trip",
                 s,
                 "normal_operation",
                 f"waste collection sector {s + 1}",
+                crew_house=w.crew_house.get(str(r.name), -1),
+                frac=take,
             ):
                 w.log("INFO", f"Garbage rover emptied sector {s + 1} bin")
             else:
@@ -420,6 +424,7 @@ def _sludge_rover(w: World, r: Rover):
                 int(w.h_sector[i]),
                 "normal_operation",
                 f"sludge collection house {i + 1}",
+                crew_house=w.crew_house.get(str(r.name), -1),
             )
             r.state = TransportState.IDLE
     elif r.state == TransportState.TO_STORE:

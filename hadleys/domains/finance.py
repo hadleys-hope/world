@@ -1,4 +1,7 @@
-"""domains / finance: colony simulation components."""
+"""domains / finance: colony, sector and household budgets.
+
+Who pays whom is described in docs/FINANCE_RU.md; the household side lives in domains/households.py.
+"""
 
 from __future__ import annotations
 from typing import TYPE_CHECKING
@@ -8,32 +11,95 @@ if TYPE_CHECKING:
 
 import numpy as np
 from hadleys.config import COSTS
+from hadleys.domains.households import (
+    EARNED,
+    K_JOB,
+    book,
+    households_bill_repair,
+    households_day_close,
+    households_month_close,
+    households_month_roll,
+    transfer,
+)
+
+
+def _free_account(w: World, payer, sector, amount):
+    """The account that can pay `amount` now without touching money reserved for funded repairs:
+    the sector for sector and house costs, the colony as the fallback and for colony costs."""
+    if payer in ("sector", "house") and sector >= 0:
+        if w.sector_budget[sector] - w.sector_reserved[sector] >= amount:
+            return f"sector:{sector}"
+    if w.colony_budget - w.colony_reserved >= amount:
+        return "colony"
+    return None
+
+
+def _reserve(w: World, acct, amount):
+    if acct == "colony":
+        w.colony_reserved += amount
+    else:
+        w.sector_reserved[int(acct[7:])] += amount
+
+
+def _release(w: World, acct, amount):
+    if acct == "colony":
+        w.colony_reserved = max(0.0, w.colony_reserved - amount)
+    else:
+        s = int(acct[7:])
+        w.sector_reserved[s] = max(0.0, w.sector_reserved[s] - amount)
 
 
 def finance_reserve(w: World, iss: Issue):
-    if iss.payer == "colony":
-        return w.colony_budget >= iss.cost
-    s = iss.sector if iss.sector >= 0 else 0
-    return w.sector_budget[s] >= iss.cost or w.colony_budget >= iss.cost
+    """Fund a repair: the money is set aside until the repair is done, so it cannot fund another one."""
+    acct = _free_account(w, iss.payer, iss.sector, iss.cost)
+    if acct is None:
+        return False
+    _reserve(w, acct, iss.cost)
+    iss.funded_by = acct
+    return True
 
 
-def finance_record(w: World, amount, payer, sector, cause, note):
-    s = sector if sector >= 0 else 0
-    src = "colony"
-    if payer in ("sector", "house") and w.sector_budget[s] >= amount:
-        w.sector_budget[s] -= amount
-        w.month_expense[s] += amount
-        src = f"sector {s + 1}"
-    elif w.colony_budget >= amount:
-        w.colony_budget -= amount
+def finance_release(w: World, iss: Issue):
+    """Return the reservation of an issue closed without a repair."""
+    if getattr(iss, "funded_by", ""):
+        _release(w, iss.funded_by, iss.cost)
+        iss.funded_by = ""
+
+
+def _spend(w: World, acct, amount, labour, crew_house, what):
+    """Pay a job from `acct`: the crew household's labour, the rest to suppliers for materials."""
+    labour = min(labour, amount) if crew_house >= 0 else 0.0
+    if labour > 0:
+        transfer(w, acct, f"house:{crew_house}", labour, "job pay", K_JOB)
+        w.hh_month[crew_house, EARNED] += labour
+    transfer(w, acct, "ext:suppliers", amount - labour, what)
+    if acct == "colony":
         w.colony_month_expense += amount
-    else:
+        return "colony"
+    s = int(acct[7:])
+    w.month_expense[s] += amount
+    return f"sector {s + 1}"
+
+
+def finance_record(
+    w: World, amount, payer, sector, cause, note, house=-1, crew_house=-1, funded_by="", labour=0.0
+):
+    """Pay for a finished repair. The account that funded it pays (its reservation is released); a house
+    repair is then billed to the household. Nothing funded and no money left: the cost is 'unpaid'."""
+    if funded_by:
+        _release(w, funded_by, amount)
+        acct = funded_by
+    else:  # issues funded before reservations existed decide at completion, as they used to
+        acct = _free_account(w, payer, sector, amount)
+    if acct is None:
         w.unfunded_total += amount
         src = "unpaid"
-    if payer == "house":
-        i = int(note.split("house:")[-1]) if "house:" in note else -1
-        if 0 <= i < w.N:
-            w.h_repairs_month[i] += amount
+    else:
+        src = _spend(w, acct, amount, labour, crew_house, "repair materials")
+    if payer == "house" and house >= 0:
+        w.h_repairs_month[house] += amount
+        if acct is not None:
+            households_bill_repair(w, house, amount, acct, note)
     w.cost_records.append(
         {
             "t": w.t,
@@ -42,29 +108,40 @@ def finance_record(w: World, amount, payer, sector, cause, note):
             "source": src,
             "cause": cause,
             "note": note,
+            "house": house,
         }
     )
     if len(w.cost_records) > 2000:
         w.cost_records = w.cost_records[-2000:]
+    return acct is not None
 
 
-def finance_pay(w: World, cost_key, sector, cause, note):
+def finance_pay(w: World, cost_key, sector, cause, note, crew_house=-1, frac=1.0):
+    """A service paid on the spot (waste and sludge trips). `frac` is the share of a full load."""
     cost, payer, _ = COSTS[cost_key]
-    if w.sector_budget[sector] >= cost:
-        finance_record(w, cost, "sector", sector, cause, note)
+    amount = cost * frac
+    if amount <= 0:
         return True
-    if w.colony_budget >= cost:
-        finance_record(w, cost, "colony", -1, cause, note)
-        return True
-    return False
+    acct = _free_account(w, payer, sector, amount)
+    if acct is None:
+        w.unfunded_total += amount
+        src = "unpaid"
+    else:
+        labour = w.cfg["crew_pay_per_trip"] * frac
+        src = _spend(w, acct, amount, labour, crew_house, cost_key.replace("_", " "))
+    w.cost_records.append(
+        {"t": w.t, "amount": amount, "payer": payer, "source": src, "cause": cause, "note": note, "house": -1}
+    )
+    if len(w.cost_records) > 2000:
+        w.cost_records = w.cost_records[-2000:]
+    return acct is not None
 
 
 def finance_day_close(w: World):
     c = w.cfg
     bill = w.h_meter_day * c["tariff_kwh"] + w.h_water_day * c["tariff_water_m3"]
-    income = np.bincount(w.h_sector, weights=bill, minlength=w.S)
-    w.sector_budget += income
-    w.month_income += income
+    # wages, bills, loans; the sectors receive what the households actually paid
+    services = households_day_close(w, bill)
     w.h_meter_day[:] = 0
     w.h_water_day[:] = 0
     payroll = c["colony_payroll_day"]
@@ -72,6 +149,12 @@ def finance_day_close(w: World):
         payroll  # may go below zero: that is debt, and colony repairs stop being funded
     )
     w.colony_month_expense += payroll
+    # the payroll pays the service staff living in the colony; the rest is off-world staff and shipments
+    if services > payroll:
+        w.colony_budget -= services - payroll
+        w.colony_month_expense += services - payroll
+    w.fin_ext["suppliers"] -= max(0.0, payroll - services)
+    book(w, "colony", "ext:suppliers", max(0.0, payroll - services), "shipments and off-world staff")
 
 
 def finance_month_close(w: World):
@@ -83,22 +166,27 @@ def finance_month_close(w: World):
     internet = np.full(w.N, c["internet_fee"])
     repairs = w.h_repairs_month.copy()
     house_total = energy + water + sewage + internet + repairs
-    income = np.bincount(w.h_sector, weights=sewage + internet + repairs, minlength=S)
-    w.sector_budget += income
-    w.month_income += income
+    # fees are billed to the households; house repairs were billed when they were done
+    households_month_close(w)
     upkeep = c["reactor_upkeep_month"]
     w.colony_budget -= upkeep
     w.colony_month_expense += upkeep
-    extra = np.maximum(0.0, w.sector_budget - c["sector_budget_cap"])
+    w.fin_ext["suppliers"] -= upkeep
+    book(w, "colony", "ext:suppliers", upkeep, "reactor upkeep")
+    extra = np.maximum(0.0, w.sector_budget - np.maximum(c["sector_budget_cap"], w.sector_reserved))
     w.sector_budget -= extra
     w.last_sector_transfer = float(extra.sum())
     w.colony_budget += w.last_sector_transfer
     w.colony_month_income += w.last_sector_transfer
+    for s in np.flatnonzero(extra > 0):
+        book(w, f"sector:{s}", "colony", float(extra[s]), "sector surplus")
     w.last_levy = (
         max(0.0, w.colony_budget - c["company_reserve_target"]) * c["company_levy_frac"]
     )
     w.colony_budget -= w.last_levy
     w.levy_total += w.last_levy
+    w.fin_ext["company"] -= w.last_levy
+    book(w, "colony", "ext:company", w.last_levy, "company levy")
     if w.last_levy > 0:
         w.log(
             "INFO",
@@ -106,6 +194,7 @@ def finance_month_close(w: World):
         )
     common_share = (w.colony_month_expense - w.colony_month_income) / w.N
     top = np.argsort(-house_total)[:5]
+    households = households_month_roll(w)
     w.last_report = {
         "month": w.month,
         "houses_total": float(house_total.sum()),
@@ -113,7 +202,8 @@ def finance_month_close(w: World):
         "water_total": float(water.sum()),
         "repairs_total": float(repairs.sum()),
         "kwh_total": float(w.h_meter_month.sum()),
-        "sector_income": [round(float(x), 1) for x in income],
+        # everything the sectors received this month: the daily utility bills, the fees, repaid repairs
+        "sector_income": [round(float(x), 1) for x in w.month_income],
         "sector_expense": [round(float(x), 1) for x in w.month_expense],
         "sector_budget": [round(float(x), 1) for x in w.sector_budget],
         "colony_expense": round(w.colony_month_expense, 1),
@@ -135,11 +225,18 @@ def finance_month_close(w: World):
             for i in top
         ],
         "by_cause": _expense_by_cause(w),
+        "households": households,
     }
     w.log(
         "INFO",
         f"Month {w.month} closed: owners paid {house_total.sum():.0f} cr, colony spent {w.colony_month_expense:.0f} cr",
     )
+    if households["arrears"] > 0.5 or households["bankrupt"]:
+        w.log(
+            "WARN",
+            f"Households owe {households['debt']:.0f} cr ({households['arrears']:.0f} cr unpaid bills), "
+            f"{households['overdue']} overdue, {households['bankrupt']} bankrupt",
+        )
     w.month += 1
     w.h_meter_month[:] = 0
     w.h_water_month[:] = 0
@@ -153,8 +250,11 @@ def finance_month_close(w: World):
 
 
 def _expense_by_cause(w: World):
+    """Money actually spent on repairs and services this month, by cause (unpaid costs are not spent)."""
     out = {}
     for r in w.cost_records:
+        if r["source"] == "unpaid":
+            continue
         if r["t"] > w.t - w.cfg["ticks_per_day"] * w.cfg["days_per_month"]:
             out[r["cause"]] = round(out.get(r["cause"], 0.0) + r["amount"], 1)
     return out

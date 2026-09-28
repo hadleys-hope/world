@@ -19,6 +19,8 @@ def houses_decide(w: World):
     target = np.full(w.N, c["comfort_c"])
     target[w.h_on_ups | (w.h_limit_w > 0)] = c["eco_c"]
     target[(w.h_limit_w > 0) & (w.h_limit_w <= c["limit_level5_w"])] = c["antifreeze_c"]
+    if c["bankrupt_eco_heating"]:  # a bankrupt household saves on heating
+        target = np.where(w.hh_status == 2, np.minimum(target, c["eco_c"]), target)
     on = w.h_heater_on.copy()
     on[w.h_t_in < target - 0.5] = True
     on[w.h_t_in > target + 0.5] = False

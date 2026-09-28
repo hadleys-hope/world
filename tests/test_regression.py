@@ -21,6 +21,21 @@ class SimulationRegression(unittest.TestCase):
             self.assertFalse(rover.pop("manual"))
             self.assertIsNone(rover.pop("chassis"))
             rover["heading"] = round(rover["heading"], 2)
+        # Household finance is additive too; in the golden run every household stays solvent.
+        households = value["finance"].pop("households")
+        self.assertEqual(households["debt"], 0.0)
+        self.assertEqual(households["bankrupt"], 0)
+        self.assertEqual(households["households"], 208)
+        self.assertEqual(set(value["houses"].pop("fin")), {-1, 0})
+        self.assertEqual(len(value["houses"].pop("cash")), 300)
+        if value["report"]:
+            self.assertEqual(value["report"].pop("households")["debtors"], 0)
+        return value
+
+    def legacy_house(self, value):
+        finance = value.pop("finance")
+        self.assertEqual(finance["status"], "normal")
+        self.assertEqual(finance["debt"], 0.0)
         return value
 
     def test_original_snapshots_and_domain_order(self):
@@ -32,7 +47,7 @@ class SimulationRegression(unittest.TestCase):
                 actual = dict(
                     snapshot=self.legacy_snapshot(snapshot(w)),
                     bus=bus_snapshot(w),
-                    house=house_snapshot(w, 17),
+                    house=self.legacy_house(house_snapshot(w, 17)),
                     attractors=attractor_snapshot(w, True),
                 )
                 # Normalize tuples and string enums exactly as the HTTP JSON boundary does.
@@ -43,7 +58,9 @@ class SimulationRegression(unittest.TestCase):
                 world_tick(w)
         w.t = 1439
         world_tick(w)
-        self.assertEqual(json.loads(json.dumps(self.legacy_snapshot(snapshot(w)))), expected["day"])
+        with self.subTest(tick="day"):
+            self.assertEqual(json.loads(json.dumps(self.legacy_snapshot(snapshot(w)))), expected["day"])
         w.t = w.cfg["ticks_per_day"] * w.cfg["days_per_month"] - 1
         world_tick(w)
-        self.assertEqual(json.loads(json.dumps(self.legacy_snapshot(snapshot(w)))), expected["month"])
+        with self.subTest(tick="month"):
+            self.assertEqual(json.loads(json.dumps(self.legacy_snapshot(snapshot(w)))), expected["month"])

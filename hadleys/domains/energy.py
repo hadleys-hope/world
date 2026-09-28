@@ -262,6 +262,8 @@ def power_step(w: World):
         if (available > 0 and reactor_up)
         else 0.0
     )
+    if w.t < w.mine_closed_until:  # flooded: nothing to power, nothing to sell
+        w.mine_frac = 0.0
     w.mine_powered = w.mine_frac > 0
 
     limit = np.zeros(w.N)
@@ -367,3 +369,4 @@ def power_step(w: World):
     if w.mine_frac > 0:
         w.colony_budget += c["mine_income_per_tick"] * w.mine_frac
         w.colony_month_income += c["mine_income_per_tick"] * w.mine_frac
+        w.fin_ext["ore"] += c["mine_income_per_tick"] * w.mine_frac
