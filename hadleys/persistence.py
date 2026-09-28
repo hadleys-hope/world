@@ -8,6 +8,7 @@ import pickle
 import sqlite3
 from hadleys.config import CFG
 from hadleys.domains.households import internal_total
+from hadleys.domains.incidents import abandon_job
 from hadleys.domains.hydraulics import UtilityNetwork
 from hadleys.world import World
 
@@ -129,6 +130,8 @@ class Store:
                 if key not in r.__dict__:
                     setattr(r, key, value)
         for r in w.rovers + getattr(w, "traffic", []):
+            if getattr(r, "driver_owner", None) or getattr(r, "driver_parked", False):
+                abandon_job(w, r)
             if getattr(r, "driver_owner", None):
                 r.driver_owner = None
                 r.driver_parked = True
@@ -140,10 +143,11 @@ class Store:
         """A resumed world's events and reports up to now are already in history.db."""
         con = sqlite3.connect(self.db)
         row = con.execute("SELECT MAX(t) FROM events WHERE t <= ?", (w.t,)).fetchone()
+        rep = con.execute("SELECT MAX(month) FROM reports").fetchone()
         con.close()
         self.last_event_t = row[0] if row and row[0] is not None else -1
-        self.last_report_month = w.last_report["month"] if w.last_report else 0
-        self.world_id = id(w)
+        self.last_report_month = rep[0] if rep and rep[0] is not None else 0
+        self.world_id = w.uid
 
     def save_world(self, w: World):
         tmp = self.pkl + ".tmp"
@@ -152,12 +156,12 @@ class Store:
         os.replace(tmp, self.pkl)
 
     def record_hour(self, w: World):
-        if getattr(self, "world_id", None) != id(w):
+        if getattr(self, "world_id", None) != w.uid:
             if getattr(self, "world_id", None) is not None:
                 # a new colony in the same process starts its own event and report sequence
                 self.last_event_t = -1
                 self.last_report_month = 0
-            self.world_id = id(w)
+            self.world_id = w.uid
         con = sqlite3.connect(self.db)
         con.execute(
             "INSERT OR REPLACE INTO hourly VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",

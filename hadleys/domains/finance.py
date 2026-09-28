@@ -51,7 +51,15 @@ def _release(w: World, acct, amount):
 
 
 def finance_reserve(w: World, iss: Issue):
-    """Fund a repair: the money is set aside until the repair is done, so it cannot fund another one."""
+    """Funding check (every 30 ticks for open issues): the payer has the money free right now. Nothing is set
+    aside yet, so a long queue of jobs no crew can take cannot starve an urgent repair of its money."""
+    return iss.funded_by != "" or _free_account(w, iss.payer, iss.sector, iss.cost) is not None
+
+
+def finance_commit(w: World, iss: Issue):
+    """A crew takes the job: set the money aside until the repair is done, so no other job can spend it."""
+    if iss.funded_by:
+        return True
     acct = _free_account(w, iss.payer, iss.sector, iss.cost)
     if acct is None:
         return False
@@ -117,8 +125,9 @@ def finance_record(
     return acct is not None
 
 
-def finance_pay(w: World, cost_key, sector, cause, note, crew_house=-1, frac=1.0):
-    """A service paid on the spot (waste and sludge trips). `frac` is the share of a full load."""
+def finance_pay(w: World, cost_key, sector, cause, note, crew_house=-1, frac=1.0, load=None):
+    """A service paid on the spot (waste and sludge trips). `frac` scales the price; the driver is paid
+    crew_pay_per_trip per full load, `load` being the share of a load this stop added (default `frac`)."""
     cost, payer, _ = COSTS[cost_key]
     amount = cost * frac
     if amount <= 0:
@@ -128,7 +137,7 @@ def finance_pay(w: World, cost_key, sector, cause, note, crew_house=-1, frac=1.0
         w.unfunded_total += amount
         src = "unpaid"
     else:
-        labour = w.cfg["crew_pay_per_trip"] * frac
+        labour = w.cfg["crew_pay_per_trip"] * (frac if load is None else load)
         src = _spend(w, acct, amount, labour, crew_house, cost_key.replace("_", " "))
     w.cost_records.append(
         {"t": w.t, "amount": amount, "payer": payer, "source": src, "cause": cause, "note": note, "house": -1}
@@ -140,9 +149,14 @@ def finance_pay(w: World, cost_key, sector, cause, note, crew_house=-1, frac=1.0
 
 def finance_day_close(w: World):
     c = w.cfg
+    if w.t // c["ticks_per_day"] == w.hh_last_close_day:
+        return  # this day is closed already
     bill = w.h_meter_day * c["tariff_kwh"] + w.h_water_day * c["tariff_water_m3"]
     # wages, bills, loans; the sectors receive what the households actually paid
     services = households_day_close(w, bill)
+    ore = w.fin_ext["ore"] - w.fin_ore_booked  # ore income arrives every tick; it is journaled once a day
+    book(w, "ext:ore", "colony", ore, "ore sales")
+    w.fin_ore_booked = w.fin_ext["ore"]
     w.h_meter_day[:] = 0
     w.h_water_day[:] = 0
     payroll = c["colony_payroll_day"]
@@ -160,6 +174,10 @@ def finance_day_close(w: World):
 
 def finance_month_close(w: World):
     c = w.cfg
+    month = w.t // (c["ticks_per_day"] * c["days_per_month"])
+    if month == w.fin_last_month_close:
+        return  # this month is closed already
+    w.fin_last_month_close = month
     energy = w.h_meter_month * c["tariff_kwh"]
     water = w.h_water_month * c["tariff_water_m3"]
     sewage = np.full(w.N, c["sewage_fee"])
@@ -229,7 +247,7 @@ def finance_month_close(w: World):
     }
     w.log(
         "INFO",
-        f"Month {w.month} closed: owners paid {house_total.sum():.0f} cr, colony spent {w.colony_month_expense:.0f} cr",
+        f"Month {w.month} closed: owners billed {house_total.sum():.0f} cr, colony spent {w.colony_month_expense:.0f} cr",
     )
     if households["arrears"] > 0.5 or households["bankrupt"]:
         w.log(

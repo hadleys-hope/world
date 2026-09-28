@@ -1,4 +1,5 @@
 import gzip
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -26,6 +27,20 @@ class PersistenceTests(unittest.TestCase):
                 resumed = store.load_world()
                 self.assertEqual(snapshot(resumed), snapshot(w))
                 self.assertFalse(Path(directory, "world.old.pkl").exists())
+
+    def test_a_new_colony_writes_its_own_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(directory)
+            old = World()
+            old.t = 5000
+            old.log("INFO", "old colony event")
+            store.record_hour(old)
+            new = World()
+            new.t = 60
+            new.log("INFO", "new colony event")
+            store.record_hour(new)
+            texts = [r[0] for r in sqlite3.connect(store.db).execute("SELECT text FROM events")]
+            self.assertIn("new colony event", texts)
 
     def test_history_schema_and_enum_wire_compatibility(self):
         with tempfile.TemporaryDirectory() as directory:

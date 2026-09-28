@@ -111,12 +111,12 @@ def house_events(w: World):
     if prev is not None:
         texts = {
             "power": ("power restored", "power lost"),
-            "ups": ("back on the grid", "running on the sector UPS"),
+            "ups": ("running on the sector UPS", "back on the grid"),  # up = on UPS
             "water": ("water supply restored", "no water"),
             "net": ("network link up", "network link lost"),
             "pipes": ("pipes thawed or repaired", "pipes frozen"),
             "burst": ("pipes burst", "pipes repaired"),  # up = burst is True
-            "limit": ("power limit lifted", "power limit imposed by the grid"),
+            "limit": ("power limit imposed by the grid", "power limit lifted"),  # up = limited
         }
         for key, (up, down) in texts.items():
             changed = np.flatnonzero(cur[key] != prev[key])

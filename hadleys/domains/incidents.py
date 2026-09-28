@@ -9,8 +9,14 @@ if TYPE_CHECKING:
 
 import math
 import numpy as np
-from hadleys.domains.finance import finance_record, finance_release, finance_reserve
+from hadleys.domains.finance import (
+    finance_commit,
+    finance_record,
+    finance_release,
+    finance_reserve,
+)
 from hadleys.geometry.roads import plan_route
+from hadleys.models import Issue
 from hadleys.numerics import polar
 
 HOUSE_TARGETS = ("house", "aeration", "terminal")
@@ -121,12 +127,17 @@ def _repair_rover(w: World, r: Rover):
                 )
             )
             iss = cands[0]
-            if plan_route(w, r, issue_target_spec(w, iss)):
+            if not finance_commit(w, iss):
+                # the money went to other jobs since this one was funded: back to the funding queue
+                iss.status = "unfunded"
+                r.wait = 5
+            elif plan_route(w, r, issue_target_spec(w, iss)):
                 r.job = iss
                 iss.status = "in_progress"
                 iss.started_t = w.t
                 r.state = TransportState.TO_TARGET
             else:
+                finance_release(w, iss)
                 r.wait = 20
     elif r.state == TransportState.TO_TARGET:
         if rover_move(w, r):
@@ -149,6 +160,16 @@ def _repair_rover(w: World, r: Rover):
             resolve_issue(w, r.job, r)
             r.job = None
             r.state = TransportState.IDLE
+
+
+def abandon_job(w: World, r: Rover):
+    """The crew leaves its job unfinished (a driver takes the rover): the job goes back to the queue and its
+    money is no longer set aside."""
+    if isinstance(r.job, Issue) and r.job.status != "resolved":
+        finance_release(w, r.job)
+        r.job.status = "funded"
+    if isinstance(r.job, Issue):
+        r.job = None
 
 
 def damage_target(w: World, target: str, cause: str, severity: float):

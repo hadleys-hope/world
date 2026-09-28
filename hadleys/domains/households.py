@@ -102,8 +102,10 @@ def households_init(w: World):
     w.hh_hist_t = np.zeros(HIST_DAYS, dtype=np.int64)
     w.hh_hist_n = 0
     w.hh_last_close_day = -1
+    w.fin_last_month_close = -1
     w.fin_next_id = 1
     w.fin_ext = {"company": 0.0, "suppliers": 0.0, "ore": 0.0, "bank": 0.0}
+    w.fin_ore_booked = 0.0
     w.fin_flows = {}  # (from, to, what) -> cr this month
     w.fin_flows_prev = {}
     w.fin_flows_total = {}

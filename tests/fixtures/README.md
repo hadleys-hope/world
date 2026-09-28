@@ -23,6 +23,9 @@ changes; do not regenerate merely to make a failing refactor test pass.
   `mtime=0`. The file was not regenerated, because a regeneration on macOS
   would bake a 1-ULP libm difference into `rovers[21]` (see
   `tests/test_regression.py`).
+- Same file, `month.events[*].text` of the month-close line only: "owners
+  paid" became "owners billed". The figure is what the houses were billed;
+  with household cash some of it can stay unpaid, so "paid" was wrong.
 - New API keys (`finance.households`, `houses.fin`, `houses.cash`,
   `report.households`, `house.finance`) are removed by the normalisers in
   `tests/test_regression.py`, which also assert their golden-run values.

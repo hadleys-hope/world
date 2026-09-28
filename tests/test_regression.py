@@ -2,6 +2,7 @@
 
 import gzip
 import json
+import sys
 from pathlib import Path
 import unittest
 from hadleys.world import World
@@ -14,6 +15,7 @@ FIXTURES = Path(__file__).parent / "fixtures"
 # a libm whose sin() is 1 ULP off (macOS) flips 30 steps to 29 and one car ends a few millimetres elsewhere.
 # The fixture was made with a correctly rounding libm (glibc). Only these kinematic leaves get a tolerance.
 KINEMATIC_TOLERANCE = {"x": 0.05, "y": 0.05, "distance_m": 0.05, "heading": 0.02}
+LIBM_DRIFT = sys.platform == "darwin"
 
 
 class SimulationRegression(unittest.TestCase):
@@ -37,8 +39,12 @@ class SimulationRegression(unittest.TestCase):
         return value
 
     def snap_kinematics(self, actual, expected):
-        """Replace rover kinematics that differ from the fixture by less than the tolerance."""
+        """Replace transit kinematics that differ from the fixture by less than the tolerance (macOS only)."""
+        if not LIBM_DRIFT:
+            return actual
         for mine, theirs in zip(actual["rovers"], expected["rovers"]):
+            if theirs["kind"] != "transit":
+                continue
             for key, tol in KINEMATIC_TOLERANCE.items():
                 if abs(mine[key] - theirs[key]) <= tol:
                     mine[key] = theirs[key]

@@ -84,6 +84,8 @@ def main():
         end = w.t + args.warp_days * w.cfg["ticks_per_day"]
         while w.t < end:
             world_tick(w)
+            if store and w.t % 60 == 0:
+                store.record_hour(w)
             if w.t % w.cfg["ticks_per_day"] == 0:
                 print(f"warp: {w.time_str()} ({time.time() - t0:.0f} s)", flush=True)
         if store:

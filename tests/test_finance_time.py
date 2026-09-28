@@ -192,8 +192,17 @@ class FinanceTime(unittest.TestCase):
         for _ in range(1440):
             light_tick(w)
         rows = int(w.hh_led_n.sum())
-        finance_day_close(w)  # the same day again: ignored
+        colony = w.colony_budget
+        w.h_meter_day[:] = 1.0
+        finance_day_close(w)  # the same day again: ignored, payroll included
         self.assertEqual(int(w.hh_led_n.sum()), rows)
+        self.assertEqual(w.colony_budget, colony)
+        self.assertTrue((w.h_meter_day == 1.0).all(), "the next day's meters are not wiped")
+        for _ in range(30 * 1440 - w.t):
+            light_tick(w)
+        report = dict(w.last_report)
+        finance_month_close(w)  # the same month again: ignored
+        self.assertEqual(w.last_report, report)
 
 
 if __name__ == "__main__":

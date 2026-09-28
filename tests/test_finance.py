@@ -9,6 +9,7 @@ import numpy as np
 from hadleys.api.snapshots import house_snapshot, snapshot
 from hadleys.domains import households as hh
 from hadleys.domains.finance import (
+    finance_commit,
     finance_day_close,
     finance_month_close,
     finance_pay,
@@ -63,6 +64,7 @@ class Accounting(unittest.TestCase):
             damage_target(w, target, "test", 1.0)
             iss = next(x for x in w.issues if x.target == target and x.status == "open")
             self.assertTrue(finance_reserve(w, iss))
+            self.assertTrue(finance_commit(w, iss))
             self.assertEqual(iss.funded_by, f"sector:{s}")
             before = float(w.sector_budget[s])
             resolve_issue(w, iss)
@@ -74,19 +76,66 @@ class Accounting(unittest.TestCase):
         self.assertAlmostEqual(unexplained(w), 0.0, places=6)
 
     def test_reservation_prevents_funding_twice(self):
-        """finance_reserve used to check the balance without holding it: two repairs, one set of credits."""
+        """finance_reserve used to check the balance without holding it: two repairs, one set of credits.
+        Now the money is set aside when a crew takes the job and nobody else can spend it."""
         w = self.w
-        w.sector_budget[2] = 1000.0
         w.colony_budget = 0.0
-        damage_target(w, "gate:2", "test", 1.0)  # 1200 cr, sector payer: too much for the sector
         damage_target(w, "pole:130", "test", 1.0)  # 600 cr
         p = int(w.p_sector[130])
         w.sector_budget[p] = 1000.0
         damage_target(w, "lamp:131", "test", 1.0)  # 300 cr
         damage_target(w, "span:132", "test", 1.0)  # 200 cr
-        funded = [finance_reserve(w, x) for x in w.issues if x.sector == p]
-        self.assertEqual(sum(funded), 2, "600 + 300 fit into 1000, the 200 on top does not")
+        jobs = [x for x in w.issues if x.sector == p]
+        self.assertTrue(all(finance_reserve(w, x) for x in jobs), "each alone is affordable")
+        taken = [finance_commit(w, x) for x in jobs]
+        self.assertEqual(taken, [True, True, False], "600 + 300 fit into 1000, the 200 on top does not")
         self.assertAlmostEqual(float(w.sector_reserved[p]), 900.0)
+        self.assertFalse(finance_pay(w, "sludge_trip", p, "normal_operation", "test"), "120 > the 100 not set aside")
+
+    def test_a_queue_of_house_jobs_does_not_starve_an_urgent_repair(self):
+        """Reserving at funding time let 150 burst-pipe jobs, done one at a time, lock up the colony's money."""
+        w = self.w
+        for i in range(150):
+            w.h_burst[i] = True
+            w.open_issue("pipes_burst", f"house:{i}", int(w.h_sector[i]), "freeze", "pipes", (0, 0), "critical")
+        damage_target(w, "reactor:heat_exchanger", "marines", 0.8)
+        for iss in w.issues:
+            iss.status = "funded" if finance_reserve(w, iss) else "unfunded"
+        hx = w.issues[-1]
+        self.assertEqual(hx.status, "funded")
+        self.assertTrue(finance_commit(w, hx))
+        self.assertEqual(hx.funded_by, "colony")
+
+    def test_a_driver_taking_a_repair_rover_returns_the_job(self):
+        from hadleys.domains.driving import driver_command
+
+        w = self.w
+        damage_target(w, "span:40", "test", 1.0)
+        iss = w.issues[-1]
+        rover = next(r for r in w.rovers if r.name == "engineer")
+        finance_commit(w, iss)
+        iss.status = "in_progress"
+        rover.job = iss
+        s = iss.sector
+        self.assertTrue(driver_command(w, {"cmd": "drive_claim", "name": "engineer", "owner": "x" * 20})["ok"])
+        self.assertEqual(iss.status, "funded")
+        self.assertIsNone(rover.job)
+        self.assertAlmostEqual(float(w.sector_reserved[s]), 0.0)
+
+    def test_sludge_driver_is_paid_by_the_full_load(self):
+        w = self.w
+        crew = w.crew_house["sludge"]
+        cash = float(w.hh_cash[crew])
+        finance_pay(w, "sludge_trip", 0, "normal_operation", "test", crew_house=crew, load=0.25)
+        self.assertAlmostEqual(float(w.hh_cash[crew]) - cash, w.cfg["crew_pay_per_trip"] * 0.25)
+
+    def test_ore_income_is_journaled(self):
+        w = self.w
+        w.fin_ext["ore"] += 4320.0
+        w.colony_budget += 4320.0
+        close_day(w, 1)
+        self.assertAlmostEqual(w.fin_flows[("ext:ore", "colony", "ore sales")], 4320.0)
+        self.assertAlmostEqual(unexplained(w), 0.0, places=6)
 
     def test_colony_fronted_house_repair_is_repaid_to_the_colony(self):
         """House repairs were reimbursed to the sector at month close even when the colony paid."""
@@ -96,7 +145,7 @@ class Accounting(unittest.TestCase):
         w.sector_budget[s] = 0.0
         damage_target(w, f"house:{i}", "test", 1.0)
         iss = w.issues[-1]
-        self.assertTrue(finance_reserve(w, iss))
+        self.assertTrue(finance_commit(w, iss))
         self.assertEqual(iss.funded_by, "colony")
         resolve_issue(w, iss)
         colony = w.colony_budget
@@ -123,7 +172,7 @@ class Accounting(unittest.TestCase):
         rover = next(r for r in w.rovers if r.name == "engineer")
         damage_target(w, "span:40", "test", 1.0)
         iss = w.issues[-1]
-        finance_reserve(w, iss)
+        finance_commit(w, iss)
         cash = float(w.hh_cash[crew])
         resolve_issue(w, iss, rover)
         pay = w.cfg["crew_pay_per_repair_tick"] * iss.duration
@@ -150,8 +199,8 @@ class Accounting(unittest.TestCase):
         damage_target(w, "lamp:50", "test", 1.0)
         damage_target(w, "pole:50", "test", 1.0)
         lamp, pole = w.issues[-2], w.issues[-1]
-        finance_reserve(w, lamp)
-        finance_reserve(w, pole)
+        finance_commit(w, lamp)
+        finance_commit(w, pole)
         s = pole.sector
         before = float(w.sector_budget[s])
         resolve_issue(w, pole)

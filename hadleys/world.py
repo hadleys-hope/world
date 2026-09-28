@@ -6,6 +6,7 @@ from typing import Optional
 
 from collections import deque
 import math
+import os
 import numpy as np
 import random
 import threading
@@ -22,6 +23,7 @@ class World:
 
     def __init__(self, cfg=CFG):
         self.schema = self.SCHEMA
+        self.uid = os.urandom(8).hex()  # tells history.db which colony wrote a row; not part of the physics
         self.cfg = cfg
         self.rng = np.random.default_rng(cfg["seed"])
         self.pyrng = random.Random(cfg["seed"])

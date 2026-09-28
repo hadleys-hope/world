@@ -416,6 +416,7 @@ def _sludge_rover(w: World, r: Rover):
         r.timer -= 1
         if r.timer <= 0:
             i = r.job
+            before = r.load
             r.load = min(1.0, r.load + float(w.h_sludge[i]) * 0.25)
             w.h_sludge[i] = 0.05
             finance_pay(
@@ -425,6 +426,7 @@ def _sludge_rover(w: World, r: Rover):
                 "normal_operation",
                 f"sludge collection house {i + 1}",
                 crew_house=w.crew_house.get(str(r.name), -1),
+                load=r.load - before,  # the driver is paid by the full load, a house fills about a quarter
             )
             r.state = TransportState.IDLE
     elif r.state == TransportState.TO_STORE:
