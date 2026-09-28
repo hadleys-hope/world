@@ -135,6 +135,20 @@ def _row(w: World, i: int):
 
 # ---------------------------------------------------------------- the live demo
 
+def expected_wage(cfg, workers, employer, manager, activity):
+    """The day's wage worked out from the rules, independently of households._wages."""
+    rate = cfg["wage_day"][employer] * workers * (cfg["wage_manager_mult"] if manager else 1.0)
+    act = {"mine": activity[0], "water plant": activity[1]}.get(employer)
+    if act is None:
+        return round(rate, 2)
+    idle = cfg["idle_pay_frac"]
+    return round(rate * (idle + (1 - idle) * act), 2)
+
+
+# scheduled repairs of the demo and their price from COSTS
+DEMO_REPAIRS = {"B": ["wiring"], "C": ["wiring", "aeration", "pipes"]}
+
+
 DEMO = {
     # house: (label, residents wanted, employer, opening cash)
     "A": ("A · solvent", 2, "reactor", 200.0),

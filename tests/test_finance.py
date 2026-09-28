@@ -258,6 +258,19 @@ class Households(unittest.TestCase):
         self.assertAlmostEqual(float(w.hh_month[miner, hh.EARNED]) - rate, 36 * (0.2 + 0.8 * 0.5))
         self.assertAlmostEqual(unexplained(w), 0.0, places=6)
 
+    def test_manager_houses_earn_more(self):
+        w = self.w
+        m = next(i for i in range(w.N) if w.h_type[i] == 3 and i not in w.crew_house.values())
+        w.hh_employer[m] = hh.EMPLOYERS.index("reactor")
+        close_day(w, 1)
+        c = w.cfg
+        self.assertAlmostEqual(
+            float(w.hh_month[m, hh.EARNED]), 2 * c["wage_day"]["reactor"] * c["wage_manager_mult"]
+        )
+        self.assertAlmostEqual(
+            hh.credit_limit(w, m), 2 * c["wage_day"]["reactor"] * c["wage_manager_mult"] * 30 * c["credit_limit_months"]
+        )
+
     def test_mine_flood_command_stops_the_mine(self):
         w = self.w
         info = inject(w, "mine")
