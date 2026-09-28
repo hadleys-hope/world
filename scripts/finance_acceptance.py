@@ -3,9 +3,11 @@
     python3 scripts/finance_acceptance.py --days 30 --out data/finance-demo
 
 Builds a fresh world (seed from hadleys/config.py), sets up houses A, B, C (hadleys/scenarios.py),
-simulates the given number of days with all the physics, then for every demo house replays the recorded
-inputs (wages, utility bills, repair bills, fees) through the independent finance_reference model and
-compares its daily balances with the simulation. Prints the day-by-day tables and the story checks, exits
+simulates the given number of days with all the physics, then for every demo house feeds the independent
+finance_reference model with the day's utility bills and repair bills recorded from the physics, and with
+wages, fees and the credit limit worked out from the rules and the employer's recorded activity (not taken
+from the finance code); the scheduled repairs are checked against COSTS. It compares the model's daily
+balances with the simulation. Prints the day-by-day tables and the story checks, exits
 non-zero on any difference. With --out the world is saved there, so
 
     python3 hadleys_hope.py --data data/finance-demo
@@ -23,7 +25,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from hadleys import finance_reference as ref  # noqa: E402
 from hadleys.domains import households as hh  # noqa: E402
 from hadleys.persistence import Store  # noqa: E402
-from hadleys.scenarios import _row, setup_demo, trace_events  # noqa: E402
+from hadleys.config import COSTS  # noqa: E402
+from hadleys.scenarios import DEMO, DEMO_REPAIRS, _row, expected_wage, setup_demo  # noqa: E402
 from hadleys.simulation import world_tick  # noqa: E402
 from hadleys.world import World  # noqa: E402
 
@@ -36,7 +39,11 @@ def main():
     w = World()
     houses = setup_demo(w)
     opening = {k: float(w.hh_cash[i]) for k, i in houses.items()}
-    nominal = {k: float(hh._nominal_wage(w, w.hh_employer)[i]) for k, i in houses.items()}
+    # the reference gets its inputs from the scenario and the rules, not from the finance code under test:
+    # wages from workers, wage_day and the employer's recorded activity; the credit limit from the nominal
+    # wage; the recorded utility bills (physics) as they are; the repair bills checked against COSTS
+    cfg = w.cfg
+    nominal = {k: cfg["wage_day"][DEMO[k][2]] * DEMO[k][1] for k in houses}
     tpd = w.cfg["ticks_per_day"]
     rows = {k: [] for k in houses}
     t0 = time.time()
@@ -54,7 +61,29 @@ def main():
             )
     failures = []
     for k, i in houses.items():
-        expected, model = ref.run(w.cfg, opening[k], nominal[k], trace_events(w, i))
+        events = []
+        for t, what, value in w.fin_trace[i]:
+            if what == "day":
+                wage, bill, activity = value
+                want = expected_wage(cfg, DEMO[k][1], DEMO[k][2], bool(w.h_type[i] == 3), activity)
+                if abs(want - wage) > 0.005:
+                    failures.append(f"{k}: wage {wage} at {hh.time_label(w, t)}, the rules give {want}")
+                events.append(("day", t, want, bill))
+            elif what == "repair":
+                events.append(("repair", t, value))
+            elif what == "fees":
+                events.append(("fees", t, float(cfg["sewage_fee"] + cfg["internet_fee"])))
+        billed = sorted(v for _, what, v in w.fin_trace[i] if what == "repair")
+        scheduled = sorted(float(COSTS[key][0]) for key in DEMO_REPAIRS.get(k, []))
+        missing = list(scheduled)
+        for amount in billed:
+            if amount in missing:
+                missing.remove(amount)
+        if missing:
+            failures.append(f"{k}: scheduled repairs {missing} cr were not billed (billed {billed})")
+        if len(billed) > len(scheduled):
+            print(f"{k}: {len(billed) - len(scheduled)} repair(s) on top of the scenario (random incidents): {billed}")
+        expected, model = ref.run(cfg, opening[k], nominal[k], events)
         diff = [(d + 1, a, b) for d, (a, b) in enumerate(zip(rows[k], expected)) if a != b]
         print(f"\n## {w.fin_scenario['labels'][str(i)]} (house {i + 1}, {hh.employer_name(w, i)}, {int(w.hh_workers[i])} earner(s))")
         print("| day | cash | loan principal | interest | unpaid bills | status | reference agrees |")

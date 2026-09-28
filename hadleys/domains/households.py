@@ -565,6 +565,8 @@ def households_day_close(w: World, bill):
         return services
     w.hh_last_close_day = day
     wages = _wages(w)
+    n = max(1, w.fin_act[2])
+    activity = (min(1.0, w.fin_act[0] / n), min(1.0, w.fin_act[1] / n))  # recorded for the acceptance check
     w.fin_act = [0.0, 0.0, 0]
     for i in range(w.N):
         amount = float(bill[i])
@@ -582,7 +584,7 @@ def households_day_close(w: World, bill):
                 transfer(w, "ext:company", f"house:{i}", float(wages[i]), "wage", K_WAGE)
             w.hh_month[i, EARNED] += float(wages[i])
         issue_bill(w, i, "utilities", amount, f"sector:{int(w.h_sector[i])}")
-        _trace(w, i, "day", (float(wages[i]), amount))
+        _trace(w, i, "day", (float(wages[i]), amount, activity))
         _instalments_due(w, i)
         _settle(w, i, pend)
         _borrow(w, i, pend)
