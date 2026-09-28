@@ -107,7 +107,7 @@ class Household:
 
     def borrow(self, t):
         c = self.c
-        if self.status == BANKRUPT:
+        if self.status != NORMAL:
             return
         need = self.arrears() - self.cash
         if need <= 1e-9 or any(ln["due"] > 1e-9 for ln in self.loans) or len(self.loans) >= c["loan_max_active"]:

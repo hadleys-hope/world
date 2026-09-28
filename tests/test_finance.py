@@ -256,7 +256,6 @@ class Households(unittest.TestCase):
 
     def test_bankrupt_household_cannot_borrow_or_buy_and_keeps_its_debt(self):
         w = self.w
-        c = w.cfg
         i = ordinary_house(w, 1, "mine")
         w.hh_cash[i] = 0.0
         rebase(w)

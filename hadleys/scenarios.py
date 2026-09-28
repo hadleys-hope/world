@@ -22,8 +22,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from hadleys.world import World
 
-import numpy as np
-from hadleys.config import CFG, COSTS
+from hadleys.config import CFG
 from hadleys.domains import households as hh
 
 # ---------------------------------------------------------------- ledger scenarios
@@ -101,8 +100,7 @@ def run_ledger_scenario(name: str, cfg=None):
     tpd = c["ticks_per_day"]
     i = _pick_house(w, spec["workers"])
     w.hh_employer[i] = hh.EMPLOYERS.index(spec["employer"])
-    w.hh_cash[i] = spec["cash"]
-    w.fin_baseline = hh.internal_total(w) - sum(w.fin_ext.values())
+    hh.set_opening_cash(w, i, spec["cash"])
     s = int(w.h_sector[i])
     rows = []
     for d in range(1, spec["days"] + 1):
@@ -165,10 +163,9 @@ def setup_demo(w: World):
                 break
         i = chosen[key]
         w.hh_employer[i] = hh.EMPLOYERS.index(employer)
-        w.hh_cash[i] = cash
+        hh.set_opening_cash(w, i, cash)
         w.fin_trace[i] = []
         hh.note(w, i, f"scenario {label}: {residents} earner(s) at the {employer}, opening cash {cash:.0f} cr")
-    w.fin_baseline = hh.internal_total(w) - sum(w.fin_ext.values())
     A, B, C = chosen["A"], chosen["B"], chosen["C"]
     events = [
         # day 2 06:00: the mine floods for 6 days, miners go on standby pay

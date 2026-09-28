@@ -115,7 +115,7 @@ def house_events(w: World):
             "water": ("water supply restored", "no water"),
             "net": ("network link up", "network link lost"),
             "pipes": ("pipes thawed or repaired", "pipes frozen"),
-            "burst": ("pipes repaired", "pipes burst"),
+            "burst": ("pipes burst", "pipes repaired"),  # up = burst is True
             "limit": ("power limit lifted", "power limit imposed by the grid"),
         }
         for key, (up, down) in texts.items():

@@ -84,6 +84,33 @@ function render(d) {
   document.getElementById('facts').innerHTML = [['program', d.program], ['pole', d.pole + (d.pole_online ? ' (energised)' : ' (dead)')], ['water this month', d.water_month_m3 + ' m3'], ['energy total', d.kwh_total + ' kWh'], ['appliances', d.appliances_on ? 'on' : 'switched off by the program'], ['open issues', d.issues.length ? d.issues.map(i => i.kind + ' (' + i.status + ', ' + i.cost + ' cr)').join(', ') : 'none']].map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
   document.getElementById('ctrl').innerHTML = `<div><b>${d.program}</b>${d.ctrl_age >= 0 ? ` <span class="dim">decided ${d.ctrl_age} min ago</span>` : ''}</div><div>${d.reason}</div><div class="dim">target ${d.target} C, heater ${d.heater_on ? 'on' : 'off'} (${d.heater_w} W rated, ${d.heat_w} W delivered)</div>`;
   document.getElementById('log').innerHTML = [...d.log.map(e => `<div><span class="dim">${e.t}</span> ${e.text}</div>`), ...d.events.map(e => `<div><span class="dim">${e.t}</span> <span class="warn">${e.text}</span></div>`)].join('') || '<div class="dim">nothing yet</div>';
+  if (d.finance) finance(d.finance);
+}
+const cr = v => v.toFixed(2) + ' cr';
+function finance(f) {
+  const st = f.status === 'normal' ? 'ok' : f.status === 'overdue' ? 'warn' : 'bad';
+  const m = (a, label) => `earned ${cr(a[0])}, billed ${cr(a[1])}, paid ${cr(a[2])}` + (a[3] ? `, borrowed ${cr(a[3])}` : '') + (label ? ` <span class="dim">${label}</span>` : '');
+  const np = f.next_payment;
+  const rows = f.active ? [
+    ['status', `<b class="${st}">${f.status}</b>` + (f.status === 'overdue' ? ` for ${f.overdue_days} days` : '') + (f.bankruptcies ? ` <span class="dim">(bankruptcies ${f.bankruptcies})</span>` : '') + (f.label ? ` <span class="dim">scenario ${f.label}</span>` : '')],
+    ['income', `${f.employer}, ${f.workers} earner${f.workers === 1 ? '' : 's'}, ${f.wage_day} cr a day at full work` + (f.crew ? `, drives the ${f.crew} rover (job pay)` : '')],
+    ['cash', `<b>${cr(f.cash)}</b>`],
+    ['this month', m(f.month)],
+    ['last month', m(f.prev_month)],
+    ['unpaid bills', `<span class="${f.arrears > 0 ? 'warn' : 'dim'}">${cr(f.arrears)}</span>` + (f.bills_open ? ` in ${f.bills_open} bill${f.bills_open === 1 ? '' : 's'}: ` + f.bills.map(b => `#${b.id} ${b.kind} ${b.remaining} of ${b.amount}${b.overdue ? ' <span class="bad">overdue</span>' : ''}`).join(', ') : '')],
+    ['loan balance', `<span class="${f.principal > 0 ? 'warn' : 'dim'}">${cr(f.principal)}</span>, interest accrued ${cr(f.interest)}, credit limit ${cr(f.credit_limit)}` + (f.loans_repaid ? `, ${f.loans_repaid} repaid` : '')],
+    ...f.loans.map(l => [`loan #${l.id}`, `${l.amount} cr from ${l.opened} at ${(l.rate_month * 100).toFixed(1)}% a month, instalment ${l.payment} cr, ${l.instalment} due so far` + (l.due ? `, <span class="${l.overdue ? 'bad' : 'warn'}">${l.due} cr unpaid</span>` : '')]),
+    ['next payment', np ? (np.time === 'now' ? `<span class="warn">${cr(np.amount)} now</span> (${np.what})` : `${np.time}: ${cr(np.amount)} (${np.what})`) : '<span class="dim">nothing due</span>']
+  ] : [['status', '<span class="dim">vacant: company housing, the Company pays its bills</span>']];
+  document.getElementById('fin').innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+  const hc = f.hist_cash || [],
+    hd = f.hist_debt || [];
+  spark('sparkm', hc, '#5ec07a', 0, Math.ceil(Math.max(100, ...hc)), null);
+  spark('sparkd', hd, '#e2574d', 0, Math.ceil(Math.max(100, ...hd)), null);
+  document.getElementById('ops').innerHTML = f.ledger.map(r => {
+    const amount = r.cash_sign ? `<span class="${r.cash_sign > 0 ? 'ok' : 'warn'}">${r.cash_sign > 0 ? '+' : '-'}${r.amount.toFixed(2)}</span>` : `<span class="bad">debt +${r.amount.toFixed(2)}</span>`;
+    return `<div><span class="dim">${r.time}</span> ${r.kind}${r.ref ? ' #' + r.ref : ''} ${amount} <span class="dim">cash ${r.cash.toFixed(2)}, debt ${r.debt.toFixed(2)}</span></div>`;
+  }).join('') || '<div class="dim">nothing yet</div>';
 }
 function spark(id, arr, col, lo, hi, ref) {
   const cv = document.getElementById(id),

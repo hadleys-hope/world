@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from hadleys.models import Issue
     from hadleys.world import World
 
 import numpy as np
@@ -159,7 +160,6 @@ def finance_day_close(w: World):
 
 def finance_month_close(w: World):
     c = w.cfg
-    S = w.S
     energy = w.h_meter_month * c["tariff_kwh"]
     water = w.h_water_month * c["tariff_water_m3"]
     sewage = np.full(w.N, c["sewage_fee"])

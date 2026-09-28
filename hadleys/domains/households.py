@@ -23,7 +23,8 @@ Settlement at a day close, in this order (docs/FINANCE_RU.md):
  3. the day's utility bill (energy + water) is issued,
  4. instalments that fall due are added to the loan's due amount,
  5. payments from cash: loan dues first, then bills oldest first,
- 6. a loan if bills are still open and the household may borrow,
+ 6. a loan if bills are still open and the household may borrow (not overdue, not bankrupt, no unpaid
+    instalment, fewer than loan_max_active loans, within the credit limit),
  7. status: normal -> overdue when a bill is unpaid bill_grace_days after issue or an instalment is not
     paid at its due close; overdue -> normal only when fully current (no open bill, no unpaid instalment);
     overdue bankruptcy_overdue_days in a row -> bankrupt; bankrupt -> normal once every debt is repaid,
@@ -444,11 +445,11 @@ def _settle(w: World, i: int, pend, loans_first=True):
 
 def _borrow(w: World, i: int, pend):
     c = w.cfg
-    if w.hh_status[i] == BANKRUPT:
-        return
     need = sum(b[3] for b in w.hh_bills[i]) - float(w.hh_cash[i])
-    if need <= EPS:
+    if need <= EPS or w.hh_status[i] == BANKRUPT:
         return
+    if w.hh_status[i] == OVERDUE:
+        return note(w, i, "no new credit: payments are overdue")
     loans = w.hh_loans[i]
     if any(ln["due"] > EPS for ln in loans):
         return note(w, i, "no new credit: an instalment is unpaid")
@@ -573,10 +574,10 @@ def households_day_close(w: World, bill):
         _accrue_interest(w, i)
         if wages[i] > 0:
             if w.hh_employer[i] == SERVICES:
-                transfer(w, "colony", f"house:{i}", float(wages[i]), "wage", K_WAGE, SERVICES, move_src=False)
+                transfer(w, "colony", f"house:{i}", float(wages[i]), "wage", K_WAGE, move_src=False)
                 services += float(wages[i])
             else:
-                transfer(w, "ext:company", f"house:{i}", float(wages[i]), "wage", K_WAGE, int(w.hh_employer[i]))
+                transfer(w, "ext:company", f"house:{i}", float(wages[i]), "wage", K_WAGE)
             w.hh_month[i, EARNED] += float(wages[i])
         issue_bill(w, i, "utilities", amount, f"sector:{int(w.h_sector[i])}")
         _trace(w, i, "day", (float(wages[i]), amount))
@@ -715,11 +716,20 @@ def time_label(w: World, t: int):
     return f"M{month} D{day:02d} {t // 60 % 24:02d}:{t % 60:02d}"
 
 
+def set_opening_cash(w: World, i: int, cash: float):
+    """Give household i a different opening balance (scenarios); its ledger starts again from it."""
+    w.hh_cash[i] = cash
+    w.hh_led_n[i] = 0
+    _led(w, i, K_OPEN, cash, 0)
+    w.fin_baseline = internal_total(w) - sum(w.fin_ext.values())
+
+
 def next_payment(w: World, i: int):
-    """What the household has to pay next: an overdue amount now, else the next instalment."""
-    due_now = sum(ln["due"] for ln in w.hh_loans[i]) + sum(b[3] for b in w.hh_bills[i])
+    """The next loan payment: an unpaid instalment now, else the next scheduled one. Open bills are paid from
+    cash at every day close and are shown on their own."""
+    due_now = sum(ln["due"] for ln in w.hh_loans[i])
     if due_now > 0.005:
-        return {"t": w.t, "time": "now", "amount": round(due_now, 2), "what": "unpaid instalments and bills"}
+        return {"t": w.t, "time": "now", "amount": round(due_now, 2), "what": "unpaid instalment"}
     best = None
     for ln in w.hh_loans[i]:
         amount = min(ln["payment"], ln["principal"] + ln["interest"])
