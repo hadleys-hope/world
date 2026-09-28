@@ -24,12 +24,12 @@ def houses_decide(w: World):
     on = w.h_heater_on.copy()
     on[w.h_t_in < target - 0.5] = True
     on[w.h_t_in > target + 0.5] = False
-    valve = ~w.h_burst
+    valve = ~w.h_burst | w.h_valve_stuck  # the shut-off closes a burst house, unless it is stuck
     appl = np.ones(w.N, dtype=bool)
     # external decisions override
     target = np.where(ext, w.h_ctrl_target, target)
     on = np.where(ext, w.h_ctrl_heater, on)
-    valve = np.where(ext, w.h_ctrl_valve & ~w.h_burst, valve)
+    valve = np.where(ext, (w.h_ctrl_valve & ~w.h_burst) | w.h_valve_stuck, valve)
     appl = np.where(ext, w.h_ctrl_appl, appl)
     # hard limits the grid enforces regardless of the program: heater cannot exceed the limit budget
     w.h_target = target

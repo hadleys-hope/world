@@ -5,7 +5,7 @@ from typing import Optional
 
 import json
 import os
-from hadleys.api.snapshots import bus_snapshot, house_snapshot, snapshot
+from hadleys.api.snapshots import bus_snapshot, house_snapshot, snapshot, water_json
 from hadleys.domains.attractors import attractor_snapshot
 from hadleys.domains.households import finance_snapshot
 from hadleys.domains.energy import reactor_scram
@@ -62,6 +62,11 @@ def make_handler(
                 w = w_holder["w"]
                 with w.lock:
                     body = json.dumps(snapshot(w)).encode("utf-8")
+                self._send(200, "application/json", body)
+            elif self.path.startswith("/water.json"):
+                w = w_holder["w"]
+                with w.lock:
+                    body = json.dumps(water_json(w)).encode("utf-8")
                 self._send(200, "application/json", body)
             elif self.path.startswith("/finance.json"):
                 w = w_holder["w"]

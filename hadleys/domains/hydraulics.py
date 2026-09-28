@@ -415,11 +415,71 @@ class UtilityNetwork:
         )
 
 
+WATER_ACCOUNTS = (
+    "ocean_raw",  # pumped from the ocean intake
+    "brine",  # returned to the ocean by the plant
+    "produced",  # clean water into the tank
+    "delivered",  # through the house meters
+    "leaked",  # out of burst house pipes, into the storm drains
+    "tank_clamp",  # water the tank would have gone below zero by (must stay 0)
+    "consumed",  # drunk, cooked, evaporated in the houses: does not reach the drains
+    "to_sewer",  # down the house drains into the sanitary sewer
+    "sewer_pumped",  # lifted from the sanitary sump to the western works
+    "sewer_overflow",  # spilled from the sanitary sump when it is full
+    "rain",  # liquid precipitation into the storm drains
+    "snowfall",  # precipitation stored as snow
+    "melt",  # snow melting into the storm drains
+    "storm_pumped",
+    "storm_overflow",
+)
+
+
+def water_accounts(w):
+    """Cumulative volumes (m3) of every water flow, and the stocks they started from."""
+    u = w.utilities
+    acc = {k: 0.0 for k in WATER_ACCOUNTS}
+    acc.update(
+        tank0=float(w.water_tank_m3),
+        sewer0=float(u.sewer_storage),
+        storm0=float(u.storm_storage),
+        snow0=float(u.snow_m3),
+    )
+    return acc
+
+
+def water_balance(w):
+    """Every stock change against its recorded inflows and outflows. Each residual must be 0 (to rounding):
+    water neither appears nor vanishes without an accounted cause."""
+    u, a = w.utilities, w.water_acc
+    parts = {
+        "plant": (a["ocean_raw"], a["produced"] + a["brine"], 0.0),
+        "tank": (a["produced"] + a["tank_clamp"], a["delivered"] + a["leaked"], w.water_tank_m3 - a["tank0"]),
+        "houses": (a["delivered"], a["consumed"] + a["to_sewer"], 0.0),
+        "sanitary sewer": (a["to_sewer"], a["sewer_pumped"] + a["sewer_overflow"], u.sewer_storage - a["sewer0"]),
+        "snow": (a["snowfall"], a["melt"], u.snow_m3 - a["snow0"]),
+        "storm drains": (
+            a["leaked"] + a["rain"] + a["melt"],
+            a["storm_pumped"] + a["storm_overflow"],
+            u.storm_storage - a["storm0"],
+        ),
+    }
+    out = {}
+    for name, (inflow, outflow, stock) in parts.items():
+        out[name] = {
+            "in": round(inflow, 6),
+            "out": round(outflow, 6),
+            "stock_change": round(stock, 6),
+            "residual": inflow - outflow - stock,
+        }
+    return out
+
+
 def hydraulic_step(w):
     if not hasattr(w, "utilities") or w.utilities.version != UtilityNetwork.VERSION:
         w.utilities = UtilityNetwork(w)
     u = w.utilities
     c = w.cfg
+    acc = w.water_acc
     dt = float(c["tick_seconds"])
     hour = (w.t % 1440) / 60
     diurnal = 0.5 + 0.9 * max(0, math.sin(math.pi * (hour - 5) / 16))
@@ -430,12 +490,20 @@ def hydraulic_step(w):
     w.h_water_month += use
     w.sector_water_m3 = np.bincount(w.h_sector, weights=use, minlength=w.S)
     w.water_flow_m3_h = float((use + u.leaks).sum()) / dt * 3600
-    w.water_tank_m3 = max(0, w.water_tank_m3 - float((use + u.leaks).sum()))
-    # Ninety percent return to the separate foul sewer after household use.
+    drawn = float((use + u.leaks).sum())
+    if drawn > w.water_tank_m3:  # the solver scales delivery to the tank; any float excess is recorded
+        acc["tank_clamp"] += drawn - w.water_tank_m3
+    w.water_tank_m3 = max(0, w.water_tank_m3 - drawn)
+    acc["delivered"] += float(use.sum())
+    acc["leaked"] += float(u.leaks.sum())
+    # Most of the delivered water returns to the separate foul sewer; the rest is consumed in the house.
     # Manning full-bore capacities bound each subtree. This is a lumped storage
     # approximation, not an unsteady free-surface/backwater solver.
+    drained = use * c["sewer_return_frac"]
+    acc["to_sewer"] += float(drained.sum())
+    acc["consumed"] += float(use.sum()) - float(drained.sum())
     for system, attr, inflow in [
-        (u.drainage[0], "sewer_storage", use * 0.9),
+        (u.drainage[0], "sewer_storage", drained),
         (u.drainage[1], "storm_storage", u.leaks.copy()),
     ]:
         if attr == "storm_storage":
@@ -446,9 +514,12 @@ def hydraulic_step(w):
             volume = rain * (w.N * 350) * dt / 3600
             if w.t_out <= 0:
                 u.snow_m3 += volume
+                acc["snowfall"] += volume
                 volume = 0.0
             melt = min(u.snow_m3, max(0, w.t_out) * 0.0001 * w.N * 350 * dt / 3600)
             u.snow_m3 -= melt
+            acc["rain"] += volume
+            acc["melt"] += melt
             inflow += (volume + melt) / w.N
         loads = np.zeros(len(u.nodes))
         loads[u.house_nodes] = inflow / dt
@@ -460,21 +531,31 @@ def hydraulic_step(w):
         ratio = min(1.0, min(ratios, default=1.0))
         amount = float(inflow.sum())
         queued = getattr(u, attr) + amount
-        # Lift pumps run on the same protected supply as the potable station.
-        capacity = (
-            (0.012 if attr == "sewer_storage" else 0.08) * dt
-            if w.pump_station_ok
-            else 0.0
-        )
+        # Lift pumps run on the same protected supply as the potable station; the sanitary one can also
+        # be switched off by the operator.
+        sanitary = attr == "sewer_storage"
+        running = w.pump_station_ok and (w.sewer_pump_on or not sanitary)
+        capacity = (c["sewer_lift_m3_s"] if sanitary else c["storm_lift_m3_s"]) * dt if running else 0.0
         out = min(queued, capacity, max(0, amount * ratio) + max(0, capacity - amount))
         storage = queued - out
-        overflow = max(0, storage - 200)
-        setattr(u, attr, min(storage, 200))
-        u.overflow_m3 += overflow
-        if attr == "sewer_storage":
+        cap = c["drain_storage_m3"]
+        overflow = max(0, storage - cap)
+        setattr(u, attr, min(storage, cap))
+        u.overflow_m3 += overflow  # both networks together, as before
+        if sanitary:
             u.sewer_out_m3 = out
+            acc["sewer_pumped"] += out
+            acc["sewer_overflow"] += overflow
+            if (overflow > 0) != w.sewer_spilling:
+                w.sewer_spilling = overflow > 0
+                if overflow > 0:
+                    w.log("ALARM", "Sanitary sewer sump full: sewage overflowing")
+                else:
+                    w.log("INFO", "Sanitary sewer no longer overflowing")
         else:
             u.storm_out_m3 = out
+            acc["storm_pumped"] += out
+            acc["storm_overflow"] += overflow
     w.h_sludge += np.where(
         w.h_water_ok, c["sludge_per_resident_per_tick"] * (1 + w.h_residents), 0
     )
