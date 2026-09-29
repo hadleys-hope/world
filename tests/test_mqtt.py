@@ -46,3 +46,27 @@ class MqttContractTests(unittest.TestCase):
             self.assertTrue(w.h_ext[0])
             self.assertEqual(w.h_program[0], "eco")
             self.assertEqual(w.h_target[0], json.loads(data)["target_c"])
+
+    def test_periodic_refresh_is_spread_over_ticks(self):
+        """Unchanged houses are resent every 10 ticks each, a tenth of them per tick, never all on one tick."""
+        client = MagicMock()
+        with patch("paho.mqtt.client.Client", return_value=client):
+            w = World()
+            bridge = MqttBridge(w, "localhost:1883")
+        bridge.connected = True
+        bridge.publish()  # after a connect everything goes out once
+        self.assertEqual(bridge.sent, w.N)
+        last = {}
+        for _ in range(30):
+            w.t += 1  # nothing in the houses changes
+            before = bridge.sent
+            client.publish.reset_mock()
+            bridge.publish()
+            self.assertEqual(bridge.sent - before, w.N // 10)
+            for c in client.publish.call_args_list:
+                if c.args[0].endswith("/sensors"):
+                    hid = int(c.args[0].split("/")[2])
+                    if hid in last:
+                        self.assertEqual(w.t - last[hid], 10)
+                    last[hid] = w.t
+        self.assertEqual(len(last), w.N)
