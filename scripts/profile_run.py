@@ -9,11 +9,15 @@ Fixed seed (CFG), fresh world, no MQTT, no HTTP server, one process. Measures:
   timing: tracemalloc slows allocation), pickled world size;
 - the cost of the JSON answers the browser polls: build time of snapshot() and json.dumps separately,
   and the size of /state, /house.json, /finance.json, /water.json, /attractors.json?hist=1, /bus.json;
+- persistence: save_world / load_world of world.pkl (save runs under the world lock), the hourly SQLite write,
+  the history query, and which world attributes make up the pickle;
 - the top functions by cumulative time under cProfile for a separate shorter run.
+--data DIR starts from a saved world (e.g. the 30-day one from scripts/finance_acceptance.py) instead of a fresh one.
 All numbers go to --out as JSON; a short table is printed.
 """
 
 import argparse
+import contextlib
 import cProfile
 import gc
 import io
@@ -24,6 +28,7 @@ import pstats
 import resource
 import statistics
 import sys
+import tempfile
 import time
 import tracemalloc
 
@@ -32,6 +37,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 import hadleys.simulation as sim  # noqa: E402
 from hadleys.api import snapshots  # noqa: E402
 from hadleys.domains.attractors import attractor_snapshot  # noqa: E402
+from hadleys.persistence import Store  # noqa: E402
 from hadleys.world import World  # noqa: E402
 
 STEPS = [
@@ -128,15 +134,54 @@ def json_costs(w, repeat=20):
     return out
 
 
+def persistence_costs(w, repeat=5):
+    """world.pkl save/load and the SQLite writes on a throwaway Store, plus the pickle size by world attribute."""
+    out = {}
+    with tempfile.TemporaryDirectory() as d:
+        store = Store(d)
+        save, load = [], []
+        for _ in range(repeat):
+            t0 = time.perf_counter()
+            store.save_world(w)
+            save.append((time.perf_counter() - t0) * 1000)
+            t0 = time.perf_counter()
+            with contextlib.redirect_stdout(io.StringIO()):
+                store.load_world()
+            load.append((time.perf_counter() - t0) * 1000)
+        hour = []
+        for _ in range(60):
+            t0 = time.perf_counter()
+            store.record_hour(w)
+            hour.append((time.perf_counter() - t0) * 1000)
+        t0 = time.perf_counter()
+        store.history(720)
+        hist_ms = (time.perf_counter() - t0) * 1000
+        out = {
+            "save_world_p50_ms": round(pct(save, 50), 2),
+            "save_world_max_ms": round(max(save), 2),
+            "load_world_p50_ms": round(pct(load, 50), 2),
+            "world_pkl_bytes": os.path.getsize(store.pkl),
+            "record_hour_p50_ms": round(pct(hour, 50), 3),
+            "record_hour_max_ms": round(max(hour), 3),
+            "history_720h_ms": round(hist_ms, 3),
+        }
+    parts = {k: len(pickle.dumps(v, protocol=pickle.HIGHEST_PROTOCOL)) for k, v in w.__getstate__().items()}
+    out["pickle_top_attrs_bytes"] = dict(sorted(parts.items(), key=lambda kv: -kv[1])[:10])
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=float, default=2.0)
     ap.add_argument("--profile-ticks", type=int, default=1440)
     ap.add_argument("--out", default="")
+    ap.add_argument("--data", default="", help="start from the world saved in this directory")
     args = ap.parse_args()
     ticks = int(args.days * 1440)
     gc.collect()
-    w = World()
+    w = Store(args.data).load_world() if args.data else World()
+    if w is None:
+        raise SystemExit(f"no loadable world.pkl in {args.data}")
     spent, originals = timed_steps()
     per_tick = []
     per_day = []
@@ -177,6 +222,7 @@ def main():
             "world_pickle_mb": round(len(pickle.dumps(w, protocol=pickle.HIGHEST_PROTOCOL)) / 1e6, 2),
         },
         "json": json_costs(w),
+        "persistence": persistence_costs(w),
     }
     # cProfile of a further stretch of ticks, on the same world
     pr = cProfile.Profile()
@@ -209,6 +255,8 @@ def main():
     for k, v in result["json"].items():
         print(f"| {k} | {v['build_p50_ms']} | {v['dumps_p50_ms']} | {v['bytes']} |")
     print("\n/state biggest parts (bytes):", result["json"]["/state"]["top_keys_bytes"])
+    print("\npersistence:", {k: v for k, v in result["persistence"].items() if k != "pickle_top_attrs_bytes"})
+    print("world.pkl biggest parts (bytes):", result["persistence"]["pickle_top_attrs_bytes"])
     print("\ncProfile tottime top:")
     for r in result["cprofile_tottime"]:
         print(f"  {r['tottime_s']:7.3f} s  {r['calls']:8d}  {r['function']}")
