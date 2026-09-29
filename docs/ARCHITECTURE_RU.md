@@ -21,6 +21,8 @@
 | Роверы, грузовики, мусоровозы | `hadleys/domains/transport.py` |
 | Типы и состояния транспорта | `hadleys/enums.py`; данные — `hadleys/models.py` |
 | Интернет, люди, финансы, аварии, безопасность | Одноимённые файлы в `hadleys/domains/` |
+| Деньги домохозяйств, счета, кредиты, банкротство | `hadleys/domains/households.py`; правила — `docs/FINANCE_RU.md` |
+| Финансовые сценарии A/B/C и эталонный расчёт | `hadleys/scenarios.py`, `hadleys/finance_reference.py`, `scripts/finance_acceptance.py` |
 | Данные аттракторов | `hadleys/domains/attractors.py` |
 | HTTP-маршруты, JSON-снимки, статика | `hadleys/api/` |
 | Сохранение мира и история SQLite | `hadleys/persistence.py` |

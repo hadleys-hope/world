@@ -25,6 +25,7 @@ class Issue:
     severity: str = "warning"
     started_t: int = -1
     resolved_t: int = -1
+    funded_by: str = ""  # account holding the reserved money: "sector:<k>" or "colony"
 
 
 @dataclass

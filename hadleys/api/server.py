@@ -7,11 +7,12 @@ import json
 import os
 from hadleys.api.snapshots import bus_snapshot, house_snapshot, snapshot
 from hadleys.domains.attractors import attractor_snapshot
+from hadleys.domains.households import finance_snapshot
 from hadleys.domains.energy import reactor_scram
 from hadleys.domains.driving import driver_command
 from hadleys.numerics import clamp
 from hadleys.simulation import inject, new_colony
-from hadleys.web import HTMLATTR, HTMLBUS, HTMLGRAPH, HTMLHOUSE
+from hadleys.web import HTMLATTR, HTMLBUS, HTMLFINANCE, HTMLGRAPH, HTMLHOUSE
 
 from hadleys.web import STATIC_ROOT
 from hadleys.api.static import serve_asset
@@ -62,6 +63,13 @@ def make_handler(
                 with w.lock:
                     body = json.dumps(snapshot(w)).encode("utf-8")
                 self._send(200, "application/json", body)
+            elif self.path.startswith("/finance.json"):
+                w = w_holder["w"]
+                with w.lock:
+                    body = json.dumps(finance_snapshot(w)).encode("utf-8")
+                self._send(200, "application/json", body)
+            elif self.path.startswith("/finance"):
+                self._send(200, "text/html; charset=utf-8", HTMLFINANCE.encode("utf-8"))
             elif self.path.startswith("/house.json"):
                 w = w_holder["w"]
                 try:

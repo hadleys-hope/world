@@ -6,10 +6,12 @@ from typing import Optional
 
 from collections import deque
 import math
+import os
 import numpy as np
 import random
 import threading
 from hadleys.config import CFG, COSTS
+from hadleys.domains.households import households_init
 from hadleys.domains.hydraulics import UtilityNetwork
 from hadleys.domains.transport import make_traffic
 from hadleys.models import Issue, Rover
@@ -21,6 +23,7 @@ class World:
 
     def __init__(self, cfg=CFG):
         self.schema = self.SCHEMA
+        self.uid = os.urandom(8).hex()  # tells history.db which colony wrote a row; not part of the physics
         self.cfg = cfg
         self.rng = np.random.default_rng(cfg["seed"])
         self.pyrng = random.Random(cfg["seed"])
@@ -367,6 +370,9 @@ class World:
         self.last_levy = 0.0
         self.levy_total = 0.0
         self.last_sector_transfer = 0.0
+
+        # ---- households: cash, bills, loans (domains/households.py) ----
+        households_init(self)
 
     # ---- pickling: drop the lock, recreate it on load ----
     def __getstate__(self):

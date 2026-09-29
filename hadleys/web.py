@@ -30,3 +30,6 @@ HTMLGRAPH = (
 HTMLATTR = (
     template("htmlattr.html").replace("NAVCSS", NAV_CSS).replace("NAVHTML", NAV_HTML)
 )
+HTMLFINANCE = (
+    template("htmlfinance.html").replace("NAVCSS", NAV_CSS).replace("NAVHTML", NAV_HTML)
+)
