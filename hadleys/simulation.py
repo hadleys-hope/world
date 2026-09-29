@@ -122,6 +122,28 @@ def inject(w: World, cmd: str):
         book(w, "ext:company", "colony", 50000.0, "operator grant")
         w.log("INFO", "[manual] corporation transferred 50 000 cr to the colony")
         return {"text": "50 000 cr received"}
+    elif cmd == "sewer_pump":
+        w.sewer_pump_on = not w.sewer_pump_on
+        state = "on" if w.sewer_pump_on else "off"
+        w.log("WARN" if not w.sewer_pump_on else "INFO", f"[manual] sanitary lift pump switched {state}")
+        return {"text": f"Sewage lift pump {state}", "on": w.sewer_pump_on}
+    elif cmd == "leak":
+        # a pipe bursts in a house and its shut-off valve sticks open: it leaks until the plumber comes
+        i = int(rng.integers(0, w.N))
+        w.h_burst[i] = True
+        w.h_pipes_ok[i] = False
+        w.h_valve_stuck[i] = True
+        w.open_issue(
+            "pipes_burst",
+            f"house:{i}",
+            int(w.h_sector[i]),
+            "valve failure",
+            "pipes",
+            (float(w.h_x[i]), float(w.h_y[i])),
+            "critical",
+        )
+        w.log("WARN", f"[manual] house {i + 1}: pipe burst, shut-off valve stuck open")
+        return {"x": float(w.h_x[i]), "y": float(w.h_y[i]), "text": f"House {i + 1} leaking"}
     elif cmd == "mine":
         days = c["mine_flood_days"]
         w.mine_closed_until = max(w.mine_closed_until, w.t) + days * c["ticks_per_day"]

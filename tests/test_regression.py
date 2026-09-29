@@ -34,6 +34,9 @@ class SimulationRegression(unittest.TestCase):
         self.assertEqual(households["households"], 208)
         self.assertEqual(set(value["houses"].pop("fin")), {-1, 0})
         self.assertEqual(len(value["houses"].pop("cash")), 300)
+        # Water accounts are additive; in the golden run the balance closes and the sewer pump runs.
+        self.assertTrue(value["water"].pop("sewer_pump"))
+        self.assertLess(value["water"].pop("accounts")["residual"], 1e-6)
         if value["report"]:
             self.assertEqual(value["report"].pop("households")["debtors"], 0)
         return value

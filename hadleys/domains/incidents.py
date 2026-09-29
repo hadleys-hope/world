@@ -406,6 +406,7 @@ def resolve_issue(w: World, iss: Issue, crew: Rover = None):
             w.h_burst[i] = False
             w.h_pipes_ok[i] = True
             w.h_frozen[i] = 0
+            w.h_valve_stuck[i] = False  # the plumber replaces the shut-off valve too
         else:
             w.h_wiring_ok[i] = True
     elif kind == "aeration":
