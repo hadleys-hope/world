@@ -86,7 +86,8 @@ export function updateSelectedRoute() {
   if (marker) {
     marker.visible = !!model && !!state.layers.people;
     if (marker.visible) {
-      const size = THREE.MathUtils.clamp(state.camera.position.distanceTo(model.root.position) * .003, .08, .7);
+      const distance = state.camera.position.distanceTo(model.root.getWorldPosition(new THREE.Vector3()));
+      const size = distance * 2 * Math.tan(state.camera.fov * Math.PI / 360) * 18 / Math.max(1, state.mapEl.clientHeight);
       marker.position.copy(sph(model.x, model.y, model.height + 2.05 + size / 2));
       marker.scale.set(size, size, 1);
     }
