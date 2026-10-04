@@ -174,8 +174,13 @@ def initialize_citizens(w, migrate=False):
 
 def migrate_navigation(w):
     """Upgrade preliminary routes once; later saves retain exact routes and closures."""
-    if not hasattr(w, 'navigation') or getattr(w.navigation, 'version', 0) != PedestrianGraph.version:
+    rebuild = not hasattr(w, 'navigation') or vars(w.navigation).get('version', 0) != PedestrianGraph.version
+    if rebuild:
+        closures = getattr(getattr(w, 'navigation', None), 'closed', set())
         w.navigation = PedestrianGraph(w)
+        for edge in closures:
+            if edge in w.navigation.edges:
+                w.navigation.set_closed(edge, True)
     if getattr(w, 'citizens_schedule_version', 1) < 2:
         for c in w.citizens:
             # Only redistribute the old six synchronized schedule batches.
@@ -184,6 +189,19 @@ def migrate_navigation(w):
                 c.shift_end = c.shift_start + 480
         w.citizens_schedule_version = 2
     if getattr(w, 'citizens_version', 0) >= NAVIGATION_VERSION:
+        if rebuild:
+            for c in w.citizens:
+                if not commute_enabled(w, c):
+                    continue
+                c.route_nodes, c.route_edges = [], []
+                c.navigation_revision, c.shelter_target = -1, ''
+                if c.state in ('HOME', 'AT_WORK'):
+                    node = f'home:{c.home}' if c.state == 'HOME' else f'work:{c.workplace}'
+                    c.x, c.y, c.height = w.navigation.nodes[node]
+                goal = f'home:{c.home}' if c.state in ('WALK_HOME', 'AT_WORK') else f'work:{c.workplace}'
+                if not plan_motion(w, c, goal, c.state in ('WALK_HOME', 'AT_WORK')):
+                    c.route, c.route_nodes, c.route_edges = [(c.x, c.y, c.height)], [], []
+                    c.route_length, c.progress = 0., 0.
         apply_sector_scope(w)
         return
     for c in w.citizens:

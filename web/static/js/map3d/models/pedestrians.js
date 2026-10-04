@@ -1,4 +1,4 @@
-/** The exact server graph is also the source of visible pavements and entrances. */
+/** Routes reuse the existing street plan; only entrance connectors need new paving. */
 import * as THREE from 'three';
 import { state } from '../state.js';
 import { polar, quatAt, sph } from '../geometry/planet.js';
@@ -7,20 +7,19 @@ import { Kit } from './kit.js';
 import { material } from './materials.js';
 import { clickable } from '../render/world.js';
 
-function strip(kit, a, b, width, mat, paint = false) {
+function strip(kit, a, b, width, mat) {
   const length = Math.hypot(b[0] - a[0], b[1] - a[1]);
-  const count = Math.max(1, Math.ceil(length / (paint ? .9 : 2)));
+  const count = Math.max(1, Math.ceil(length / 2));
   const point = t => sph(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t);
   for (let i = 0; i < count; i++) {
-    if (paint && i % 2) continue;
     const start = point(i / count), end = point((i + 1) / count);
     const centre = start.clone().add(end).multiplyScalar(.5);
     const forward = end.clone().sub(start).normalize();
     const right = centre.clone().normalize().cross(forward).normalize();
     const up = forward.clone().cross(right).normalize();
     const q = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(right, up, forward));
-    const thickness = paint ? .025 : .14;
-    centre.addScaledVector(up, paint ? .015 : -thickness / 2);
+    const thickness = .14;
+    centre.addScaledVector(up, -thickness / 2);
     kit.add('box', mat, centre.toArray(), [width, thickness, start.distanceTo(end) + .01], q);
   }
 }
@@ -40,8 +39,8 @@ export function buildPedestrianSector() {
   }
   for (const [id, edge] of Object.entries(graph.edges)) {
     const a = graph.nodes[edge.a], b = graph.nodes[edge.b];
-    strip(kit, a, b, edge.kind === 'crossing' ? 3 : 2.3, pavement);
-    if (edge.kind === 'crossing') strip(kit, a, b, 2.6, state.M.white, true);
+    // Existing street meshes and zebras already draw the shared road plan.
+    if (edge.kind === 'entrance') strip(kit, a, b, 2.3, pavement);
     if (id === 'entrance:workshop' || id === 'crossing:row:0:sector:0') {
       const x = (a[0] + b[0]) / 2, y = (a[1] + b[1]) / 2;
       const barrier = new THREE.Mesh(new THREE.BoxGeometry(3, 1, .2), material('npc-barrier', 0xe6684b));

@@ -1,4 +1,5 @@
 import math
+import heapq
 import pickle
 import unittest
 
@@ -6,6 +7,7 @@ from hadleys.world import World
 from hadleys.persistence import Store
 from hadleys.domains.citizens import citizens_step, route_position, update_position
 from hadleys.geometry.pedestrians import segment_hits_rectangle
+from hadleys.geometry.roads import colony_layout
 
 
 class PedestrianTests(unittest.TestCase):
@@ -18,6 +20,57 @@ class PedestrianTests(unittest.TestCase):
         self.assertTrue(segment_hits_rectangle((-10, -10), (10, 10), rectangle))
         self.assertFalse(segment_hits_rectangle((20, -10), (20, 10), rectangle))
         self.assertTrue(segment_hits_rectangle((0, 0), (1, 1), rectangle))
+
+    def test_both_banks_of_every_walkable_road_are_included(self):
+        for road in colony_layout(self.w.cfg)['roads']:
+            if road['walk']:
+                banks = {e.get('bank') for e in self.graph.edges.values() if e.get('road') == road['id']}
+                self.assertEqual(banks, {-1, 1}, road['id'])
+
+    def test_every_crossing_comes_from_existing_junction_markings(self):
+        junctions = colony_layout(self.w.cfg)['junctions']
+        self.assertEqual(len(self.graph.crossings), sum(len(j['arms']) for j in junctions))
+        for crossing in self.graph.crossings:
+            j = junctions[crossing['junction']]
+            angle = j['arms'][crossing['arm']]
+            d = 19.2 if j['mode'] == 'roundabout' else 11.2
+            e = self.graph.edges[crossing['edge']]
+            a,b = self.graph.nodes[e['a']],self.graph.nodes[e['b']]
+            self.assertAlmostEqual((a[0]+b[0])/2,j['x']+math.cos(angle)*d)
+            self.assertAlmostEqual((a[1]+b[1])/2,j['y']+math.sin(angle)*d)
+            self.assertEqual(a[2],1.05)
+
+    def test_astar_matches_independent_shortest_distances(self):
+        for closed in (False, True):
+            self.graph.set_closed('crossing:row:0:sector:0',closed)
+            for goal in ('work:workshop','work:laboratory'):
+                costs = {goal: 0.}
+                queue = [(0.,goal)]
+                while queue:
+                    cost,node = heapq.heappop(queue)
+                    if cost != costs[node]:
+                        continue
+                    for other,edge,length in self.graph.adjacency[node]:
+                        if edge in self.graph.closed:
+                            continue
+                        candidate = cost+length
+                        if candidate < costs.get(other,math.inf):
+                            costs[other]=candidate
+                            heapq.heappush(queue,(candidate,other))
+                for home in range(50):
+                    self.assertAlmostEqual(self.graph.distance(f'home:{home}',goal),costs[f'home:{home}'],places=7)
+
+    def test_graph_upgrade_keeps_active_position_and_saved_closure(self):
+        c = self.w.citizens[0]
+        c.state,c.progress = 'WALK_TO_WORK',.1
+        update_position(c)
+        position = c.x,c.y
+        self.graph.set_closed('entrance:laboratory',True)
+        del self.graph.version  # Old pickles stored only the class-level version.
+        Store.migrate(self.w)
+        self.assertEqual((c.x,c.y),position)
+        self.assertIn('entrance:laboratory',self.w.navigation.closed)
+        self.assertTrue(all(e is None or e in self.w.navigation.edges for e in c.route_edges))
 
     def test_every_home_reaches_both_real_entrances(self):
         for home in range(self.w.N):
