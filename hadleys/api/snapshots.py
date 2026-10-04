@@ -239,10 +239,12 @@ def snapshot(w: World):
         ],
         "people": [
             [round(c.x, 2), round(c.y, 2), STATES.index(c.state), c.home, c.id,
-             c.profession, c.wait_reason == "sector_lockdown"]
+             c.profession, c.wait_reason in ("sector_lockdown", "no_path"),
+             c.height, c.route, c.progress]
             for c in w.citizens if c.state in ("WALK_TO_WORK", "WALK_HOME")
         ],
         "citizens": citizen_snapshot(w),
+        "pedestrians": {"closed": sorted(w.navigation.closed), "revision": w.navigation.revision},
         "marines": (
             [
                 [
@@ -481,6 +483,7 @@ def house_geometry(w: World):
             )
         },
         "layout": colony_layout(c),
+        "pedestrians": w.navigation.geometry(),
         "junctions": traffic_junctions(c),
         "river": RIVER_PROFILE,
         "utilities": w.utilities.geometry(w),

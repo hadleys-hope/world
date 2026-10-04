@@ -717,6 +717,16 @@ input[type="checkbox"] {
   gap: 8px;
   z-index: 5;
 }
+@media (min-width: 851px) {
+  body:not(.panel-collapsed) #info { right: 360px; }
+  body:not(.panel-collapsed) #time-stop-tools,
+  body:not(.panel-collapsed) #colonist-tools { right: 360px; }
+}
+@media (max-width: 850px) {
+  body:not(.panel-collapsed) #info { display: none !important; }
+  body:not(.panel-collapsed) #time-stop-tools,
+  body:not(.panel-collapsed) #colonist-tools { display: none; }
+}
 #colonist-tools button, #colonist-tools select {
   background: #14242e;
   color: #e5efd9;

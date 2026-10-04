@@ -23,7 +23,7 @@ class CitizenTests(unittest.TestCase):
         self.assertEqual(len(profiles), 300)
         self.assertEqual(len({c['id'] for c in profiles}), 300)
         self.assertEqual({c['profession'] for c in profiles}, {'engineer', 'electrician', 'scientist'})
-        self.assertEqual({c['workplace'] for c in profiles}, {'garage', 'medlab'})
+        self.assertEqual({c['workplace'] for c in profiles}, {'workshop', 'laboratory'})
         self.assertTrue(all(0 <= c['home'] < self.w.N for c in profiles))
         self.assertEqual(profiles, citizen_snapshot(World()))
         self.assertEqual(len(snapshot(self.w)['citizens']), 300)
@@ -38,7 +38,7 @@ class CitizenTests(unittest.TestCase):
         for c in self.w.citizens:
             self.assertEqual(history[c.id], ['HOME', 'WALK_TO_WORK', 'AT_WORK', 'WALK_HOME', 'HOME'])
             self.assertEqual(c.progress, 0)
-            self.assertEqual((c.x, c.y), c.route[0])
+            self.assertEqual((c.x, c.y), c.route[0][:2])
 
     def test_arrive_by_shift_and_leave_at_end(self):
         for minute in range(430, 600):

@@ -158,6 +158,16 @@ export function initialize() {
     return r;
   };
   document.getElementById("pause").onclick = () => state.post({ cmd: "pause" });
+  document.getElementById('npc-sector').onclick = () => flyTo(...polar(32, 254), 260);
+  document.querySelectorAll('[data-pedestrian-edge]').forEach(button => {
+    button.onclick = async () => {
+      const edge = button.dataset.pedestrianEdge;
+      try {
+        const response = await state.post({ cmd: 'pedestrian_connection', edge, closed: !state.S?.pedestrians?.closed.includes(edge) });
+        if (!response.ok) toast(response.status === 403 ? 'Нужен токен управления.' : 'Не удалось изменить доступность пути.');
+      } catch { toast('Не удалось связаться с сервером.'); }
+    };
+  });
   const timeCommand = async command => {
     try {
       const response = await state.post(command);
@@ -189,7 +199,7 @@ export function initialize() {
     const model = state.colonists.get(id);
     if (model) focusSelection();
     else flyTo(profile.x, profile.y, 35);
-    state.followColonist = { id, position: model ? model.root.position.clone() : sph(profile.x, profile.y, .1) };
+    state.followColonist = { id, position: model ? model.root.position.clone() : sph(profile.x, profile.y, profile.height ?? .1) };
     document.getElementById('colonist-roster').value = String(id);
     document.getElementById('stop-colonist-follow').hidden = false;
     renderInfo();

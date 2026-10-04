@@ -13,6 +13,7 @@ import { industrialDetails } from './models/industry.js';
 import { Kit } from './models/kit.js';
 import { material } from './models/materials.js';
 import { buildNeighborhood } from './models/neighborhood.js';
+import { buildPedestrianSector } from './models/pedestrians.js';
 import { buildOcean } from './models/ocean.js';
 import { detailedPower } from './models/power.js';
 import { reactorIndustry } from './models/reactor.js';
@@ -729,6 +730,7 @@ export function build() {
   buildRoadWalks();
   streetSignals();
   junctionMarkings();
+  buildPedestrianSector();
   scatterTerrainDebris();
   applyLayers();
 }

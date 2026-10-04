@@ -5,6 +5,8 @@ export const state = {
   colonistGroup: undefined,
   colonistLastFrame: undefined,
   followColonist: null,
+  pedestrianBarriers: undefined,
+  npcRouteLine: undefined,
   ADMIN: undefined, // ui/controls
   G: undefined, // ui/controls
   S: undefined, // ui/controls

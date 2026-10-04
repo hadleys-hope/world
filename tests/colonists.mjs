@@ -37,7 +37,7 @@ const dependencies = {
 const module = new SourceTextModule(readFileSync(resolve(root, 'web/static/js/map3d/models/colonists.js'), 'utf8'));
 await module.link(name => dependencies[name]);
 await module.evaluate();
-const { createColonist, animateColonist, syncColonists, updateColonists, PROFESSIONS } = module.namespace;
+const { createColonist, animateColonist, syncColonists, updateColonists, sampleRoute, PROFESSIONS } = module.namespace;
 for (const profession of PROFESSIONS) {
   const model = createColonist(profession);
   model.root.updateMatrixWorld(true);
@@ -45,6 +45,8 @@ for (const profession of PROFESSIONS) {
   animateColonist(model, .1, true);
   assert.notEqual(model.legs[0].rotation.x, 0);
   assert.equal(model.legs[0].rotation.x, -model.legs[1].rotation.x);
+  model.root.updateMatrixWorld(true);
+  assert.ok(Math.abs(new THREE.Box3().setFromObject(model.root).min.y) < 1e-6, 'support boot remains grounded while walking');
   const phase = model.phase;
   animateColonist(model, 0, true);
   assert.equal(model.phase, phase);
@@ -65,4 +67,20 @@ assert.equal(first.x, x); assert.equal(first.phase, phase);
 syncColonists([]);
 assert.equal(state.clickables.length, 0);
 assert.equal(state.colonistGroup.children.length, 0);
+const bend = [[0, 0, 1.32], [0, 10, 1.32], [10, 10, .65]];
+assert.deepEqual(sampleRoute(bend, .25), [0, 5, 1.32]);
+const midpoint = sampleRoute(bend, .75);
+assert.deepEqual(midpoint.slice(0, 2), [5, 10]);
+assert.ok(Math.abs(midpoint[2] - .985) < 1e-10);
+state.S.paused = false;
+syncColonists([[5, 10, 1, 0, 1, 'electrician', false, .985, bend, .75]]);
+const resumed = state.colonists.get(1);
+updateColonists(1300);
+assert.equal(resumed.x, 5, 'loaded route retains progress');
+assert.equal(resumed.y, 10);
+assert.ok(Math.abs(resumed.height - .985) < 1e-10);
+syncColonists([[10, 10, 1, 0, 1, 'electrician', false, .65, bend, 1]]);
+updateColonists(1400);
+assert.equal(resumed.y, 10, 'movement follows path, without cutting the corner');
+assert.ok(resumed.x > 5 && resumed.x < 10);
 console.log(`Parsed ${checked} JS modules; imports resolve. Colonist rig, animation, identity, pause and cleanup checks passed.`);

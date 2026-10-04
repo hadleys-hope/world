@@ -75,9 +75,22 @@ export function animateColonist(model, dt, walking) {
   model.legs[1].rotation.x = -swing;
   model.arms[0].rotation.x = -swing * .7;
   model.arms[1].rotation.x = swing * .7;
-  // Lower the hip by the shortened leg length to keep the support foot grounded.
-  model.body.position.y = .88 * (Math.cos(swing) - 1);
+  // Account for the rotated boot sole so the support foot stays on the surface.
   model.body.scale.y = 1 + Math.sin(model.phase) * .003 * (1 - model.blend);
+  model.body.position.y = (.88 * (Math.cos(swing) - 1) + .215 * Math.abs(Math.sin(swing))) * model.body.scale.y;
+}
+
+export function sampleRoute(route, progress, lengths = null) {
+  lengths ||= route.slice(1).map((point, i) => Math.hypot(point[0] - route[i][0], point[1] - route[i][1]));
+  let distance = lengths.reduce((sum, length) => sum + length, 0) * progress;
+  for (let i = 0; i < lengths.length; i++) {
+    if (distance <= lengths[i] || i === lengths.length - 1) {
+      const u = lengths[i] ? Math.min(1, distance / lengths[i]) : 0;
+      return route[i].map((value, axis) => value + (route[i + 1][axis] - value) * u);
+    }
+    distance -= lengths[i];
+  }
+  return route[0];
 }
 
 export function syncColonists(people) {
@@ -92,11 +105,12 @@ export function syncColonists(people) {
     if (id == null) continue;
     active.add(id);
     let model = state.colonists.get(id);
+    const fresh = !model;
     if (!model) {
       model = createColonist(per[5] || PROFESSIONS[id % PROFESSIONS.length]);
-      Object.assign(model, { x: per[0], y: per[1], heading: 0 });
+      Object.assign(model, { x: per[0], y: per[1], height: per[7] ?? .1, heading: 0, progress: per[9] ?? 0 });
       model.phase = id * 2.4;
-      model.root.position.copy(sph(model.x, model.y, .1));
+      model.root.position.copy(sph(model.x, model.y, model.height));
       model.root.quaternion.copy(quatAt(model.x, model.y));
       model.root.traverse(o => { o.userData.click = { kind: 'person', id }; });
       state.colonistGroup.add(model.root);
@@ -104,6 +118,17 @@ export function syncColonists(people) {
       state.colonists.set(id, model);
     }
     model.targetX = per[0]; model.targetY = per[1]; model.walking = !per[6] && (per[2] === 1 || per[2] === 3);
+    model.targetProgress = per[9];
+    if (per[8]) {
+      const key = JSON.stringify(per[8]);
+      if (model.routeKey !== key) {
+        model.route = per[8];
+        model.routeLengths = model.route.slice(1).map((point, i) => Math.hypot(point[0] - model.route[i][0], point[1] - model.route[i][1]));
+        model.routeKey = key;
+        // A replanned path starts at the saved position; progress resets with it.
+        model.progress = fresh ? per[9] : per[2] === 3 ? 1 : 0;
+      }
+    }
   }
   for (const [id, model] of state.colonists) if (!active.has(id)) {
     state.colonistGroup.remove(model.root);
@@ -119,11 +144,19 @@ export function updateColonists(now) {
   state.colonistLastFrame = now;
   if (!state.colonists || state.S?.paused || !state.clock.speed) return;
   for (const model of state.colonists.values()) {
-    const dx = model.targetX - model.x, dy = model.targetY - model.y;
-    if (Math.hypot(dx, dy) > .015) model.heading = Math.atan2(dx, dy);
-    model.x = THREE.MathUtils.damp(model.x, model.targetX, 8, dt);
-    model.y = THREE.MathUtils.damp(model.y, model.targetY, 8, dt);
-    model.root.position.copy(sph(model.x, model.y, .1));
+    let x, y, height;
+    if (model.route) {
+      model.progress = THREE.MathUtils.damp(model.progress, model.targetProgress, 8, dt);
+      [x, y, height] = sampleRoute(model.route, model.progress, model.routeLengths);
+    } else {
+      x = THREE.MathUtils.damp(model.x, model.targetX, 8, dt);
+      y = THREE.MathUtils.damp(model.y, model.targetY, 8, dt);
+      height = model.height;
+    }
+    const dx = x - model.x, dy = y - model.y;
+    if (Math.hypot(dx, dy) > .001) model.heading = Math.atan2(dx, dy);
+    model.x = x; model.y = y; model.height = height;
+    model.root.position.copy(sph(model.x, model.y, height));
     model.root.quaternion.slerp(quatAt(model.x, model.y, model.heading), 1 - Math.exp(-10 * dt));
     animateColonist(model, dt, model.walking);
   }

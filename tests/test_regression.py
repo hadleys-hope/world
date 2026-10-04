@@ -27,6 +27,7 @@ class SimulationRegression(unittest.TestCase):
 
     def legacy_snapshot(self, value):
         value.pop('citizens')
+        value.pop('pedestrians')
         value.pop('pause_at')
         w = self.world
         value['people'] = [[round(float(x)), round(float(y)), int(s), int(h)]

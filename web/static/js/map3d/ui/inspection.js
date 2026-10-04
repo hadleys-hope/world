@@ -226,17 +226,25 @@ export function renderInfo() {
             ]),
       ]);
     }
+  } else if (k === 'workplace') {
+    const spec = state.G.pedestrians.workplaces[state.selected.id];
+    title = spec.name;
+    body = rows([
+      ['Sector', 1], ['Assigned residents', s.citizens.filter(c => c.workplace === state.selected.id).length],
+      ['At work', s.citizens.filter(c => c.workplace === state.selected.id && c.state === 'AT_WORK').length],
+      ['Entrance', s.pedestrians.closed.includes(`entrance:${state.selected.id}`) ? 'Closed' : 'Open'],
+    ]);
   } else if (k === "person") {
     const per = s.citizens?.find(p => p.id === state.selected.id);
     title = "Colonist";
     const time = minute => `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}`;
-    const reasons = { storm: 'Sheltering from storm', sector_lockdown: 'Sector locked down', seeking_shelter: 'Heading to shelter', outside_shift: 'Outside working hours', before_shift: 'Waiting for shift start' };
+    const reasons = { no_path: 'No accessible pedestrian route — waiting', storm: 'Sheltering from storm', sector_lockdown: 'Sector locked down', seeking_shelter: 'Heading to shelter', outside_shift: 'Outside working hours', before_shift: 'Waiting for shift start' };
     body = per ? rows([
       ['ID', per.id], ['Profession', per.profession], ['Home', `House ${per.home + 1}`],
       ['Assignment', per.workplace_name], ['Shift', `${time(per.shift_start)}–${time(per.shift_end)}`],
       ['State', per.state], ['Location', per.indoors ? 'Inside building' : 'Outside'],
       ['Destination', typeof per.destination === 'number' ? `House ${per.destination + 1}` : per.workplace_name],
-      ['Route progress (home → work)', `${Math.round(per.progress * 100)}%`],
+      ['Route progress', `${Math.round((per.state === 'WALK_HOME' ? 1 - per.progress : per.progress) * 100)}%`],
       ['Reason', reasons[per.wait_reason] || '—'],
     ]) : 'Resident not found';
   } else if (k === "substation") {

@@ -1,6 +1,7 @@
 /** render/state-sync: procedural colony viewer. */
 import { state } from "../state.js";
 import { syncColonists } from '../models/colonists.js';
+import { updatePedestrianState } from '../models/pedestrians.js';
 import { build } from "../build.js";
 import { xyNormal } from "../geometry/planet.js";
 import { setPoints } from "../geometry/objects.js";
@@ -226,6 +227,7 @@ export function onState(s, first) {
     15,
   );
   syncColonists(s.people);
+  updatePedestrianState(s);
   setPoints(state.markers.marines, s.marines, 6);
   setPoints(
     state.markers.ups,

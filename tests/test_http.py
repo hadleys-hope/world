@@ -101,7 +101,7 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(len({c['id'] for c in data['citizens']}), 300)
         self.assertEqual(data['people'], [])
         self.assertTrue(all(c['state'] == 'HOME' and c['indoors'] for c in data['citizens']))
-        self.assertEqual({c['workplace'] for c in data['citizens']}, {'garage', 'medlab'})
+        self.assertEqual({c['workplace'] for c in data['citizens']}, {'workshop', 'laboratory'})
 
     def test_path_containment(self):
         for path in [
@@ -134,3 +134,19 @@ class HTTPTests(unittest.TestCase):
             self.assertIsNone(self.world.pause_at)
         finally:
             self.world.pause_at, self.world.paused, self.world.speed = old
+
+    def test_pedestrian_closure_command_and_shared_geometry(self):
+        edge = 'entrance:workshop'
+        graph = self.world.navigation
+        try:
+            self.assertEqual(self.request('/cmd', body={'cmd': 'pedestrian_connection', 'edge': edge, 'closed': True})[0], 403)
+            self.assertEqual(self.request('/cmd', body={'cmd': 'pedestrian_connection', 'edge': edge, 'closed': True, 'token': 'test-token'})[0], 200)
+            self.assertIn(edge, json.loads(self.request('/state')[2])['pedestrians']['closed'])
+            data = json.loads(self.request('/geometry')[2])['pedestrians']
+            self.assertIn('home:0', data['nodes'])
+            self.assertIn('work:workshop', data['nodes'])
+            self.assertIn('work:laboratory', data['nodes'])
+            self.assertEqual(self.request('/cmd', body={'cmd': 'pedestrian_connection', 'edge': 'missing', 'closed': True, 'token': 'test-token'})[0], 400)
+            self.assertEqual(self.request('/cmd', body={'cmd': 'pedestrian_connection', 'edge': edge, 'closed': 'yes', 'token': 'test-token'})[0], 400)
+        finally:
+            graph.set_closed(edge, False)

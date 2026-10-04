@@ -93,6 +93,9 @@ class Store:
         if migrate_citizens:
             from hadleys.domains.citizens import initialize_citizens
             initialize_citizens(w, migrate=True)
+        else:
+            from hadleys.domains.citizens import migrate_navigation
+            migrate_navigation(w)
         fresh = World(w.cfg)
         added = ["citizens", "citizens_version"] if migrate_citizens else []
         for k, v in fresh.__dict__.items():

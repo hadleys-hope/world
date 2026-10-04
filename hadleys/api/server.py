@@ -148,7 +148,15 @@ def make_handler(
                         json.dumps(result).encode(),
                     )
                     return
-                if cmd == "pause_at":
+                if cmd == "pedestrian_connection":
+                    try:
+                        if not isinstance(req.get('closed'), bool):
+                            raise ValueError('closed must be true or false')
+                        w.navigation.set_closed(req.get('edge', ''), req['closed'])
+                    except (ValueError, TypeError) as e:
+                        self._send(400, 'application/json', json.dumps({'ok': False, 'error': str(e)}).encode())
+                        return
+                elif cmd == "pause_at":
                     try:
                         schedule_pause(w, req.get('value'))
                     except ValueError as e:
