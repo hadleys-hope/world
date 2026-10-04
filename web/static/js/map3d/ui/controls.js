@@ -112,7 +112,7 @@ export async function poll() {
         roster.replaceChildren(...s.citizens.map(c => new Option('', String(c.id))));
       }
       s.citizens.forEach((c, i) => {
-        const label = `#${c.id} · ${c.profession} · ${c.state}`;
+        const label = `#${c.id} · ${c.profession} · S${c.home_sector} · ${c.state}`;
         if (roster.options[i].text !== label) roster.options[i].text = label;
       });
       if (state.selected?.kind === 'person') roster.value = String(state.selected.id);
@@ -164,15 +164,15 @@ export function initialize() {
       const edge = button.dataset.pedestrianEdge;
       try {
         const response = await state.post({ cmd: 'pedestrian_connection', edge, closed: !state.S?.pedestrians?.closed.includes(edge) });
-        if (!response.ok) toast(response.status === 403 ? 'Нужен токен управления.' : 'Не удалось изменить доступность пути.');
-      } catch { toast('Не удалось связаться с сервером.'); }
+        if (!response.ok) toast(response.status === 403 ? 'Control token required.' : 'Could not update route access.');
+      } catch { toast('Could not reach the server.'); }
     };
   });
   const timeCommand = async command => {
     try {
       const response = await state.post(command);
-      if (!response.ok) toast(response.status === 403 ? 'Нужен токен управления.' : 'Проверьте время: формат ЧЧ:ММ.');
-    } catch { toast('Не удалось связаться с сервером.'); }
+      if (!response.ok) toast(response.status === 403 ? 'Control token required.' : 'Enter a valid time in HH:MM format.');
+    } catch { toast('Could not reach the server.'); }
   };
   document.getElementById('run-until').onclick = () => {
     const input = document.getElementById('pause-at-time');

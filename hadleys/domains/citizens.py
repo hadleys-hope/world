@@ -11,6 +11,22 @@ STATES = ("HOME", "WALK_TO_WORK", "AT_WORK", "WALK_HOME")
 NAVIGATION_VERSION = 2
 
 
+def commute_enabled(w, c):
+    return int(w.h_sector[c.home]) == 0
+
+
+def apply_sector_scope(w):
+    for c in w.citizens:
+        if not commute_enabled(w, c):
+            entry = w.navigation.nodes[f'home:{c.home}']
+            c.workplace = None
+            c.state, c.progress, c.wait_reason = 'HOME', 0., 'sector_not_enabled'
+            c.x, c.y, c.height = entry
+            c.route, c.route_nodes, c.route_edges = [entry], [], []
+            c.route_length, c.shelter_target, c.duty_day = 0., '', -1
+    w.citizens_scope_version = 1
+
+
 @dataclass
 class Citizen:
     id: int
@@ -153,6 +169,7 @@ def initialize_citizens(w, migrate=False):
     w.citizens = citizens
     w.citizens_version = NAVIGATION_VERSION
     w.citizens_schedule_version = 2
+    apply_sector_scope(w)
 
 
 def migrate_navigation(w):
@@ -167,6 +184,7 @@ def migrate_navigation(w):
                 c.shift_end = c.shift_start + 480
         w.citizens_schedule_version = 2
     if getattr(w, 'citizens_version', 0) >= NAVIGATION_VERSION:
+        apply_sector_scope(w)
         return
     for c in w.citizens:
         c.workplace = 'laboratory' if c.profession == 'scientist' else 'workshop'
@@ -181,6 +199,7 @@ def migrate_navigation(w):
             c.route, c.route_nodes, c.route_edges = [(c.x, c.y, c.height)], [], []
             c.route_length, c.progress = 0., 0.
     w.citizens_version = NAVIGATION_VERSION
+    apply_sector_scope(w)
 
 
 def citizens_step(w):
@@ -190,6 +209,9 @@ def citizens_step(w):
     speed = w.cfg.get('citizen_walk_mps', 1.3) * w.cfg['tick_seconds']
     graph = w.navigation
     for c in w.citizens:
+        if not commute_enabled(w, c):
+            c.wait_reason = 'sector_not_enabled'
+            continue
         previous = c.state
         previous_reason = c.wait_reason
         c.wait_reason = ''
@@ -264,7 +286,9 @@ def citizen_snapshot(w):
     result = []
     for c in w.citizens:
         profile = {key: value for key, value in vars(c).items() if key not in ('route', 'route_nodes', 'route_edges')}
-        profile['workplace_name'] = WORKPLACES[c.workplace]['name']
+        profile['workplace_name'] = WORKPLACES[c.workplace]['name'] if c.workplace else 'Unassigned'
+        profile['home_sector'] = int(w.h_sector[c.home]) + 1
+        profile['commute_enabled'] = commute_enabled(w, c)
         profile['destination'] = c.home if c.state in ('HOME', 'WALK_HOME') else c.workplace
         profile['indoors'] = c.state in ('HOME', 'AT_WORK')
         result.append(profile)

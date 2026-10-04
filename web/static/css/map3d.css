@@ -244,6 +244,10 @@ tr.sec:hover {
   padding: 8px 10px;
   font-size: 12px;
 }
+.resident-portrait { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; background: #172b30; border-radius: 6px; }
+.resident-portrait img { width: 100px; height: 106px; object-fit: contain; }
+.resident-portrait span { text-transform: capitalize; }
+.resident-portrait small { color: #a9b8b2; }
 #info h3 {
   margin: 0 0 6px;
   font-size: 13px;

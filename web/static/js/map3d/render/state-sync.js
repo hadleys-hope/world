@@ -564,8 +564,8 @@ export function onState(s, first) {
     const day = state.G.cfg.ticks_per_day;
     const minute = s.pause_at % day;
     const clock = `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}`;
-    stop.textContent = `Остановка ${Math.floor(s.pause_at / day) > Math.floor(s.t / day) ? 'завтра' : 'сегодня'} в ${clock}${s.paused ? ' · сейчас пауза' : ''}`;
-  } else stop.textContent = s.paused ? 'Пауза. Выберите жителя, затем продолжите на 1 мин/с.' : 'Если время уже прошло, остановка будет на следующие сутки.';
+    stop.textContent = `Pause ${Math.floor(s.pause_at / day) > Math.floor(s.t / day) ? 'tomorrow' : 'today'} at ${clock}${s.paused ? ' · paused' : ''}`;
+  } else stop.textContent = s.paused ? 'Paused. Select a resident, then resume at 1 min/s.' : 'A time that has passed schedules a pause for the next day.';
   document.getElementById("banner").innerHTML =
     `<b>${s.time}</b> &nbsp; ${e.t_out} C, wind ${e.wind} m/s${e.storm ? ' <span class="bad">STORM</span>' : ""}${e.precip === "snow" ? " snow" : ""}${e.night ? " night" : " day"}${s.paused ? ' <span class="warn">PAUSED</span>' : ""} &nbsp; ${s.speed} min/s`;
   const fin = document.getElementById("finished");

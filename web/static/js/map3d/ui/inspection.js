@@ -3,6 +3,7 @@ import { state } from "../state.js";
 import { focusPoint, focusSelection, navigationHUD } from "../camera.js";
 import { polar, sph } from "../geometry/planet.js";
 import * as THREE from "three";
+import { colonistPortrait } from './colonist-portrait.js';
 
 export function flyTo(x, y, dist) {
   if (state.drive) return;
@@ -142,7 +143,7 @@ export function houseInfo(i, short) {
 }
 
 export function personInfo(per) {
-  const st = ["at home", "walking to the hub", "at the hub", "walking home"][
+    const st = ["at home", "walking to work", "at work", "walking home"][
     per[2]
   ];
   const profession = ['Engineer', 'Electrician', 'Scientist'][per[4] % 3];
@@ -236,16 +237,19 @@ export function renderInfo() {
     ]);
   } else if (k === "person") {
     const per = s.citizens?.find(p => p.id === state.selected.id);
-    title = "Colonist";
+    title = per ? `Resident #${per.id}` : 'Resident';
     const time = minute => `${String(Math.floor(minute / 60)).padStart(2, '0')}:${String(minute % 60).padStart(2, '0')}`;
     const reasons = { no_path: 'No accessible pedestrian route — waiting', storm: 'Sheltering from storm', sector_lockdown: 'Sector locked down', seeking_shelter: 'Heading to shelter', outside_shift: 'Outside working hours', before_shift: 'Waiting for shift start' };
-    body = per ? rows([
+    body = per ? `<div class="resident-portrait"><img src="${colonistPortrait(per.profession)}" alt="${per.profession} outfit"><span>${per.profession}<br><small>Sector ${per.home_sector}</small></span></div>` + rows([
       ['ID', per.id], ['Profession', per.profession], ['Home', `House ${per.home + 1}`],
-      ['Assignment', per.workplace_name], ['Shift', `${time(per.shift_start)}–${time(per.shift_end)}`],
+      ['Assignment', per.workplace_name], ['Shift', per.commute_enabled ? `${time(per.shift_start)}–${time(per.shift_end)}` : 'Unassigned'],
+      ['Walking speed', `${state.G.cfg.citizen_walk_mps ?? 1.3} m/s`],
+      ['Equipment', { engineer: 'Helmet · tool belt · wrench', electrician: 'Safety helmet · visor · tool bag', scientist: 'Lab coat · badge · tablet' }[per.profession]],
+      ['Work travel', per.commute_enabled ? 'Enabled · Sector 1' : 'Not enabled in this sector'],
       ['State', per.state], ['Location', per.indoors ? 'Inside building' : 'Outside'],
       ['Destination', typeof per.destination === 'number' ? `House ${per.destination + 1}` : per.workplace_name],
       ['Route progress', `${Math.round((per.state === 'WALK_HOME' ? 1 - per.progress : per.progress) * 100)}%`],
-      ['Reason', reasons[per.wait_reason] || '—'],
+      ['Reason', per.wait_reason === 'sector_not_enabled' ? 'Workplaces are not enabled in this sector' : reasons[per.wait_reason] || '—'],
     ]) : 'Resident not found';
   } else if (k === "substation") {
     title = "Main substation";

@@ -101,7 +101,7 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(len({c['id'] for c in data['citizens']}), 300)
         self.assertEqual(data['people'], [])
         self.assertTrue(all(c['state'] == 'HOME' and c['indoors'] for c in data['citizens']))
-        self.assertEqual({c['workplace'] for c in data['citizens']}, {'workshop', 'laboratory'})
+        self.assertEqual({c['workplace'] for c in data['citizens']}, {'workshop', 'laboratory', None})
 
     def test_path_containment(self):
         for path in [

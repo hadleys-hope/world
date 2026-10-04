@@ -23,7 +23,8 @@ class CitizenTests(unittest.TestCase):
         self.assertEqual(len(profiles), 300)
         self.assertEqual(len({c['id'] for c in profiles}), 300)
         self.assertEqual({c['profession'] for c in profiles}, {'engineer', 'electrician', 'scientist'})
-        self.assertEqual({c['workplace'] for c in profiles}, {'workshop', 'laboratory'})
+        self.assertEqual({c['workplace'] for c in profiles}, {'workshop', 'laboratory', None})
+        self.assertEqual(sum(c['commute_enabled'] for c in profiles), 50)
         self.assertTrue(all(0 <= c['home'] < self.w.N for c in profiles))
         self.assertEqual(profiles, citizen_snapshot(World()))
         self.assertEqual(len(snapshot(self.w)['citizens']), 300)
@@ -37,6 +38,10 @@ class CitizenTests(unittest.TestCase):
                 if history[c.id][-1] != c.state:
                     history[c.id].append(c.state)
         for c in self.w.citizens:
+            if int(self.w.h_sector[c.home]) != 0:
+                self.assertEqual(history[c.id], ['HOME'])
+                self.assertIsNone(c.workplace)
+                continue
             self.assertEqual(history[c.id], ['HOME', 'WALK_TO_WORK', 'AT_WORK', 'WALK_HOME', 'HOME'])
             self.assertEqual(c.progress, 0)
             self.assertEqual((c.x, c.y), c.route[0][:2])
@@ -45,7 +50,7 @@ class CitizenTests(unittest.TestCase):
         for minute in range(430, 600):
             self.step_at(minute)
             for c in self.w.citizens:
-                if minute == c.shift_start:
+                if minute == c.shift_start and int(self.w.h_sector[c.home]) == 0:
                     self.assertEqual(c.state, 'AT_WORK')
         c = self.w.citizens[0]
         self.step_at(c.shift_end - 1)
@@ -68,6 +73,16 @@ class CitizenTests(unittest.TestCase):
         self.w.paused = False
         world_tick(self.w)
         self.assertEqual(self.w.t, tick + 1)
+
+    def test_old_other_sector_commutes_are_removed_on_load(self):
+        c = self.w.citizens[50]
+        c.state, c.workplace = 'AT_WORK', 'workshop'
+        del self.w.citizens_scope_version
+        Store.migrate(self.w)
+        self.assertEqual(c.state, 'HOME')
+        self.assertIsNone(c.workplace)
+        self.assertEqual((c.x, c.y, c.height), self.w.navigation.nodes[f'home:{c.home}'])
+        self.assertEqual(c.wait_reason, 'sector_not_enabled')
 
     def test_storm_shelter_and_resume(self):
         c = self.w.citizens[0]
@@ -111,7 +126,7 @@ class CitizenTests(unittest.TestCase):
         self.assertEqual(self.w.citizens[0].state, 'WALK_TO_WORK')
 
     def test_save_load_continues_exactly(self):
-        self.step_at(470)
+        self.step_at(478)
         self.assertTrue(any(c.state == 'WALK_TO_WORK' for c in self.w.citizens))
         with tempfile.TemporaryDirectory() as directory:
             store = Store(directory)
@@ -134,6 +149,7 @@ class CitizenTests(unittest.TestCase):
         del self.w.citizens
         del self.w.citizens_version
         self.w.w_state[3] = 1
+        self.w.w_home[3] = 3
         self.w.w_prog[3] = .4
         self.w.w_x[3], self.w.w_y[3] = 220, 110
         Store.migrate(self.w)

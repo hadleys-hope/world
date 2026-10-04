@@ -57,14 +57,23 @@ export function buildPedestrianSector() {
   state.npcRouteLine.renderOrder = 5;
   state.npcRouteLine.visible = false;
   state.world.add(state.npcRouteLine);
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = 64;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#17312d'; ctx.strokeStyle = '#5cffe2'; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(32, 56); ctx.lineTo(10, 19); ctx.lineTo(54, 19); ctx.closePath(); ctx.fill(); ctx.stroke();
+  state.npcSelectionMarker = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), depthTest: false, depthWrite: false, fog: false }));
+  state.npcSelectionMarker.renderOrder = 10;
+  state.npcSelectionMarker.visible = false;
+  state.world.add(state.npcSelectionMarker);
 }
 
 export function updatePedestrianState(snapshot) {
   const closed = new Set(snapshot.pedestrians?.closed || []);
   for (const [id, barrier] of state.pedestrianBarriers || []) barrier.visible = closed.has(id);
   document.querySelectorAll('[data-pedestrian-edge]').forEach(button => {
-    const noun = button.dataset.pedestrianEdge.startsWith('entrance:') ? 'вход мастерской' : 'переход';
-    button.textContent = `${closed.has(button.dataset.pedestrianEdge) ? 'Открыть' : 'Закрыть'} ${noun}`;
+    const noun = button.dataset.pedestrianEdge.startsWith('entrance:') ? 'workshop entrance' : 'crossing';
+    button.textContent = `${closed.has(button.dataset.pedestrianEdge) ? 'Open' : 'Close'} ${noun}`;
   });
   updateSelectedRoute();
 }
@@ -73,6 +82,15 @@ export function updateSelectedRoute() {
   const line = state.npcRouteLine;
   if (!line) return;
   const model = state.selected?.kind === 'person' ? state.colonists?.get(state.selected.id) : null;
+  const marker = state.npcSelectionMarker;
+  if (marker) {
+    marker.visible = !!model && !!state.layers.people;
+    if (marker.visible) {
+      const size = THREE.MathUtils.clamp(state.camera.position.distanceTo(model.root.position) * .003, .08, .7);
+      marker.position.copy(sph(model.x, model.y, model.height + 2.05 + size / 2));
+      marker.scale.set(size, size, 1);
+    }
+  }
   line.visible = !!model?.route && !!state.layers.people;
   if (!line.visible) return;
   const signature = `${state.selected.id}:${model.routeKey}`;

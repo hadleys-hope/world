@@ -67,11 +67,17 @@ try:
                 return metrics;
             }''')
             assert metrics['residents'] == 300 and metrics['routePoints'] > 2 and metrics['triangles'] > 1000 and metrics['routeLine'], metrics
+            wait("document.querySelector('.resident-portrait img')?.naturalWidth > 0")
+            assert page.evaluate('''async () => {
+                const { state } = await import('/static/js/map3d/state.js');
+                return state.npcSelectionMarker.visible && state.S.citizens.filter(c => c.commute_enabled).length === 50
+                    && state.S.people.every(p => state.G.houses.sector[p[3]] === 0);
+            }''')
             page.screenshot(path=str(output / 'npc-route.png'))
             page.click('#panel-toggle')
             page.click('[data-panel="places"]')
             page.click('[data-pedestrian-edge="entrance:workshop"]')
-            wait("document.querySelector('[data-pedestrian-edge=\"entrance:workshop\"]').textContent.startsWith('Открыть')")
+            wait("document.querySelector('[data-pedestrian-edge=\"entrance:workshop\"]').textContent.startsWith('Open')")
             with w.lock:
                 # The HTTP command mutates the server synchronously before its response.
                 assert 'entrance:workshop' in w.navigation.closed
@@ -86,7 +92,7 @@ try:
             page.evaluate('window.__nextFrame(performance.now());')
             page.screenshot(path=str(output / 'npc-waiting.png'))
             page.click('[data-pedestrian-edge="entrance:workshop"]')
-            wait("document.querySelector('[data-pedestrian-edge=\"entrance:workshop\"]').textContent.startsWith('Закрыть')")
+            wait("document.querySelector('[data-pedestrian-edge=\"entrance:workshop\"]').textContent.startsWith('Close')")
             with w.lock:
                 w.paused = False
                 w.t = 480
@@ -101,6 +107,10 @@ try:
                 window.__nextFrame(performance.now());
             }''')
             page.screenshot(path=str(output / 'npc-sector.png'))
+            page.select_option('#colonist-roster', '50')
+            wait("document.querySelector('#infobody').textContent.includes('Not enabled in this sector')")
+            page.evaluate('window.__nextFrame(performance.now());')
+            assert page.evaluate("async () => !(await import('/static/js/map3d/state.js')).state.npcSelectionMarker.visible")
             assert not errors, errors
             print('Browser NPC route, inspector, blocked entrance and resume checks passed:', metrics)
         except Exception:
