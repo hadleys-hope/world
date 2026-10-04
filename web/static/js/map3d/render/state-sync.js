@@ -226,7 +226,7 @@ export function onState(s, first) {
     state.flatHouses.filter((p, i) => hs.heater[i] && hs.power[i]),
     15,
   );
-  syncColonists(s.people);
+  syncColonists(s.people, s.citizens);
   updatePedestrianState(s);
   setPoints(state.markers.marines, s.marines, 6);
   setPoints(

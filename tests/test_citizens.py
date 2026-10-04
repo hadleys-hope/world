@@ -27,6 +27,7 @@ class CitizenTests(unittest.TestCase):
         self.assertTrue(all(0 <= c['home'] < self.w.N for c in profiles))
         self.assertEqual(profiles, citizen_snapshot(World()))
         self.assertEqual(len(snapshot(self.w)['citizens']), 300)
+        self.assertEqual(len({c.shift_start for c in self.w.citizens}), 26)
 
     def test_every_resident_completes_a_workday(self):
         history = {c.id: [c.state] for c in self.w.citizens}

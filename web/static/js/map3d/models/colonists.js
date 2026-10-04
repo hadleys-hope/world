@@ -93,7 +93,7 @@ export function sampleRoute(route, progress, lengths = null) {
   return route[0];
 }
 
-export function syncColonists(people) {
+export function syncColonists(people, profiles = []) {
   if (!state.colonists) {
     state.colonists = new Map();
     state.colonistGroup = new THREE.Group();
@@ -118,6 +118,8 @@ export function syncColonists(people) {
       state.colonists.set(id, model);
     }
     model.targetX = per[0]; model.targetY = per[1]; model.walking = !per[6] && (per[2] === 1 || per[2] === 3);
+    model.returning = per[2] === 3;
+    model.finishing = false;
     model.targetProgress = per[9];
     if (per[8]) {
       const key = JSON.stringify(per[8]);
@@ -126,11 +128,18 @@ export function syncColonists(people) {
         model.routeLengths = model.route.slice(1).map((point, i) => Math.hypot(point[0] - model.route[i][0], point[1] - model.route[i][1]));
         model.routeKey = key;
         // A replanned path starts at the saved position; progress resets with it.
-        model.progress = fresh ? per[9] : per[2] === 3 ? 1 : 0;
+        const wasIndoors = state.colonistPreviousIndoors?.has(id);
+        model.progress = fresh && !wasIndoors ? per[9] : per[2] === 3 ? 1 : 0;
       }
     }
   }
+  state.colonistPreviousIndoors = new Set(profiles.filter(c => c.indoors).map(c => c.id));
   for (const [id, model] of state.colonists) if (!active.has(id)) {
+    if (model.route && model.walking && !state.S?.paused) {
+      model.targetProgress = model.returning ? 0 : 1;
+      model.finishing = true;
+      continue;
+    }
     state.colonistGroup.remove(model.root);
     const index = state.clickables.indexOf(model.root);
     if (index >= 0) state.clickables.splice(index, 1);
@@ -146,7 +155,10 @@ export function updateColonists(now) {
   for (const model of state.colonists.values()) {
     let x, y, height;
     if (model.route) {
-      model.progress = THREE.MathUtils.damp(model.progress, model.targetProgress, 8, dt);
+      const length = model.routeLengths.reduce((sum, value) => sum + value, 0);
+      const speed = (state.G?.cfg?.citizen_walk_mps ?? 1.3) * (state.G?.cfg?.tick_seconds ?? 60) * state.clock.speed;
+      const delta = model.targetProgress - model.progress;
+      model.progress += Math.sign(delta) * Math.min(Math.abs(delta), speed * dt / Math.max(length, 1e-9));
       [x, y, height] = sampleRoute(model.route, model.progress, model.routeLengths);
     } else {
       x = THREE.MathUtils.damp(model.x, model.targetX, 8, dt);
@@ -158,6 +170,12 @@ export function updateColonists(now) {
     model.x = x; model.y = y; model.height = height;
     model.root.position.copy(sph(model.x, model.y, height));
     model.root.quaternion.slerp(quatAt(model.x, model.y, model.heading), 1 - Math.exp(-10 * dt));
-    animateColonist(model, dt, model.walking);
+    animateColonist(model, dt * Math.min(8, state.clock.speed), model.walking && Math.hypot(dx, dy) > .001);
+    if (model.finishing && Math.abs(model.progress - model.targetProgress) < 1e-8) {
+      state.colonistGroup.remove(model.root);
+      const index = state.clickables.indexOf(model.root);
+      if (index >= 0) state.clickables.splice(index, 1);
+      state.colonists.delete(model.root.userData.click.id);
+    }
   }
 }

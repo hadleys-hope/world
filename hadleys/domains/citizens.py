@@ -128,7 +128,7 @@ def initialize_citizens(w, migrate=False):
         home = int(w.w_home[i]) if legacy else i % w.N
         profession = PROFESSIONS[i % 3]
         workplace = 'laboratory' if profession == 'scientist' else 'workshop'
-        start = 8 * 60 + (i % 6) * 5
+        start = 8 * 60 + ((i * 17 + i // 26 * 7) % 26)
         entry = w.navigation.nodes[f'home:{home}']
         c = Citizen(i, home, profession, workplace, start, start + 480, [], 0., x=entry[0], y=entry[1], height=entry[2])
         path = w.navigation.find_path(f'home:{home}', f'work:{workplace}')
@@ -152,12 +152,20 @@ def initialize_citizens(w, migrate=False):
         citizens.append(c)
     w.citizens = citizens
     w.citizens_version = NAVIGATION_VERSION
+    w.citizens_schedule_version = 2
 
 
 def migrate_navigation(w):
     """Upgrade preliminary routes once; later saves retain exact routes and closures."""
     if not hasattr(w, 'navigation') or getattr(w.navigation, 'version', 0) != PedestrianGraph.version:
         w.navigation = PedestrianGraph(w)
+    if getattr(w, 'citizens_schedule_version', 1) < 2:
+        for c in w.citizens:
+            # Only redistribute the old six synchronized schedule batches.
+            if c.shift_start == 480 + (c.id % 6) * 5 and c.shift_end == c.shift_start + 480:
+                c.shift_start = 480 + ((c.id * 17 + c.id // 26 * 7) % 26)
+                c.shift_end = c.shift_start + 480
+        w.citizens_schedule_version = 2
     if getattr(w, 'citizens_version', 0) >= NAVIGATION_VERSION:
         return
     for c in w.citizens:
