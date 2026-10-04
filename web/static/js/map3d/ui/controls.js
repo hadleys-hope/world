@@ -6,6 +6,7 @@ import { resize } from "../render/frame.js";
 import { applyLayers, onState } from "../render/state-sync.js";
 import { flyTo, renderInfo } from "./inspection.js";
 import { renderSide } from "./telemetry.js";
+import { residentDetails } from './resident-details.js';
 
 export async function checkToken() {
   const r = await (
@@ -112,7 +113,7 @@ export async function poll() {
         roster.replaceChildren(...s.citizens.map(c => new Option('', String(c.id))));
       }
       s.citizens.forEach((c, i) => {
-        const label = `#${c.id} · ${c.profession} · S${c.home_sector} · ${c.state}`;
+        const label = `#${c.id} · ${c.profession} · S${residentDetails(c, state.G).sector ?? '?'} · ${c.state}`;
         if (roster.options[i].text !== label) roster.options[i].text = label;
       });
       if (state.selected?.kind === 'person') roster.value = String(state.selected.id);

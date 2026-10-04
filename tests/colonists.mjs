@@ -23,6 +23,13 @@ function check(dir) {
   }
 }
 check(resolve(root, 'web/static/js'));
+const detailsModule = new SourceTextModule(readFileSync(resolve(root, 'web/static/js/map3d/ui/resident-details.js'), 'utf8'));
+await detailsModule.link(() => { throw new Error('Unexpected dependency'); });
+await detailsModule.evaluate();
+const { residentDetails } = detailsModule.namespace;
+assert.deepEqual(residentDetails({ home: 12, workplace: 'workshop' }, { houses: { sector: Array(50).fill(0) } }), { sector: 1, commuteEnabled: true });
+assert.deepEqual(residentDetails({ home: 0, workplace: 'workshop' }, { houses: { sector: [1] } }), { sector: 2, commuteEnabled: false });
+assert.deepEqual(residentDetails({ home: 0, home_sector: 1, commute_enabled: false }, {}), { sector: 1, commuteEnabled: false });
 const state = { world: new THREE.Group(), clickables: [], layers: { people: true }, S: { paused: false }, clock: { speed: 1 } };
 function exportsModule(values) {
   return new SyntheticModule(Object.keys(values), function () {
