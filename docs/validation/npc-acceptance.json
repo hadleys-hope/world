@@ -1,0 +1,27 @@
+{
+  "result": "passed",
+  "profiles": 300,
+  "commuting_profiles": 50,
+  "professions": [
+    "engineer",
+    "electrician",
+    "scientist"
+  ],
+  "outfit_residents": {
+    "engineer": 0,
+    "scientist": 20,
+    "electrician": 46
+  },
+  "workday": [
+    "HOME",
+    "WALK_TO_WORK",
+    "AT_WORK",
+    "WALK_HOME",
+    "HOME"
+  ],
+  "save_load": "exact profile, route, progress and position; paused on reload",
+  "storm_resident": 46,
+  "storm": "seeking shelter, sheltered, resumed",
+  "blocked_entrance": "waiting and resuming",
+  "browser_errors": []
+}

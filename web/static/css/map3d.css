@@ -263,6 +263,10 @@ tr.sec:hover {
 #info td {
   text-align: left;
 }
+#info td:last-child {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 #alerts {
   position: absolute;
   left: 10px;

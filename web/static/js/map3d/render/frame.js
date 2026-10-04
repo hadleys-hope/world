@@ -24,7 +24,6 @@ export function resize() {
 export function frame() {
   const now = performance.now();
   updateColonists(now);
-  updateSelectedRoute();
   if (state.followColonist) {
     const follow = state.followColonist;
     const model = state.colonists?.get(follow.id);
@@ -56,6 +55,7 @@ export function frame() {
     if (u >= 1) state.flyAnim = null;
   }
   updateCameraMotion(now);
+  updateSelectedRoute();
   updateDetail();
   updateUtilityFlow(t);
   {

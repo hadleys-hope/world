@@ -7,6 +7,35 @@ export const PROFESSIONS = ['engineer', 'electrician', 'scientist'];
 const box = new THREE.BoxGeometry(1, 1, 1);
 const sphere = new THREE.SphereGeometry(1, 10, 8);
 const materials = new Map();
+const rigGeometries = new Map();
+const rigMaterial = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: .8 });
+function mergeRigidParts(parent, key) {
+  const meshes = parent.children.filter(child => child.isMesh);
+  if (!rigGeometries.has(key)) {
+    const positions = [], normals = [], colors = [];
+    for (const mesh of meshes) {
+      mesh.updateMatrix();
+      const geometry = mesh.geometry.toNonIndexed();
+      geometry.applyMatrix4(mesh.matrix);
+      const p = geometry.getAttribute('position'), n = geometry.getAttribute('normal');
+      const color = mesh.material.color;
+      for (let i = 0; i < p.count; i++) {
+        positions.push(p.getX(i), p.getY(i), p.getZ(i));
+        normals.push(n.getX(i), n.getY(i), n.getZ(i));
+        colors.push(color.r, color.g, color.b);
+      }
+      geometry.dispose();
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+    geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    geometry.computeBoundingSphere();
+    rigGeometries.set(key, geometry);
+  }
+  for (const mesh of meshes) parent.remove(mesh);
+  parent.add(new THREE.Mesh(rigGeometries.get(key), rigMaterial));
+}
 function material(color) {
   if (!materials.has(color)) materials.set(color, new THREE.MeshStandardMaterial({ color, roughness: .8 }));
   return materials.get(color);
@@ -55,13 +84,16 @@ export function createColonist(profession = 'engineer') {
     const leg = new THREE.Group(); leg.position.set(side * .135, .88, 0); body.add(leg);
     part(leg, 0x303d49, [0, -.36, 0], [.19, .72, .22]);
     part(leg, 0x20282e, [0, -.8, .045], [.22, .16, .34]);
+    mergeRigidParts(leg, 'leg');
     legs.push(leg);
     const arm = new THREE.Group(); arm.position.set(side * .32, 1.45, 0); body.add(arm);
     part(arm, suit, [0, -.23, 0], [.16, .46, .19]);
     part(arm, 0x434e53, [0, -.5, 0], [.15, .14, .17]);
+    mergeRigidParts(arm, `${profession}:arm`);
     arms.push(arm);
   }
   equipment[profession](body);
+  mergeRigidParts(body, `${profession}:body`);
   root.userData.profession = profession;
   return { root, body, legs, arms, phase: 0, blend: 0 };
 }
@@ -130,6 +162,11 @@ export function syncColonists(people, profiles = []) {
         // A replanned path starts at the saved position; progress resets with it.
         const wasIndoors = state.colonistPreviousIndoors?.has(id);
         model.progress = fresh && !wasIndoors ? per[9] : per[2] === 3 ? 1 : 0;
+        if (fresh) {
+          [model.x, model.y, model.height] = sampleRoute(model.route, model.progress, model.routeLengths);
+          model.root.position.copy(sph(model.x, model.y, model.height));
+          model.root.quaternion.copy(quatAt(model.x, model.y));
+        }
       }
     }
   }

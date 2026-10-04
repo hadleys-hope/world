@@ -1,0 +1,134 @@
+{
+  "platform": "Windows-11-10.0.26200-SP0",
+  "python": "3.14.6",
+  "viewport": [
+    1440,
+    900
+  ],
+  "server_ticks_per_case": 240,
+  "frame_samples_per_case": 12,
+  "production_commuting_residents": 50,
+  "note": "Synthetic capacity scenes. Software GPU by default. FPS is derived from measured complete-frame time, not a real laptop FPS claim.",
+  "server": {
+    "0": {
+      "npc_step": {
+        "median_ms": 0.0,
+        "mean_ms": 0.0,
+        "p95_ms": 0.0
+      },
+      "full_world_step": {
+        "median_ms": 4.256,
+        "mean_ms": 4.321,
+        "p95_ms": 4.735
+      }
+    },
+    "50": {
+      "npc_step": {
+        "median_ms": 0.051,
+        "mean_ms": 0.092,
+        "p95_ms": 0.074
+      },
+      "full_world_step": {
+        "median_ms": 4.53,
+        "mean_ms": 4.981,
+        "p95_ms": 7.584
+      }
+    },
+    "100": {
+      "npc_step": {
+        "median_ms": 0.105,
+        "mean_ms": 0.199,
+        "p95_ms": 0.212
+      },
+      "full_world_step": {
+        "median_ms": 4.762,
+        "mean_ms": 5.249,
+        "p95_ms": 7.754
+      }
+    },
+    "300": {
+      "npc_step": {
+        "median_ms": 0.313,
+        "mean_ms": 0.569,
+        "p95_ms": 0.631
+      },
+      "full_world_step": {
+        "median_ms": 4.902,
+        "mean_ms": 5.401,
+        "p95_ms": 8.242
+      }
+    }
+  },
+  "browser": {
+    "0": {
+      "visible_models": 0,
+      "frame": {
+        "median_ms": 14.899999976158142,
+        "mean_ms": 16.358333326876163,
+        "p95_ms": 33.39999997615814
+      },
+      "npc_update": {
+        "median_ms": 0,
+        "mean_ms": 0.0008333332836627961,
+        "p95_ms": 0
+      },
+      "derived_fps": 61.130922082204755,
+      "draw_calls": 2679,
+      "triangles": 13183706
+    },
+    "50": {
+      "visible_models": 50,
+      "frame": {
+        "median_ms": 23.5,
+        "mean_ms": 22.208333333333332,
+        "p95_ms": 27.400000005960464
+      },
+      "npc_update": {
+        "median_ms": 0.19999998807907104,
+        "mean_ms": 0.19166666666666668,
+        "p95_ms": 0.30000001192092896
+      },
+      "derived_fps": 45.028142589118204,
+      "draw_calls": 3317,
+      "triangles": 13301174
+    },
+    "100": {
+      "visible_models": 100,
+      "frame": {
+        "median_ms": 28.30000001192093,
+        "mean_ms": 31.200000000496704,
+        "p95_ms": 47.5
+      },
+      "npc_update": {
+        "median_ms": 0.4000000059604645,
+        "mean_ms": 0.3958333333333333,
+        "p95_ms": 0.6000000238418579
+      },
+      "derived_fps": 32.051282050771796,
+      "draw_calls": 4067,
+      "triangles": 13469938
+    },
+    "300": {
+      "visible_models": 300,
+      "frame": {
+        "median_ms": 36.599999994039536,
+        "mean_ms": 36.26666666815678,
+        "p95_ms": 43.400000005960464
+      },
+      "npc_update": {
+        "median_ms": 0.699999988079071,
+        "mean_ms": 0.758333333581686,
+        "p95_ms": 1.5
+      },
+      "derived_fps": 27.573529410631775,
+      "draw_calls": 5949,
+      "triangles": 13584044
+    }
+  },
+  "environment": {
+    "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)",
+    "bloom": true,
+    "shadows": true,
+    "browser": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/154.0.0.0 Safari/537.36"
+  }
+}
