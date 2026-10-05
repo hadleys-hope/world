@@ -12,7 +12,7 @@ import random
 import threading
 from hadleys.config import CFG, COSTS
 from hadleys.domains.households import households_init
-from hadleys.domains.hydraulics import UtilityNetwork
+from hadleys.domains.hydraulics import UtilityNetwork, water_accounts
 from hadleys.domains.transport import make_traffic
 from hadleys.models import Issue, Rover
 from hadleys.numerics import polar
@@ -250,6 +250,10 @@ class World:
         self.sector_water_m3 = np.zeros(S)
         self.water_flow_m3_h = 0.0
         self.utilities = UtilityNetwork(self)
+        self.sewer_pump_on = True  # operator switch of the sanitary lift pump (it also needs station power)
+        self.sewer_spilling = False
+        self.h_valve_stuck = np.zeros(N, dtype=bool)  # a burst house whose shut-off valve failed keeps leaking
+        self.water_acc = water_accounts(self)
 
         # ---- internet ----
         self.comms_ok = True

@@ -160,10 +160,15 @@ def rover_move(w: World, r: Rover):
             )
         )
         target_speed *= max(0.3, 1 - turn / math.pi)
+    # Only vehicles and junctions within reach can act: ahead**2 + side**2 == ox**2 + oy**2 when d >= 1e-6,
+    # so anything farther than the largest reach is skipped without changing a single result.
+    near = d >= 1e-6
     for other in w.rovers + getattr(w, "traffic", []):
         if other is r or (other.state == TransportState.IDLE and not other.route):
             continue
         ox, oy = other.x - r.x, other.y - r.y
+        if near and ox * ox + oy * oy > 650.0:  # 0 < ahead < 23 and side < 3 needs |o|**2 < 538
+            continue
         ahead = (ox * dx + oy * dy) / max(d, 1e-6)
         side = abs(ox * dy - oy * dx) / max(d, 1e-6)
         gap = (
@@ -187,6 +192,8 @@ def rover_move(w: World, r: Rover):
         if junction["mode"] == "roundabout":
             continue
         ox, oy = junction["x"] - r.x, junction["y"] - r.y
+        if near and ox * ox + oy * oy > 2116.0:  # ahead < 40 and lateral < 5 needs |o|**2 < 1625
+            continue
         ahead = (ox * dx + oy * dy) / max(d, 1e-6)
         lateral = abs(ox * dy - oy * dx) / max(d, 1e-6)
         angle = math.radians(junction["angle"])

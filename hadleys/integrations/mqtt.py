@@ -135,7 +135,10 @@ class MqttBridge:
         changed = (
             (np.abs(w.h_t_in - self.last_t_in) >= 0.2)
             | (flags != self.last_flags).any(axis=1)
-            | (w.t - self.last_pub_t >= 10)
+            | (self.last_pub_t < 0)  # never sent since (re)connect: everything at once
+            # periodic refresh in each house's own phase: every house still every 10 ticks, but 30 per tick
+            # instead of all 300 on the same tick (a synchronized burst held the world lock for ~15 ms)
+            | (np.arange(w.N) % 10 == w.t % 10)
         )
         for i in np.flatnonzero(changed):
             payload = {

@@ -9,7 +9,7 @@ import sqlite3
 from hadleys.config import CFG
 from hadleys.domains.households import internal_total
 from hadleys.domains.incidents import abandon_job
-from hadleys.domains.hydraulics import UtilityNetwork
+from hadleys.domains.hydraulics import UtilityNetwork, water_accounts
 from hadleys.world import World
 
 
@@ -121,6 +121,9 @@ class Store:
             ):
                 setattr(w.utilities, key, getattr(old, key, getattr(w.utilities, key)))
             added.append("utilities v4")
+        if "water_acc" in added:
+            # the water balance starts from the resumed tank, sumps and snow
+            w.water_acc = water_accounts(w)
         for r in w.rovers:
             for key, value in [
                 ("velocity", 0.0),

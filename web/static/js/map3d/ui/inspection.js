@@ -311,6 +311,13 @@ export function renderInfo() {
         ["sewage held", s.hydraulics.sewer_storage_m3 + " m3"],
         ["storm water held", s.hydraulics.storm_storage_m3 + " m3"],
         ["overflow total", s.hydraulics.overflow_m3 + " m3"],
+        ...(s.water.accounts ? [
+          ["sewage lift pump", s.water.sewer_pump ? "running" : '<span class="bad">stopped</span>'],
+          ["sewage pumped / spilled", `${s.water.accounts.sewer_pumped} / ${s.water.accounts.sewer_overflow} m3`],
+          ["storm pumped / spilled", `${s.water.accounts.storm_pumped} / ${s.water.accounts.storm_overflow} m3`],
+          ["used in houses (not drained)", s.water.accounts.consumed + " m3"],
+          ["water balance", s.water.accounts.residual < 1e-6 ? "closes" : '<span class="bad">off by ' + s.water.accounts.residual + " m3</span>"],
+        ] : []),
         ["flow to houses", s.water.flow_m3_h + " m3/h"],
         ["from the plant", s.water.plant_m3_h + " m3/h"],
         ["pump power", s.water.pump ? "ok" : "NONE"],
