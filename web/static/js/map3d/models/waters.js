@@ -45,45 +45,71 @@ export function buildWater({ radius, sample, res = 384, uniforms, tint = [0.05, 
   geo.setAttribute("aWarm", new THREE.Float32BufferAttribute(warm, 1));
   geo.setIndex(index);
   geo.computeBoundingSphere();
-  const mat = new THREE.ShaderMaterial({
-    transparent: true,
-    depthWrite: false,
-    side: THREE.DoubleSide,   // seen from above and, after a dive, from below
-    uniforms: { ...uniforms, uTint: { value: new THREE.Vector3(...tint) }, uIce: { value: new THREE.Vector3(...iceTint) } },
-    vertexShader: `attribute float aDepth, aLiquid, aWarm; varying float vDepth, vLiquid, vWarm; varying vec3 vW, vN;
-      void main(){ vDepth=aDepth; vLiquid=aLiquid; vWarm=aWarm; vec4 w=modelMatrix*vec4(position,1.0); vW=w.xyz;
-        vN=normalize(mat3(modelMatrix)*position); gl_Position=projectionMatrix*viewMatrix*w; }`,
-    fragmentShader: `uniform float uTime; uniform vec3 uSun, uTint, uIce; varying float vDepth, vLiquid, vWarm; varying vec3 vW, vN;
-      ${GLSL_NOISE}
-      void main(){
-        vec3 n=normalize(vN); vec3 v=normalize(cameraPosition-vW); vec3 s=normalize(uSun);
-        float day=smoothstep(-0.12,0.25,dot(n,s));
-        // ripples: two drifting noise layers bend the normal of open water
-        vec3 q=vW*0.06; float t=uTime;
-        vec3 rip=vec3(n3(q+vec3(t*0.35,0.,t*0.2))-0.5, 0.0, n3(q*1.7+vec3(-t*0.25,t*0.1,0.))-0.5);
-        vec3 nw=normalize(n+0.22*vLiquid*(rip - n*dot(rip,n)));
-        float fres=pow(1.0-max(dot(nw,v),0.0),4.0);
-        float spec=pow(max(dot(reflect(-s,nw),v),0.0),180.0)*day;
-        // open water: clear in the shallows, deep teal further out
-        float deep=smoothstep(0.5,22.0,vDepth);
-        vec3 shallow=mix(vec3(0.55,0.78,0.80), uTint*1.6, deep);
-        vec3 water=mix(shallow, uTint*0.45, deep*0.7);
-        vec3 sky=mix(vec3(0.10,0.14,0.22), vec3(0.62,0.72,0.84), day);
-        vec3 open=mix(water*(0.25+0.75*day), sky, fres*0.75) + vec3(1.0,0.96,0.88)*spec*1.6;
-        float openA=mix(0.30, 0.86, deep) + fres*0.3;
-        // ice: white-blue with dark cracks and a frosted grain
-        float crack=1.0-smoothstep(0.0,0.04,abs(n3(vW*0.045)-0.5));
-        float grain=n3(vW*0.6);
-        vec3 ice=mix(uIce*0.82, uIce, grain)*(0.18+0.82*max(dot(n,s),0.0)*day+0.06) - crack*0.18;
-        ice+=vec3(0.8,0.9,1.0)*pow(max(dot(reflect(-s,n),v),0.0),24.0)*0.25*day;
-        // steam-heated water glows faintly at night
-        vec3 col=mix(ice, open, vLiquid) + vWarm*vec3(0.95,0.55,0.25)*0.35*(1.0-day*0.7);
-        float a=mix(0.93, openA, vLiquid);
-        gl_FragColor=vec4(col, clamp(a,0.0,1.0)*smoothstep(-0.2,0.6,vDepth+0.6));
-      }`,
-  });
+  const mat = waterMaterial(uniforms, { tint, iceTint });
   const mesh = new THREE.Mesh(geo, mat);
   mesh.matrixAutoUpdate = false;
   mesh.renderOrder = 2;
   return mesh;
+}
+
+/** The one water look, for seas, lakes, rivers and ponds. Geometry attributes: aDepth (metres of water under
+ * the vertex; < 0 where the ground is higher), aLiquid (0 ice .. 1 open), aWarm (0..1). Options: floes (0..1
+ * drifting ice on open water), flow ([x, y, z] world direction the surface runs, for rivers). */
+export function waterMaterial(uniforms, { tint = [0.05, 0.32, 0.38], iceTint = [0.78, 0.86, 0.93], floes = 0, flow = null } = {}) {
+  return new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    side: THREE.DoubleSide,   // seen from above and, after a dive, from below
+    uniforms: {
+      ...uniforms,
+      uTint: { value: new THREE.Vector3(...tint) },
+      uIce: { value: new THREE.Vector3(...iceTint) },
+      uFloes: { value: floes },
+      uFlow: { value: new THREE.Vector3(...(flow || [0, 0, 0])) },
+    },
+    vertexShader: `attribute float aDepth, aLiquid, aWarm; varying float vDepth, vLiquid, vWarm; varying vec3 vW, vN;
+      void main(){ vDepth=aDepth; vLiquid=aLiquid; vWarm=aWarm; vec4 w=modelMatrix*vec4(position,1.0); vW=w.xyz;
+        vN=normalize(w.xyz - (modelMatrix*vec4(0.,0.,0.,1.)).xyz); gl_Position=projectionMatrix*viewMatrix*w; }`,
+    fragmentShader: `uniform float uTime, uFloes; uniform vec3 uSun, uTint, uIce, uFlow;
+      varying float vDepth, vLiquid, vWarm; varying vec3 vW, vN;
+      ${GLSL_NOISE}
+      void main(){
+        vec3 n=normalize(vN); vec3 v=normalize(cameraPosition-vW); vec3 s=normalize(uSun);
+        float day=smoothstep(-0.12,0.25,dot(n,s));
+        float dist=length(cameraPosition-vW);
+        // waves: three noise layers drift with the wind (or downstream on a river) and bend the normal
+        vec3 drift=uFlow*uTime*1.8;
+        vec3 q=vW*0.09-drift*0.09;
+        float e=0.35;
+        float h0=fbm(q+vec3(uTime*0.12,0.,uTime*0.07));
+        float hx=fbm(q+vec3(e,0.,0.)+vec3(uTime*0.12,0.,uTime*0.07));
+        float hz=fbm(q+vec3(0.,0.,e)+vec3(uTime*0.12,0.,uTime*0.07));
+        vec3 g=vec3(hx-h0,0.,hz-h0)/e;
+        float fine=n3(vW*0.8+vec3(uTime*0.9,0.,-uTime*0.6))-0.5;
+        vec3 nw=normalize(n+vLiquid*(0.55*(g-n*dot(g,n))+0.06*fine*vec3(1.,0.,1.))*(1.0-smoothstep(300.,2500.,dist)));
+        float fres=0.02+0.98*pow(1.0-max(dot(nw,v),0.0),5.0);
+        float spec=pow(max(dot(reflect(-s,nw),v),0.0),220.0)*day*3.0 + pow(max(dot(reflect(-s,nw),v),0.0),24.0)*day*0.12;
+        // what you see through the water: the bed fades into depth colour; shallows show light patterns
+        float clarity=exp(-max(vDepth,0.0)/5.5);
+        vec3 bed=vec3(0.42,0.46,0.42)*(0.6+0.4*n3(vW*0.25));
+        float caustic=pow(1.0-abs(n3(vW*0.35+vec3(uTime*0.4,0.,uTime*0.3))-n3(vW*0.35-vec3(uTime*0.3,0.,-uTime*0.2))),8.0);
+        vec3 through=mix(uTint*0.55, bed+caustic*0.35*day, clarity);
+        vec3 sky=mix(vec3(0.05,0.07,0.12), vec3(0.58,0.68,0.82), day);
+        vec3 open=mix(through*(0.18+0.82*day), sky, fres)+vec3(1.0,0.96,0.88)*spec;
+        // foam where the water thins out at the shore
+        float foamBand=1.0-smoothstep(0.0,0.9,vDepth);
+        float foam=foamBand*smoothstep(0.35,0.7,n3(vW*0.6+vec3(uTime*0.5,0.,0.))+foamBand*0.4);
+        open=mix(open, vec3(0.9,0.94,0.96)*(0.25+0.75*day), foam*vLiquid);
+        float openA=mix(0.25,0.92,1.0-clarity)+fres*0.4+foam*0.6;
+        // drifting ice floes on open water, and solid ice where it is frozen
+        float floe=uFloes*smoothstep(0.6,0.64,n3(vW*0.012+vec3(uTime*0.004,0.,0.)))*smoothstep(1.5,4.0,vDepth);
+        float crack=1.0-smoothstep(0.0,0.035,abs(n3(vW*0.045)-0.5));
+        vec3 ice=mix(uIce*0.8,uIce,n3(vW*0.6))*(0.16+0.84*max(dot(n,s),0.0)*day+0.06)-crack*0.16;
+        ice+=vec3(0.8,0.9,1.0)*pow(max(dot(reflect(-s,n),v),0.0),24.0)*0.25*day;
+        float frozen=max(1.0-vLiquid, floe);
+        vec3 col=mix(open, ice, frozen)+vWarm*vec3(0.95,0.55,0.25)*0.3*(1.0-day*0.7);
+        float a=mix(openA, 0.95, frozen);
+        gl_FragColor=vec4(col, clamp(a,0.0,1.0)*smoothstep(-0.3,0.05,vDepth));
+      }`,
+  });
 }
