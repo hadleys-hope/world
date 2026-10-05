@@ -137,13 +137,18 @@ function dot(x, y, r, color) {
   ctx.arc(X(x), Y(y), r, 0, Math.PI * 2);
   ctx.fill();
 }
-function text(x, y, s, color, size, align) {
+function text(x, y, s, color, size, align, dy = 0) {
   ctx.fillStyle = color || '#d9dde6';
-  ctx.font = `${size || 11}px sans-serif`;
+  ctx.font = `${size || 11}px "IBM Plex Sans Condensed", sans-serif`;
   ctx.textAlign = align || 'center';
-  ctx.fillText(s, X(x), Y(y));
+  ctx.textBaseline = 'middle';
+  ctx.fillText(s, X(x) + (align === 'left' ? 16 : 0), Y(y) + dy);   // dy: pixels, so stacked lines keep their spacing at any zoom
 }
 function box(x, y, w, h, fill, stroke, label, sub) {
+  // plant boxes shrink with the map, so neighbours never overlap in a narrow window
+  const k = Math.min(1, Math.max(0.6, sc / 0.36));
+  w *= k;
+  h *= k;
   ctx.fillStyle = fill;
   ctx.strokeStyle = stroke;
   ctx.lineWidth = 1.2;
@@ -151,8 +156,8 @@ function box(x, y, w, h, fill, stroke, label, sub) {
   if (ctx.roundRect) ctx.roundRect(X(x) - w / 2, Y(y) - h / 2, w, h, 6);else ctx.rect(X(x) - w / 2, Y(y) - h / 2, w, h);
   ctx.fill();
   ctx.stroke();
-  if (label) text(x, y - 3, label, '#e8ecf3', 11);
-  if (sub) text(x, y + 10, sub, '#9aa3b5', 10);
+  if (label) text(x, y, label, '#e8ecf3', Math.round(11 * k), 'center', sub ? -7 * k : 0);
+  if (sub) text(x, y, sub, '#9aa3b5', Math.round(10 * k), 'center', 8 * k);
 }
 function draw() {
   fit();
@@ -288,12 +293,10 @@ function draw() {
   ctx.lineWidth = 2;
   ctx.arc(X(0), Y(0), sc * HR, 0, Math.PI * 2);
   ctx.stroke();
-  text(0, -60, 'substation', S.power.substation ? '#f2c14e' : '#e2574d', 11);
-  text(0, -42, `${S.power.available_kw} / ${S.power.demand_kw} kW`, '#9aa3b5', 10);
-  text(0, -16, `UPS center ${S.power.ups_center_kwh} kWh`, '#4fd1c5', 10);
-  text(0, 4, S.net.comms ? `comms node, ${S.net.packets_per_min} pkt/min` : 'comms DOWN', S.net.comms && S.net.uplink ? '#4fd1c5' : '#e2574d', 11);
-  text(0, 24, 'ops center, pump station', '#9aa3b5', 10);
-  text(0, 44, `tank ${S.water.tank_m3} m3, ${S.water.flow_m3_h} m3/h`, waterOn ? '#5aa9ff' : '#e2574d', 10);
+  // the hub holds three short lines; the rest is in its tooltip
+  text(0, 0, `${S.power.available_kw} / ${S.power.demand_kw} kW`, S.power.substation ? '#f2c14e' : '#e2574d', 11, 'center', -14);
+  text(0, 0, S.net.comms ? `${S.net.packets_per_min} pkt/min` : 'comms down', S.net.comms && S.net.uplink ? '#4fd1c5' : '#e2574d', 10, 'center', 0);
+  text(0, 0, `tank ${Math.round(S.water.tank_m3)} m³`, waterOn ? '#5aa9ff' : '#e2574d', 10, 'center', 14);
   // reactor complex
   const rc = modeColor[S.reactor.mode] || '#888';
   const rx = c.reactor_pos[0],
@@ -314,7 +317,7 @@ function draw() {
   ctx.lineTo(X(tx), Y(ty) - 18);
   ctx.lineTo(X(tx) + 10, Y(ty) + 18);
   ctx.stroke();
-  text(tx, ty + 32, S.net.uplink ? 'uplink OK' : 'uplink LOST', S.net.uplink ? '#4fd1c5' : '#e2574d', 10);
+  text(tx, ty, S.net.uplink ? 'uplink OK' : 'uplink LOST', S.net.uplink ? '#4fd1c5' : '#e2574d', 10, 'left', 0);
   if (S.net.uplink) {
     for (let k = 0; k < 3; k++) {
       ctx.beginPath();
@@ -488,7 +491,7 @@ function renderSide(s) {
     f = s.finance;
   const kp = [['Colony budget', f.colony.toLocaleString() + ' cr', f.colony > 20000 ? 'ok' : f.colony > 0 ? 'warn' : 'bad'], ['Sector budgets', f.sectors.map(x => Math.round(x / 1000) + 'k').join(' '), Math.min(...f.sectors) > 2000 ? 'ok' : 'warn'], ['Power available', p.available_kw + ' kW', p.available_kw > p.demand_kw ? 'ok' : 'bad'], ['Power demand', p.demand_kw + ' kW' + (p.shedding ? ` / shedding L${p.shedding}` : ''), p.shedding ? 'warn' : 'ok'], ['Water tank', w.tank_m3 + ' m3, ' + w.houses_ok + '/300 houses', w.tank_m3 > 100 && w.houses_ok > 280 ? 'ok' : 'warn'], ['Pipes', `${w.frozen} frozen, ${w.burst} burst`, w.burst === 0 ? 'ok' : 'bad'], ['Internet', `${s.net.houses_online}/300 online, uplink ${s.net.uplink ? 'OK' : 'LOST'}`, s.net.uplink && s.net.houses_online > 280 ? 'ok' : 'warn'], ['Open issues', s.issues_total + (f.unpaid ? ` (unpaid ${f.unpaid} cr)` : ''), s.issues_total < 5 ? 'ok' : 'warn'], ['Month income (colony)', f.month_income.toLocaleString() + ' cr', 'dim'], ['Month expense (colony)', f.month_expense.toLocaleString() + ' cr', 'dim']];
   const wa = w.accounts;
-  if (wa) kp.push(['Sewage', `${s.hydraulics.sewer_storage_m3.toFixed(1)} m3 in the sump, pump ${w.sewer_pump ? 'running' : 'STOPPED'}, ${wa.sewer_overflow.toFixed(1)} m3 spilled`, !w.sewer_pump || s.hydraulics.sewer_storage_m3 > 150 ? 'bad' : wa.sewer_overflow > 0 ? 'warn' : 'ok'], ['Water balance', wa.residual < 1e-6 ? `closes: made ${wa.produced.toFixed(0)}, used ${wa.delivered.toFixed(0)}, leaked ${wa.leaked.toFixed(1)} m3` : `off by ${wa.residual} m3`, wa.residual < 1e-6 ? 'ok' : 'bad']);
+  if (wa) kp.push(['Sewage', `sump ${s.hydraulics.sewer_storage_m3.toFixed(1)} m³, pump ${w.sewer_pump ? 'on' : 'STOPPED'}`, !w.sewer_pump || s.hydraulics.sewer_storage_m3 > 150 ? 'bad' : wa.sewer_overflow > 0 ? 'warn' : 'ok'], ['Water balance', wa.residual < 1e-6 ? `closes: made ${wa.produced.toFixed(0)}, used ${wa.delivered.toFixed(0)}, leaked ${wa.leaked.toFixed(1)} m3` : `off by ${wa.residual} m3`, wa.residual < 1e-6 ? 'ok' : 'bad']);
   const hf = f.households;
   if (hf) kp.push(['Household debt', `${Math.round(hf.debt).toLocaleString()} cr (loans ${Math.round(hf.principal).toLocaleString()}, unpaid bills ${Math.round(hf.arrears).toLocaleString()})`, hf.bankrupt ? 'bad' : hf.overdue ? 'warn' : 'ok'], ['Debtors / overdue / bankrupt', `${hf.debtors} / ${hf.overdue} / ${hf.bankrupt} of ${hf.households}` + (hf.mine_closed ? ', mine flooded' : ''), hf.bankrupt ? 'bad' : hf.overdue || hf.mine_closed ? 'warn' : 'ok']);
   const fs = FOCUS >= 0 ? s.sectors[FOCUS] : null;
@@ -517,6 +520,16 @@ function renderSide(s) {
     document.getElementById('report').textContent = `Month ${rp.month}: owners billed ${Math.round(rp.houses_total)} cr (energy ${Math.round(rp.energy_total)}, water ${Math.round(rp.water_total)}, repairs ${Math.round(rp.repairs_total)}), ${Math.round(rp.kwh_total)} kWh\n` + `colony: income ${rp.colony_income}, expense ${rp.colony_expense}, budget ${rp.colony_budget}, unpaid ${rp.unpaid}\n` + `sector income ${rp.sector_income.join(' | ')}\nsector expense ${rp.sector_expense.join(' | ')}\n` + `expense by cause: ${Object.entries(rp.by_cause).map(([k, v]) => k + ' ' + v).join(', ')}\n` + `top houses: ${rp.top_houses.map(h => `#${h.house} (S${h.sector}) ${h.total}`).join(', ')}` + (rp.households ? `\nhouseholds: earned ${Math.round(rp.households.earned)}, paid ${Math.round(rp.households.paid)}, borrowed ${Math.round(rp.households.borrowed)} cr; debt ${Math.round(rp.households.debt)} cr, ${rp.households.debtors} debtors, ${rp.households.overdue} overdue, ${rp.households.bankrupt} bankrupt` : '');
   }
 }
+cv.addEventListener('dblclick', (ev) => {
+  if (!G) return;
+  const r = cv.getBoundingClientRect(), mx = ev.clientX - r.left, my = ev.clientY - r.top;
+  let best = -1, bd = 10;
+  for (let i = 0; i < G.houses.x.length; i++) {
+    const d = Math.hypot(X(G.houses.x[i]) - mx, Y(G.houses.y[i]) - my);
+    if (d < bd) { bd = d; best = i; }
+  }
+  if (best >= 0) location.href = `/house?id=${best + 1}`;
+});
 // A click on the map focuses the sector under it; a click outside the wall goes back to the whole colony.
 cv.addEventListener('click', (ev) => {
   if (!G || !S) return;
@@ -549,7 +562,14 @@ cv.addEventListener('mousemove', ev => {
     }
   }
   if (best < 0) {
-    tip.style.display = 'none';
+    const hub = Math.hypot(mx - X(0), my - Y(0)) < sc * G.cfg.hub_radius;
+    if (hub) {
+      const p = S.power, w = S.water;
+      tip.innerHTML = `<b>Hub</b><br>substation ${p.substation ? 'ok' : 'DOWN'}: ${p.available_kw} kW available, ${p.demand_kw} kW needed<br>UPS center ${p.ups_center} ${p.ups_center_kwh} kWh<br>comms ${S.net.comms ? S.net.packets_per_min + ' packets/min' : 'DOWN'}, uplink ${S.net.uplink ? 'ok' : 'LOST'}<br>pump station ${w.pump ? 'running' : 'stopped'}, tank ${w.tank_m3} m³, ${w.flow_m3_h} m³/h`;
+      tip.style.display = 'block';
+      tip.style.left = mx + 14 + 'px';
+      tip.style.top = my + 14 + 'px';
+    } else tip.style.display = 'none';
     return;
   }
   const h = S.houses,

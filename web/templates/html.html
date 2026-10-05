@@ -24,15 +24,10 @@ NAVHTML
     <button data-i="storm" data-i18n="storm">storm</button><button data-i="trunk" data-i18n="cut trunk">cut trunk</button><button data-i="pump" data-i18n="pump trip">pump trip</button>
     <button data-i="marines" data-i18n="marines fire">marines fire</button><button data-i="scram" data-i18n="SCRAM">SCRAM</button><button data-i="road" data-i18n="break road">break road</button><button data-i="money" data-i18n="+50k cr">+50k cr</button><button data-i="mine" data-i18n="flood mine">flood mine</button><button data-i="sewer_pump" data-i18n="sewage pump">sewage pump</button><button data-i="leak" data-i18n="pipe leak">pipe leak</button>
   </div></details>
-  <h2 data-i18n="Reactor and power">Reactor and power</h2>
-  <div id="reactor" class="card"></div>
-  <h2 data-i18n="Sectors">Sectors</h2>
-  <table id="sectors"><thead><tr><th>#</th><th data-i18n="cr">cr</th><th data-i18n="kW">kW</th><th data-i18n="avg C">avg C</th><th data-i18n="min C">min C</th><th data-i18n="pwr">pwr</th><th data-i18n="water">water</th><th data-i18n="net">net</th><th data-i18n="UPS">UPS</th><th data-i18n="waste">waste</th><th data-i18n="san">san</th><th data-i18n="gate">gate</th><th data-i18n="road">road</th></tr></thead><tbody></tbody></table>
-  <h2><span data-i18n="Open issues">Open issues</span> <span id="nissues" class="dim"></span></h2>
-  <div id="issues" class="dim" style="font-size:11px;max-height:120px;overflow-y:auto"></div>
-  <h2 data-i18n="Events">Events</h2>
-  <div id="log"></div>
-  <h2 data-i18n="Last monthly report">Last monthly report</h2>
-  <pre id="report" data-i18n="no month closed yet">no month closed yet</pre>
+  <section class="card"><h2 data-i18n="Reactor and power">Reactor and power</h2><div id="reactor"></div></section>
+  <section class="card"><h2 data-i18n="Sectors">Sectors</h2><div class="scroll-x"><table id="sectors"><thead><tr><th>#</th><th data-i18n="cr">cr</th><th data-i18n="kW">kW</th><th data-i18n="avg C">avg C</th><th data-i18n="min C">min C</th><th data-i18n="pwr">pwr</th><th data-i18n="water">water</th><th data-i18n="net">net</th><th data-i18n="UPS">UPS</th><th data-i18n="waste">waste</th><th data-i18n="san">san</th><th data-i18n="gate">gate</th><th data-i18n="road">road</th></tr></thead><tbody></tbody></table></div></section>
+  <details class="card"><summary><span data-i18n="Open issues">Open issues</span> <span id="nissues" class="dim"></span></summary><div id="issues" class="dim" style="font-size:11px;max-height:120px;overflow-y:auto"></div></details>
+  <section class="card"><h2 data-i18n="Events">Events</h2><div id="log"></div></section>
+  <details class="card"><summary data-i18n="Last monthly report">Last monthly report</summary><pre id="report" data-i18n="no month closed yet">no month closed yet</pre></details>
 </div>
 <script src="/static/js/i18n.js"></script><script src="/static/js/pages/map.js"></script></body></html>
