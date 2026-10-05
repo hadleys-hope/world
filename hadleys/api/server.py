@@ -5,6 +5,7 @@ from typing import Optional
 
 import json
 import os
+from http.server import ThreadingHTTPServer
 from hadleys.api.snapshots import bus_snapshot, house_snapshot, snapshot, water_json
 from hadleys.domains.attractors import attractor_snapshot
 from hadleys.domains.households import finance_snapshot
@@ -16,6 +17,16 @@ from hadleys.web import HTMLATTR, HTMLBUS, HTMLFINANCE, HTMLGRAPH, HTMLHOUSE
 
 from hadleys.web import STATIC_ROOT
 from hadleys.api.static import serve_asset
+
+
+class HttpServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer with a listen backlog that fits the 3D view.
+
+    Behind Caddy the browser's ~60 module requests arrive as ~60 simultaneous upstream connections. The default
+    backlog of 5 overflowed, the kernel dropped the rest and they came back after 1 s, 3 s, 7 s.
+    """
+
+    request_queue_size = 128
 
 
 def make_handler(

@@ -7,7 +7,7 @@ import os
 import signal
 import threading
 import time
-from hadleys.api.server import make_handler
+from hadleys.api.server import HttpServer, make_handler
 from hadleys.api.snapshots import house_geometry, snapshot
 from hadleys.config import CFG
 from hadleys.integrations.mqtt import MqttBridge
@@ -19,7 +19,6 @@ from hadleys.world import World
 
 def main():
     import argparse
-    from http.server import ThreadingHTTPServer
 
     ap = argparse.ArgumentParser(description="Hadley's Hope colony simulation")
     ap.add_argument(
@@ -148,7 +147,7 @@ def main():
     srv = None
     for attempt in range(30):
         try:
-            srv = ThreadingHTTPServer(("0.0.0.0", args.port), handler)
+            srv = HttpServer(("0.0.0.0", args.port), handler)
             break
         except OSError as e:
             if attempt == 0:

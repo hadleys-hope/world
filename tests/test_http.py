@@ -1,12 +1,12 @@
 import gzip
 import http.client
-from http.server import ThreadingHTTPServer
 import json
 from pathlib import Path
 import threading
+import time
 import unittest
 from hadleys.world import World
-from hadleys.api.server import make_handler
+from hadleys.api.server import HttpServer, make_handler
 from hadleys.api.snapshots import house_geometry
 from hadleys.web import ROOT, HTML, HTML3D
 
@@ -17,7 +17,7 @@ class HTTPTests(unittest.TestCase):
         w = World()
         w.paused = True
         cls.world = w
-        cls.server = ThreadingHTTPServer(
+        cls.server = HttpServer(
             ("127.0.0.1", 0),
             make_handler(
                 {"w": w},
@@ -74,6 +74,28 @@ class HTTPTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 json.loads(body)
                 self.assertEqual(headers["Cache-Control"], "no-store")
+
+    def test_burst_of_module_requests_is_not_delayed(self):
+        # Behind Caddy the 3D view opens ~60 upstream connections at once; with the default backlog of 5 the
+        # kernel dropped most of them and they came back after a 1 s retransmit.
+        results, latencies = [], []
+
+        def fetch():
+            started = time.monotonic()
+            c = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=5)
+            c.request("GET", "/static/js/map3d/main.js")
+            r = c.getresponse()
+            r.read()
+            results.append(r.status)
+            latencies.append(time.monotonic() - started)
+
+        threads = [threading.Thread(target=fetch) for _ in range(60)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(results, [200] * 60)
+        self.assertLess(max(latencies), 0.9)
 
     def test_static_gzip_conditional_cache_and_mime(self):
         for path, mime in [
