@@ -53,6 +53,15 @@ export function frame() {
     state.sun.intensity = 0.8 + 1.6 * dl;
     state.sun.color.setHSL(0.08, 0.6, 0.55 + 0.25 * dl);
     state.planetMat.uniforms.uSun.value.copy(state.sun.position).normalize();
+    // The shadow pass draws every shadow caster a second time. The sun moves a few degrees per second of
+    // simulated time, so the shadow map is redrawn five times a second instead of every frame.
+    if (state.renderer.shadowMap.enabled) {
+      state.renderer.shadowMap.autoUpdate = false;
+      if (!state.shadowAt || now - state.shadowAt > 200) {
+        state.renderer.shadowMap.needsUpdate = true;
+        state.shadowAt = now;
+      }
+    }
     state.planetMat.uniforms.uTime.value = t;
     const wantFog =
       state.activeBody !== 2 || state.systemView || surfaceClearance() > 2200
