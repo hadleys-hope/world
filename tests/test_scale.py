@@ -33,6 +33,14 @@ class ColonySize(unittest.TestCase):
         self.assertGreater(int(w.h_water_ok.sum()), 700)
 
 
+class CompactGeometry(unittest.TestCase):
+    def test_floats_are_cut_to_six_significant_digits(self):
+        from hadleys.api.snapshots import compact_floats
+
+        out = compact_floats({"x": -68.75625753997895, "p": [[1650.123456789, 4.5e-05]], "n": 3, "s": "a", "b": True})
+        self.assertEqual(out, {"x": -68.7563, "p": [[1650.12, 4.5e-05]], "n": 3, "s": "a", "b": True})
+
+
 class TreeSums(unittest.TestCase):
     def test_prefix_sums_match_level_by_level(self):
         u = World().utilities

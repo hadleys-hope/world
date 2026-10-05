@@ -475,6 +475,21 @@ def house_snapshot(w: World, i: int):
     }
 
 
+def compact_floats(value, digits=6):
+    """The same structure with every float cut to `digits` significant digits.
+
+    The geometry is drawn, not computed with: six digits are 0.1 mm at 1 km. Python writes floats with all 17
+    digits, which made the pipe and drain geometry of a 5000-house colony 16 MB of JSON.
+    """
+    if isinstance(value, float):
+        return float(f"{value:.{digits}g}")
+    if isinstance(value, dict):
+        return {k: compact_floats(v, digits) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [compact_floats(v, digits) for v in value]
+    return value
+
+
 def house_geometry(w: World):
     c = w.cfg
     return {

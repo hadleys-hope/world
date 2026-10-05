@@ -8,7 +8,7 @@ import signal
 import threading
 import time
 from hadleys.api.server import HttpServer, make_handler
-from hadleys.api.snapshots import house_geometry, snapshot
+from hadleys.api.snapshots import compact_floats, house_geometry, snapshot
 from hadleys.config import CFG
 from hadleys.integrations.mqtt import MqttBridge
 from hadleys.persistence import Store
@@ -138,7 +138,7 @@ def main():
     handler = make_handler(
         holder,
         HTML,
-        json.dumps(house_geometry(w)),
+        json.dumps(compact_floats(house_geometry(w))),
         store,
         admin_token,
         html3d,
