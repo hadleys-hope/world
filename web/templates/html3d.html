@@ -5,26 +5,42 @@
 <script type="importmap">{"imports":{"three":"__THREE_BASE__build/three.module.js","three/addons/":"__THREE_BASE__examples/jsm/"}}</script>
 <link rel="stylesheet" href="/static/css/navigation.css">
 <link rel="stylesheet" href="/static/css/map3d.css">
+<link rel="stylesheet" href="/static/css/hud.css">
 </head>
-<body class="panel-collapsed">
-<header id="commandbar">
- <div class="brand"><span class="brand-mark" aria-hidden="true">HH</span><div><strong>HADLEY'S HOPE</strong><small>LV–426 · COLONY OPERATIONS</small></div></div>
- <nav class="main-nav" aria-label="Main navigation"><a href="/" aria-current="page">3D map</a><a href="/flat">Map</a><a href="/attractors" class="attr-link">Attractors</a><a href="/graph">Systems</a><a href="/bus">Controllers</a><a href="/house">House</a><a href="/finance">Finance</a></nav>
- <div class="transport"><span id="time"></span><button id="pause" title="Pause or resume simulation">Pause</button><label for="speed">Speed</label><input type="range" id="speed" min="0" max="100" value="45"><span id="speedv"></span><button id="panel-toggle" aria-expanded="false" aria-controls="side" title="Show or hide management panel">M · Console</button></div>
-</header>
+<body class="panel-collapsed offline" data-page="3d">
+NAVHTML
 <div id="map">
- <div id="hud-stack">
  <div id="banner" role="status">Connecting to colony…</div>
- <div id="navigation-deck" aria-label="Planet navigation"><button data-planet="-1">0 · SYSTEM</button><button data-planet="0">1 · HEPHAESTUS</button><button data-planet="1">2 · RUSSET</button><button data-planet="2" aria-pressed="true">3 · ACHERON</button><button data-planet="3">4 · NIX</button><button id="camera-toggle"><span id="camera-mode">PLANET ORBIT</span><span id="camera-shortcut"> · SHIFT</span></button></div>
- <div id="camera-strip"><span id="focus-world">ACHERON · LV–426</span><span id="flight-controls" hidden><button id="slower-flight" aria-label="Slower flight">−</button><span id="flight-speed">12 m/s</span><button id="faster-flight" aria-label="Faster flight">+</button></span></div>
- <div id="alerts" role="status"></div>
+ <div id="controls-strip" class="hud-glass">
+  <button id="camera-toggle" title="Switch between orbit and free flight (Shift)"><span id="camera-mode">PLANET ORBIT</span><span id="camera-shortcut" hidden></span></button>
+  <span><kbd>Shift</kbd> <span data-i18n="fly">fly</span></span><span><kbd>WASD</kbd> <span data-i18n="move">move</span></span><span><kbd>Scroll</kbd> <span data-i18n="zoom">zoom</span></span><span><kbd>F</kbd> <span data-i18n="inspect">inspect</span></span>
+  <span id="flight-controls" hidden><button id="slower-flight" aria-label="Slower flight">−</button><span id="flight-speed">12 m/s</span><button id="faster-flight" aria-label="Faster flight">+</button></span>
+  <button id="help-toggle" aria-label="All controls" aria-expanded="false" aria-controls="help-sheet">?</button>
  </div>
- <div id="hint">DRAG orbit · PINCH zoom · SHIFT toggle free flight · WASD fly · F inspect · M console</div>
+ <section id="help-sheet" class="hud-glass" aria-label="All controls" hidden>
+  <div class="help-head"><span id="focus-world">ACHERON · LV–426</span><span id="hint"></span></div>
+  <div class="help-grid">
+   <div><h3 data-i18n="Look around">Look around</h3><p><span><kbd>Drag</kbd></span><span data-i18n="orbit">orbit</span></p><p><span><kbd>Scroll</kbd></span><span data-i18n="zoom in and out">zoom in and out</span></p><p><span><kbd>0</kbd></span><span data-i18n="whole solar system">whole solar system</span></p><p><span><kbd>1</kbd> <kbd>4</kbd></span><span data-i18n="jump to a planet">jump to a planet</span></p></div>
+   <div><h3 data-i18n="Fly">Fly</h3><p><span><kbd>Shift</kbd></span><span data-i18n="free flight on / off">free flight on / off</span></p><p><span><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></span><span data-i18n="move">move</span></p><p><span><kbd>Q</kbd> <kbd>E</kbd></span><span data-i18n="down / up">down / up</span></p><p><span><kbd>+</kbd> <kbd>−</kbd></span><span data-i18n="flight speed">flight speed</span></p><p><span><kbd>L</kbd></span><span data-i18n="lock the mouse">lock the mouse</span></p></div>
+   <div><h3 data-i18n="Inspect and drive">Inspect and drive</h3><p><span><kbd>F</kbd></span><span data-i18n="inspect what you point at">inspect what you point at</span></p><p><span><kbd>Enter</kbd></span><span data-i18n="drive the selected rover">drive the selected rover</span></p><p><span><kbd>Esc</kbd></span><span data-i18n="park and get out">park and get out</span></p><p><span><kbd>M</kbd></span><span data-i18n="console">console</span></p><p><span><kbd>H</kbd></span><span data-i18n="this sheet">this sheet</span></p></div>
+  </div>
+ </section>
  <div id="driving-hud" hidden><b id="drive-speed">0</b> km/h <b id="drive-gear">1</b><div id="rpm-track"><div id="rpm-fill"></div></div><span id="drive-rpm">850 RPM</span><span id="drive-surface">ASPHALT</span><button id="exit-drive">ESC · Park &amp; exit</button></div>
  <div id="tip"></div>
  <div id="info"><button class="close" id="infoclose" aria-label="Close inspector">Close</button><h3 id="infotitle"></h3><div id="infobody"></div></div>
  <div id="toast" role="status"></div><div id="finished"></div>
  <div id="view-tools"><div class="view-presets" role="group" aria-label="Map view"><button data-key="" data-view="colony" aria-pressed="true">Colony</button><button data-key="" data-view="water" aria-pressed="false">Water</button><button data-key="" data-view="power" aria-pressed="false">Power</button><button data-key="" data-view="network" aria-pressed="false">Network</button></div><div id="map-key" class="map-key" aria-label="Map legend"></div></div>
+ <nav id="navigation-deck" class="hud-glass" aria-label="Planets"><button data-planet="-1"><svg width="26" height="26" viewBox="0 0 32 32" fill="none" aria-hidden="true"><circle cx="16" cy="16" r="5" fill="#f2c46b"/><ellipse cx="16" cy="16" rx="13" ry="5" stroke="#9aa8b6" stroke-width="1.2"/><circle cx="28.4" cy="14.6" r="1.8" fill="#9fb6c9"/></svg><span class="pn-name"><i>0</i> System</span></button><button data-planet="0"><svg width="26" height="26" viewBox="0 0 32 32" fill="none" aria-hidden="true"><circle cx="16" cy="16" r="11" fill="#4a1d14"/><path d="M8 13l5 3 3-4 4 5 5-2M9 21l4-2 3 3 5-1" stroke="#ff8a3d" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="16" cy="16" r="11" stroke="#ff8a3d" stroke-opacity="0.45"/></svg><span class="pn-name"><i>1</i> Hephaestus</span></button><button data-planet="1"><svg width="26" height="26" viewBox="0 0 32 32" fill="none" aria-hidden="true"><path d="M3 19.5c0-2 6-4.6 13-4.6s13 2.6 13 4.6" stroke="#d9b58a" stroke-width="1.6"/><circle cx="16" cy="16" r="8.5" fill="#a5582f"/><path d="M8.2 14h15.6M8.6 18h14.8" stroke="#c97a48" stroke-width="1.4"/><path d="M3 19.5c0 2 6 3.6 13 3.6s13-1.6 13-3.6" stroke="#d9b58a" stroke-width="1.6"/></svg><span class="pn-name"><i>2</i> Russet</span></button><button data-planet="2" aria-pressed="true"><svg width="26" height="26" viewBox="0 0 32 32" fill="none" aria-hidden="true"><circle cx="16" cy="16" r="11" fill="#4d5e70"/><path d="M8 10.5a11 11 0 0 1 16 0z" fill="#e6eef6"/><path d="M9 22a11 11 0 0 0 14 0z" fill="#c9d6e3"/><path d="M7 16h18" stroke="#8fa3b8"/></svg><span class="pn-name"><i>3</i> Acheron</span><span class="pn-tag acheron">HOME</span></button><button data-planet="3"><svg width="26" height="26" viewBox="0 0 32 32" fill="none" aria-hidden="true"><circle cx="16" cy="16" r="11" fill="#145a6e"/><path d="M9 12c2-3 6-3 7 0s4 1 5 4-3 5-6 4-3 3-6 1 0-5-1-6 0-2 1-3z" fill="#3f9b5a"/><path d="M19 9c2 0 4 1 5 3" stroke="#e8f4f0" stroke-width="1.3" stroke-linecap="round"/></svg><span class="pn-name"><i>4</i> Klyaksa</span><span class="pn-tag klyaksa">NEW COLONY</span></button></nav>
+ <section id="status-corner" class="hud-glass" aria-label="Colony status">
+  <div class="vitals">
+   <span id="vit-temp" class="vit"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13.5V4a2 2 0 0 1 4 0v9.5a4 4 0 1 1-4 0z"/></svg><b>—</b></span>
+   <span id="vit-power" class="vit"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg><b>—</b></span>
+   <span id="vit-water" class="vit"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3c4 5 6 8 6 11a6 6 0 0 1-12 0c0-3 2-6 6-11z"/></svg><b>—</b></span>
+   <span id="vit-money" class="vit"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18M16.5 7.5c-1-1.3-2.6-2-4.5-2-2.5 0-4.5 1.3-4.5 3.2 0 4.3 9 2.3 9 6.6 0 1.9-2 3.2-4.5 3.2-2 0-3.6-.8-4.6-2.1"/></svg><b>—</b></span>
+  </div>
+  <div class="al-head"><span data-i18n="Alerts">Alerts</span><span class="al-counts"><span id="al-crit" class="chip crit" hidden></span><span id="al-warn" class="chip warn" hidden></span></span></div>
+  <div id="alerts" role="status"></div>
+ </section>
 </div>
 <aside id="side" aria-label="Colony management">
  <div class="panel-tabs" role="tablist" aria-label="Management panels"><button id="tab-overview" role="tab" aria-controls="panel-overview" aria-selected="true" data-panel="overview">Overview</button><button id="tab-layers" role="tab" aria-controls="panel-layers" aria-selected="false" data-panel="layers" tabindex="-1">Layers</button><button id="tab-places" role="tab" aria-controls="panel-places" aria-selected="false" data-panel="places" tabindex="-1">Places</button><button id="tab-operations" role="tab" aria-controls="panel-operations" aria-selected="false" data-panel="operations" tabindex="-1">Operations</button></div>

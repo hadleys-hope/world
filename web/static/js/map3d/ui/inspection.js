@@ -113,7 +113,9 @@ export function pick(ev, click) {
       ? houseInfo(result.id, true)
       : result.kind === "pole"
         ? `<b>POLE ${String(result.id + 1).padStart(3, "0")} · L1 / L2 / L3 / N</b><br>${((state.poleLoads[result.id] || 0) / 1000).toFixed(1)} kW · ${state.S.poles.span[result.id] ? "energized" : "isolated"}<br>F / double-click: inspect meter`
-        : `<b>${result.kind} ${result.id}</b><br>F / double-click: focus`;
+        : result.kind === "rover"
+          ? `<b>${String(result.extra || result.id)}</b><div class="tip-keys">click, then <kbd>Enter</kbd> drive · <kbd>F</kbd> follow</div>`
+          : `<b>${result.kind} ${result.id}</b><br>F / double-click: focus`;
   tipHtml(tip, mx, my, html);
 }
 

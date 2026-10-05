@@ -45,13 +45,13 @@ export function buildSolarSystem() {
       kind: 2,
     },
     {
-      name: "NIX",
+      name: "KLYAKSA",
       radius: 2800,
       orbit: 101000,
       period: 17200,
       phase: 5.8,
       color: 0x81bed2,
-      climate: "−180 °C / ICE DWARF",
+      climate: "+12 °C / OCEAN, FOREST",
       kind: 3,
     },
   ];

@@ -1,0 +1,130 @@
+/* 3D view HUD in the shared shell: a planet dock, a quiet status corner, a controls strip and a console
+   drawer. Loaded after map3d.css; only positions and looks change, element ids stay what the scripts use. */
+body { font-family: var(--hh-font); }
+.hud-glass {
+  background: var(--hh-glass); border: 1px solid var(--hh-line); border-radius: 14px; color: var(--hh-text);
+  backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); box-shadow: var(--hh-shadow);
+}
+.hud-glass button { font-family: var(--hh-font); }
+
+/* connection state: shown only while there is no colony to show */
+#banner { display: none; }
+body.offline #banner {
+  display: block; position: absolute; left: 50%; top: 92px; transform: translateX(-50%); z-index: 20;
+  padding: 8px 16px; border-radius: 999px; background: var(--hh-glass); border: 1px solid var(--hh-line);
+  color: var(--hh-text); font: 13px var(--hh-font); max-width: none; text-shadow: none;
+}
+
+/* controls strip, top left under the bar */
+#controls-strip {
+  position: absolute; left: 20px; top: 88px; z-index: 9; display: flex; align-items: center; gap: 12px;
+  padding: 6px 8px 6px 6px; font-size: 12px; color: var(--hh-text-2);
+}
+#controls-strip > span { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+#camera-toggle {
+  height: 30px; padding: 0 10px; border: 0; border-radius: 9px; background: var(--hh-acc-bg); color: var(--hh-acc-text);
+  font-size: 11px; letter-spacing: 0.12em; cursor: pointer;
+}
+#flight-controls { gap: 6px; }
+#flight-controls button, #help-toggle {
+  width: 30px; height: 30px; border-radius: 9px; border: 1px solid var(--hh-line-strong); background: transparent;
+  color: var(--hh-text); font-size: 14px; cursor: pointer; padding: 0;
+}
+#flight-speed { font-family: var(--hh-mono); color: var(--hh-text); }
+
+/* every control, grouped by what you want to do */
+#help-sheet {
+  position: absolute; left: 20px; top: 138px; z-index: 12; width: min(780px, calc(100% - 40px)); box-sizing: border-box;
+  padding: 16px 20px 18px;
+}
+#help-sheet[hidden] { display: none; }
+.help-head { display: flex; justify-content: space-between; gap: 16px; font-size: 12px; color: var(--hh-dim); padding-bottom: 12px; }
+#focus-world { font-family: var(--hh-mono); letter-spacing: 0.08em; color: var(--hh-text-2); white-space: nowrap; }
+#hint { position: static; text-align: right; font-size: 12px; color: var(--hh-dim); text-shadow: none; letter-spacing: 0; }
+.help-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; }
+.help-grid h3 { margin: 0 0 6px; font-size: 11px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: var(--hh-acc-text); }
+.help-grid p { margin: 0; display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 7px 0; border-top: 1px solid var(--hh-line); font-size: 13px; color: var(--hh-text-2); }
+.help-grid p > span:first-child { display: inline-flex; gap: 4px; }
+
+/* layers and legend, bottom left */
+#view-tools { left: 20px; bottom: 20px; gap: 10px; }
+.view-presets {
+  gap: 2px; padding: 4px; border-radius: 14px; background: var(--hh-glass); border: 1px solid var(--hh-line);
+  backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); width: fit-content;
+}
+.view-presets button {
+  height: 40px; padding: 0 14px; border: 0; border-radius: 10px; background: transparent; color: var(--hh-text-2);
+  text-transform: none; letter-spacing: 0; font: 13px var(--hh-font); cursor: pointer;
+}
+.view-presets button::before { content: none; }
+.view-presets button[aria-pressed="true"] { background: var(--hh-acc-bg); color: var(--hh-acc-text); }
+.map-key {
+  background: var(--hh-glass); border: 1px solid var(--hh-line); border-radius: 12px; padding: 10px 12px;
+  font: 12px var(--hh-font); color: var(--hh-text-2); text-shadow: none; backdrop-filter: blur(14px);
+}
+.map-key:empty { display: none; }
+
+/* planets, bottom centre; stays put when the console opens */
+#navigation-deck {
+  position: absolute; left: 50%; bottom: 20px; top: auto; transform: translateX(-50%); z-index: 9;
+  display: flex; gap: 4px; padding: 5px; border-radius: 18px; max-width: none; flex-wrap: nowrap;
+}
+#navigation-deck button {
+  width: 100px; height: 70px; border: 0; border-radius: 12px; background: transparent; color: var(--hh-text-2);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; padding: 0;
+  font: 12px var(--hh-font); cursor: pointer;
+}
+#navigation-deck button:hover { background: var(--hh-chip); }
+#navigation-deck button[aria-pressed="true"] { background: var(--hh-acc-bg); color: var(--hh-acc-text); }
+.pn-name i { font-style: normal; font-family: var(--hh-mono); color: var(--hh-dim); }
+.pn-tag { font-size: 9px; letter-spacing: 0.1em; color: var(--hh-acc-text); }
+.pn-tag.klyaksa { color: var(--hh-ok); }
+
+/* the colony at a glance, bottom right: four vitals (red only when in trouble), then the alerts */
+#status-corner { position: absolute; right: 20px; bottom: 20px; z-index: 9; width: 360px; box-sizing: border-box; padding: 10px 14px 8px; }
+body:not(.panel-collapsed) #status-corner { display: none; }
+.vitals { display: flex; justify-content: space-between; gap: 10px; padding-bottom: 8px; }
+.vit { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.vit svg { width: 15px; height: 15px; fill: none; stroke: var(--hh-dim); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.vit b { font: 500 12px var(--hh-mono); color: var(--hh-text); }
+.vit.bad svg { stroke: var(--hh-bad); } .vit.bad b { color: var(--hh-bad); }
+.al-head { display: flex; justify-content: space-between; align-items: center; padding: 6px 0 2px; border-top: 1px solid var(--hh-line); font-size: 11px; letter-spacing: 0.14em; font-weight: 600; text-transform: uppercase; }
+.al-counts { display: flex; gap: 6px; }
+.chip { font: 11px var(--hh-mono); letter-spacing: 0; text-transform: none; padding: 1px 8px; border-radius: 999px; }
+.chip.crit { background: rgba(239, 111, 85, 0.22); color: #ffb3a3; }
+.chip.warn { background: rgba(232, 184, 107, 0.18); color: var(--hh-acc-text); }
+#alerts {
+  position: static; display: block !important; padding: 0; margin: 0; border: 0; background: none; max-height: 132px; overflow: auto;
+  font: 13px var(--hh-font); color: var(--hh-text);
+}
+#alerts .al { display: flex; gap: 10px; align-items: center; padding: 6px 0; border-top: 1px solid var(--hh-line); }
+#alerts .al::before { content: ""; width: 8px; height: 8px; border-radius: 4px; flex-shrink: 0; background: var(--hh-warn); }
+#alerts .al.crit::before { background: #ef6f55; }
+#alerts .quiet { padding: 6px 0; color: var(--hh-dim); border-top: 1px solid var(--hh-line); }
+
+/* the console: a drawer on the right under the bar */
+#side {
+  right: 20px; top: 88px; bottom: 20px; width: 420px; border-radius: 16px; padding: 14px;
+  background: var(--hh-glass); border: 1px solid var(--hh-line); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+  box-shadow: var(--hh-shadow); color: var(--hh-text); font-family: var(--hh-font); z-index: 10;
+}
+.panel-tabs { gap: 2px; padding: 4px; border-radius: 12px; background: var(--hh-chip); top: -14px; }
+.panel-tabs button { height: 36px; border-radius: 9px; font: 13px var(--hh-font); color: var(--hh-text-2); letter-spacing: 0; text-transform: none; }
+.panel-tabs button[aria-selected="true"] { background: var(--hh-acc-bg); color: var(--hh-acc-text); border-color: transparent; }
+#info { right: 20px; top: 138px; border-radius: 14px; border: 1px solid var(--hh-line); background: var(--hh-glass); color: var(--hh-text); font-family: var(--hh-font); }
+body:not(.panel-collapsed) #info { right: 456px; }
+#tip { border-radius: 10px; border: 1px solid var(--hh-line); background: var(--hh-glass-strong); color: var(--hh-text); font: 12px var(--hh-font); padding: 8px 12px; }
+#tip .tip-keys { display: flex; gap: 8px; align-items: center; margin-top: 6px; color: var(--hh-text-2); }
+#toast { top: 92px; left: 50%; transform: translateX(-50%); border-radius: 999px; background: var(--hh-glass); border: 1px solid var(--hh-line); font: 13px var(--hh-font); }
+
+@media (max-width: 1100px) {
+  #navigation-deck button { width: 76px; }
+  .pn-tag { display: none; }
+  #status-corner { width: 300px; }
+}
+@media (max-width: 850px) {
+  #controls-strip > span { display: none; }
+  #navigation-deck { bottom: 76px; }
+  #status-corner { display: none; }
+  #side { top: 132px; width: auto; left: 20px; }
+}

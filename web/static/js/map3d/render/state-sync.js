@@ -252,34 +252,40 @@ export function onState(s, first) {
     state.gates[i].beacons.forEach((b) => (b.visible = on));
   }
   {
+    // [text, critical?]: critical first, then warnings
     const alerts = [];
-    s.sectors.forEach((x, i) => {
-      if (x.lockdown > 0)
-        alerts.push(`LOCKDOWN sector ${i + 1}: ${x.lockdown} min left`);
-    });
-    if (s.xenos.length)
-      alerts.push(
-        `${s.xenos.length} xenomorphs on the ground (${[...new Set(s.xenos.map((x) => x.state))].join(", ")})`,
-      );
-    if (s.squad.state !== "BASE")
-      alerts.push(
-        `marine squad ${s.squad.state.toLowerCase()} in sector ${s.squad.sector}`,
-      );
+    if (s.reactor.mode !== "ONLINE")
+      alerts.push([`Reactor ${s.reactor.mode.toLowerCase()}`, s.reactor.mode === "EMERGENCY" || s.reactor.mode === "SCRAM"]);
     if (s.wall_breach.some((a) => a !== null))
-      alerts.push(
-        "wall breached in sector " +
+      alerts.push([
+        "Wall breached, sector " +
           s.wall_breach
             .map((a, i) => (a !== null ? i + 1 : null))
             .filter(Boolean)
             .join(", "),
-      );
-    if (s.reactor.mode !== "ONLINE") alerts.push("reactor " + s.reactor.mode);
-    document.getElementById("alerts").innerHTML = alerts
-      .map((a) => `<div>${a}</div>`)
-      .join("");
-    document.getElementById("alerts").style.display = alerts.length
-      ? "block"
-      : "none";
+        true,
+      ]);
+    if (s.xenos.length)
+      alerts.push([`${s.xenos.length} xenomorphs on the ground`, true]);
+    s.sectors.forEach((x, i) => {
+      if (x.lockdown > 0) alerts.push([`Lockdown sector ${i + 1}, ${x.lockdown} min left`, false]);
+    });
+    if (s.squad.state !== "BASE")
+      alerts.push([`Marine squad ${s.squad.state.toLowerCase()}, sector ${s.squad.sector}`, false]);
+    alerts.sort((a, b) => b[1] - a[1]);
+    const crit = alerts.filter((a) => a[1]).length,
+      warn = alerts.length - crit;
+    document.getElementById("alerts").innerHTML = alerts.length
+      ? alerts.map(([t, c]) => `<div class="al${c ? " crit" : ""}">${t}</div>`).join("")
+      : '<div class="quiet">All quiet</div>';
+    const chip = (id, n, word) => {
+      const el = document.getElementById(id);
+      el.hidden = !n;
+      el.textContent = `${n} ${word}`;
+    };
+    chip("al-crit", crit, "critical");
+    chip("al-warn", warn, "warn");
+    updateVitals(s);
   }
   // wall breach: the broken panel lies flat
   if (state.wallPanels) {
@@ -604,4 +610,26 @@ export function initialize() {
   state.HSIZE_H = (t) => state.DIM[t][1] + 2;
   state.clock = { hour: 12, speed: 20, at: 0, night: false, daylight: 0.1 };
   state.sunDir = new THREE.Vector3(1, 0.3, 0);
+}
+
+// Four numbers about the whole colony; each turns red only when it is in trouble.
+function updateVitals(s) {
+  const set = (id, text, bad, title) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.querySelector("b").textContent = text;
+    el.classList.toggle("bad", !!bad);
+    el.title = title;
+  };
+  const e = s.env,
+    p = s.power,
+    w = s.water,
+    money = s.finance.colony;
+  const short = (v) =>
+    Math.abs(v) >= 1e6 ? (v / 1e6).toFixed(2) + "M" : Math.abs(v) >= 1e4 ? Math.round(v / 1000) + "k" : String(Math.round(v));
+  set("vit-temp", `${e.t_out}°`, false, `outside ${e.t_out} °C, wind ${e.wind} m/s${e.storm ? ", storm" : ""}${e.precip === "snow" ? ", snow" : ""}`);
+  set("vit-power", `${p.available_kw} kW`, p.available_kw < p.demand_kw,
+    `power the colony has now: ${p.available_kw} kW; it needs ${p.demand_kw} kW${p.shedding ? `, shedding level ${p.shedding}` : ""}`);
+  set("vit-water", `${Math.round(w.tank_m3)} m³`, w.tank_m3 < 100, `water tank ${Math.round(w.tank_m3)} m³, ${w.houses_ok} houses supplied`);
+  set("vit-money", `${short(money)} cr`, money < 0, `colony budget ${money.toLocaleString()} cr`);
 }

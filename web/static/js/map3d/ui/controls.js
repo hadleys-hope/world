@@ -111,8 +111,10 @@ export async function poll() {
     renderSide(s);
     onState(s, first);
     renderInfo();
+    document.body.classList.remove("offline");
   } catch (e) {
     console.error("poll failed", e);
+    document.body.classList.add("offline");
     document.getElementById("banner").textContent =
       "update failed: " + ((e && e.message) || e);
   }
@@ -294,6 +296,8 @@ export function initialize() {
     )
       return;
     const k = logicalKey(e);
+    if (k === "h") toggleHelp();
+    if (k === "escape") toggleHelp(false);
     if (k === "m") {
       document.getElementById("panel-toggle").click();
     }
@@ -308,3 +312,16 @@ export function initialize() {
     if (b) flyTo(...polar(+b.dataset.district * 60 + 30, 420), 380);
   };
 }
+
+// The sheet with every control; the strip under the bar only shows the four you need first.
+function toggleHelp(open) {
+  const sheet = document.getElementById("help-sheet"),
+    button = document.getElementById("help-toggle");
+  const show = open === undefined ? sheet.hidden : open;
+  sheet.hidden = !show;
+  button.setAttribute("aria-expanded", String(show));
+}
+document.getElementById("help-toggle").onclick = (e) => {
+  toggleHelp();
+  e.currentTarget.blur();
+};
