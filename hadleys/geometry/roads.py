@@ -50,6 +50,30 @@ def rover_polar(r: Rover):
     return math.degrees(math.atan2(r.y, r.x)) % 360.0, math.hypot(r.x, r.y)
 
 
+def _candidate_pairs(segments, cell=50.0, margin=0.02):
+    """Index pairs (i < j) of segments whose bounding boxes may touch, in the order a double loop visits them.
+
+    A uniform grid replaces the all-pairs scan (quadratic: 53 million box tests at 5000 houses, 35 s): segments
+    only meet segments in the cells their box covers. Every pair the old loop could accept shares a cell, and the
+    sorted order keeps the junctions in exactly the order they were found before.
+    """
+    grid = {}
+    for k, (_, a, b) in enumerate(segments):
+        x0 = math.floor((min(a[0], b[0]) - margin) / cell)
+        x1 = math.floor((max(a[0], b[0]) + margin) / cell)
+        y0 = math.floor((min(a[1], b[1]) - margin) / cell)
+        y1 = math.floor((max(a[1], b[1]) + margin) / cell)
+        for gx in range(x0, x1 + 1):
+            for gy in range(y0, y1 + 1):
+                grid.setdefault((gx, gy), []).append(k)
+    pairs = set()
+    for members in grid.values():
+        for m, i in enumerate(members):
+            for j in members[m + 1 :]:
+                pairs.add((i, j) if i < j else (j, i))
+    return sorted(pairs)
+
+
 def colony_layout(c):
     """One road/parcel plan shared by geometry, intersections and vehicle routes."""
     key = tuple(
@@ -226,36 +250,37 @@ def colony_layout(c):
         if -1e-7 <= t <= 1 + 1e-7 and -1e-7 <= u <= 1 + 1e-7:
             return (a[0] + ux * t, a[1] + uy * t)
 
-    for i, (r, a, b) in enumerate(segments):
-        for rr, aa, bb in segments[i + 1 :]:
-            if r["id"] == rr["id"]:
+    for i, j in _candidate_pairs(segments):
+        r, a, b = segments[i]
+        rr, aa, bb = segments[j]
+        if r["id"] == rr["id"]:
+            continue
+        if (
+            max(a[0], b[0]) < min(aa[0], bb[0]) - 0.01
+            or max(aa[0], bb[0]) < min(a[0], b[0]) - 0.01
+            or max(a[1], b[1]) < min(aa[1], bb[1]) - 0.01
+            or max(aa[1], bb[1]) < min(a[1], b[1]) - 0.01
+        ):
+            continue
+        p = intersect(a, b, aa, bb)
+        if p is None:
+            continue
+        item = next((n for n in nodes if math.dist(p, (n["x"], n["y"])) < 2), None)
+        if item is None:
+            item = dict(x=p[0], y=p[1], arms=[], roads=set(), width=0)
+            nodes.append(item)
+        for path in [r, rr]:
+            item["width"] = max(item["width"], path["width"])
+            item["roads"].add(path["id"])
+        for v in [a, b, aa, bb]:
+            if math.dist(v, p) < 0.05:
                 continue
-            if (
-                max(a[0], b[0]) < min(aa[0], bb[0]) - 0.01
-                or max(aa[0], bb[0]) < min(a[0], b[0]) - 0.01
-                or max(a[1], b[1]) < min(aa[1], bb[1]) - 0.01
-                or max(aa[1], bb[1]) < min(a[1], b[1]) - 0.01
+            angle = math.atan2(v[1] - p[1], v[0] - p[0])
+            if not any(
+                abs(math.atan2(math.sin(angle - q), math.cos(angle - q))) < 0.12
+                for q in item["arms"]
             ):
-                continue
-            p = intersect(a, b, aa, bb)
-            if p is None:
-                continue
-            item = next((n for n in nodes if math.dist(p, (n["x"], n["y"])) < 2), None)
-            if item is None:
-                item = dict(x=p[0], y=p[1], arms=[], roads=set(), width=0)
-                nodes.append(item)
-            for path in [r, rr]:
-                item["width"] = max(item["width"], path["width"])
-                item["roads"].add(path["id"])
-            for v in [a, b, aa, bb]:
-                if math.dist(v, p) < 0.05:
-                    continue
-                angle = math.atan2(v[1] - p[1], v[0] - p[0])
-                if not any(
-                    abs(math.atan2(math.sin(angle - q), math.cos(angle - q))) < 0.12
-                    for q in item["arms"]
-                ):
-                    item["arms"].append(angle)
+                item["arms"].append(angle)
     junctions = []
     for n in nodes:
         if len(n["arms"]) < 3:
