@@ -203,3 +203,50 @@ COSTS = {
 
 
 TYPE_NAMES = ["barracks", "standard", "insulated", "manager"]
+
+
+FACILITY_KEYS = (
+    "reactor_pos", "solar_pos", "water_plant_pos", "radwaste_pos", "mine_pos", "waste_station_pos",
+    "tower_pos", "dish_pos", "ocean_intake_pos", "landing_pad_pos",
+)
+
+
+def colony_layout_cfg(cfg):
+    """The layout derived from the colony size, so any number of houses is consistent.
+
+    houses_per_sector = houses_per_row * house_rows. The rows, the streets between them, the ring road, the wall,
+    the spine poles and the house type mix follow from that; facilities outside the wall move out with it. The
+    default colony (6 x 50 houses, 10 per row) comes out exactly as configured, so cfg is returned unchanged.
+    """
+    per_row = cfg.get("houses_per_row", 10)
+    H = cfg["houses_per_sector"]
+    if H % per_row:
+        raise ValueError(f"houses_per_sector {H} is not a multiple of houses_per_row {per_row}")
+    rows = H // per_row
+    N = cfg["sectors"] * H
+    step = cfg["house_ring_step"]
+    street0 = cfg["house_radius_min"] - 30  # the street below the first row
+    ring = street0 + rows * step + 70
+    wall = ring + 50
+    spine = [200] + [street0 + k * step for k in range(rows + 1)] + [ring]
+    counts = list(cfg["type_counts"])
+    if sum(counts) != N:
+        total = sum(counts)
+        counts = [round(n * N / total) for n in counts]
+        counts[0] += N - sum(counts)
+    derived = {
+        "house_rows": rows,
+        "ring_road_radius": ring,
+        "wall_radius": wall,
+        "spine_radii": spine,
+        "type_counts": counts,
+    }
+    if all(cfg.get(k) == v for k, v in derived.items()):
+        return cfg
+    out = {**cfg, **derived}
+    grow = wall - cfg["wall_radius"]  # facilities keep their distance from the wall
+    for key in FACILITY_KEYS:
+        x, y = cfg[key]
+        d = (x * x + y * y) ** 0.5
+        out[key] = (x * (d + grow) / d, y * (d + grow) / d)
+    return out

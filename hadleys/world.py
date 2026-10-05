@@ -10,7 +10,7 @@ import os
 import numpy as np
 import random
 import threading
-from hadleys.config import CFG, COSTS
+from hadleys.config import CFG, COSTS, colony_layout_cfg
 from hadleys.domains.households import households_init
 from hadleys.domains.hydraulics import UtilityNetwork, water_accounts
 from hadleys.domains.transport import make_traffic
@@ -22,6 +22,7 @@ class World:
     SCHEMA = 4  # bump when array layouts change; new plain attributes are filled in by Store.migrate on load
 
     def __init__(self, cfg=CFG):
+        cfg = colony_layout_cfg(cfg)  # rows, streets, wall and type mix follow from the colony size
         self.schema = self.SCHEMA
         self.uid = os.urandom(8).hex()  # tells history.db which colony wrote a row; not part of the physics
         self.cfg = cfg
@@ -45,9 +46,11 @@ class World:
         # ---- houses (numpy) ----
         idx = np.arange(N)
         self.h_sector = idx // H
-        self.h_ring = (idx % H) // 10
-        self.h_slot = idx % 10
-        self.h_angle = self.h_sector * 60.0 + 7.5 + self.h_slot * 5.2
+        per_row = H // cfg["house_rows"]
+        self.h_ring = (idx % H) // per_row
+        self.h_slot = idx % per_row
+        # the row spans 46.8 degrees of the 60-degree sector (5.2 degrees apart with the default 10 per row)
+        self.h_angle = self.h_sector * 60.0 + 7.5 + self.h_slot * (46.8 / max(1, per_row - 1))
         self.h_radius = cfg["house_radius_min"] + self.h_ring * cfg["house_ring_step"]
         self.h_x = self.h_radius * np.cos(np.radians(self.h_angle))
         self.h_y = self.h_radius * np.sin(np.radians(self.h_angle))
