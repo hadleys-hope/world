@@ -114,6 +114,10 @@ CFG = {
     # water
     "water_tank_m3": 500.0,
     "water_plant_m3_h": 12.0,
+    "sewer_return_frac": 0.9,  # delivered water that goes down the drain; the rest is drunk, cooked, evaporates
+    "drain_storage_m3": 200.0,  # sump of each gravity network (sanitary, storm) before it overflows
+    "sewer_lift_m3_s": 0.012,  # sanitary lift pump at the western works
+    "storm_lift_m3_s": 0.08,  # storm lift pump
     # finance
     "sector_budget": 10000.0,
     "colony_budget": 100000.0,

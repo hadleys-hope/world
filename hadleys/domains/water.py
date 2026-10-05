@@ -42,5 +42,8 @@ def water_step(w: World):
     w.water_tank_m3 += produced
     w.ocean_withdrawn_m3 += raw
     w.brine_returned_m3 += reject
+    w.water_acc["ocean_raw"] += raw
+    w.water_acc["produced"] += produced
+    w.water_acc["brine"] += reject
     if w.water_tank_m3 <= 0 and w.t % 60 == 0:
         w.log("ALARM", "Water tank empty")

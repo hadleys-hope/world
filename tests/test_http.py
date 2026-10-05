@@ -66,6 +66,7 @@ class HTTPTests(unittest.TestCase):
             "/house.json?id=1",
             "/attractors.json?hist=1",
             "/finance.json",
+            "/water.json",
             "/history",
         ]:
             with self.subTest(path=path):
