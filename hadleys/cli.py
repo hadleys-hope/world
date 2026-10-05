@@ -61,8 +61,28 @@ def main():
         default=os.environ.get("MQTT_URL", ""),
         help="broker host:port; enables the sensor/actuator bus for external house controllers",
     )
+    ap.add_argument(
+        "--mqtt-batch",
+        action="store_true",
+        default=os.environ.get("MQTT_BATCH", "") == "1",
+        help="send all houses due in a tick as one message (hh/batch/sensors); hope-runtime answers in batches",
+    )
+    ap.add_argument(
+        "--houses-per-sector",
+        type=int,
+        default=CFG["houses_per_sector"],
+        help="colony size for a new world: sectors x this many houses (6 x 840 = 5040)",
+    )
+    ap.add_argument(
+        "--houses-per-row",
+        type=int,
+        default=CFG.get("houses_per_row", 10),
+        help="houses in one row of a sector; houses-per-sector must be a multiple of it",
+    )
     args = ap.parse_args()
     CFG["seed"] = args.seed
+    CFG["houses_per_sector"] = args.houses_per_sector
+    CFG["houses_per_row"] = args.houses_per_row
     store = Store(args.data) if args.data else None
     w = None if (args.fresh or not store) else store.load_world()
     if w is None:
@@ -93,8 +113,8 @@ def main():
     w.bridge = None
     if args.mqtt:
         try:
-            w.bridge = MqttBridge(w, args.mqtt)
-            print(f"mqtt bridge: {args.mqtt}")
+            w.bridge = MqttBridge(w, args.mqtt, batch=args.mqtt_batch)
+            print(f"mqtt bridge: {args.mqtt}" + (" (batched)" if args.mqtt_batch else ""))
         except ImportError:
             print(
                 "paho-mqtt is not installed, run: pip install paho-mqtt ; continuing without the bus"

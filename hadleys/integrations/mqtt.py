@@ -13,11 +13,21 @@ import time
 
 
 class MqttBridge:
-    def __init__(self, w: World, url: str):
+    """World side of the bus.
+
+    Per house (default): hh/house/{id}/sensors out, hh/house/{id}/actuators in, one message per house.
+    Batched (batch=True, for thousands of houses): one hh/batch/sensors message per tick with the readings as
+    columns, answers in hh/batch/actuators as rows. paho and json cost ~60 us per message, which at 5000 houses
+    was 40 ms per tick; a batch costs about as much as a single message.
+    Actuators are accepted on both topics in either mode.
+    """
+
+    def __init__(self, w: World, url: str, batch: bool = False):
         import paho.mqtt.client as mqtt
 
         host, _, port = url.partition(":")
         self.w = w
+        self.batch = batch
         self.host, self.port = host or "localhost", int(port or 1883)
         self.cli = mqtt.Client(
             mqtt.CallbackAPIVersion.VERSION2, client_id="hh-world", clean_session=True
@@ -45,9 +55,13 @@ class MqttBridge:
     def _on_connect(self, client, userdata, flags, reason, properties=None):
         self.connected = True
         client.subscribe("hh/house/+/actuators")
+        client.subscribe("hh/batch/actuators")
         self.last_pub_t[:] = -999  # resend everything after a reconnect
 
     def _on_message(self, client, userdata, msg):
+        if msg.topic == "hh/batch/actuators":
+            self._on_batch(msg)
+            return
         try:
             hid = int(msg.topic.split("/")[2])
             body = msg.payload.decode("utf-8")
@@ -62,6 +76,17 @@ class MqttBridge:
                         "at": time.time(),
                     }
                 )
+        except Exception:
+            pass
+
+    def _on_batch(self, msg):
+        try:
+            body = msg.payload.decode("utf-8")
+            rows = json.loads(body)["rows"]
+            self.inbox.extend((int(r["id"]), r) for r in rows)
+            now = time.time()
+            self.rate_in.extend(now for _ in range(min(len(rows), 600)))
+            self.tail.append({"dir": "in", "topic": msg.topic, "body": f"{len(rows)} houses: " + body[:140], "at": now})
         except Exception:
             pass
 
@@ -140,6 +165,9 @@ class MqttBridge:
             # instead of all 300 on the same tick (a synchronized burst held the world lock for ~15 ms)
             | (np.arange(w.N) % 10 == w.t % 10)
         )
+        if self.batch:
+            self._publish_batch(np.flatnonzero(changed), flags)
+            return
         for i in np.flatnonzero(changed):
             payload = {
                 "t": w.t,
@@ -181,6 +209,45 @@ class MqttBridge:
             self.last_flags[i] = flags[i]
             self.last_pub_t[i] = w.t
             self.sent += 1
+
+    def _publish_batch(self, ids, flags):
+        """All houses due this tick in one message, as columns (a row per house costs paho and json the same as
+        a message per house)."""
+        w = self.w
+        if ids.size == 0:
+            return
+        u = w.utilities
+        per_min = 60000 / w.cfg["tick_seconds"]
+        body = json.dumps(
+            {
+                "t": w.t,
+                "id": ids.tolist(),
+                "sector": (w.h_sector[ids] + 1).tolist(),
+                "t_in": np.round(w.h_t_in[ids], 1).tolist(),
+                "power_ok": w.h_power_ok[ids].tolist(),
+                "on_ups": w.h_on_ups[ids].tolist(),
+                "limit_w": w.h_limit_w[ids].astype(int).tolist(),
+                "water_ok": w.h_water_ok[ids].tolist(),
+                "pipes_ok": w.h_pipes_ok[ids].tolist(),
+                "burst": w.h_burst[ids].tolist(),
+                "net_online": w.h_net_online[ids].tolist(),
+                "sludge": np.round(w.h_sludge[ids], 2).tolist(),
+                "draw_w": w.h_draw_w[ids].astype(int).tolist(),
+                "heater_on": w.h_heater_on[ids].tolist(),
+                "residents": w.h_residents[ids].astype(int).tolist(),
+                "pressure_kpa": np.round(u.pressure[ids], 2).tolist(),
+                "water_l_min": np.round(u.delivered[ids] * per_min, 4).tolist(),
+                "leak_l_min": np.round(u.leaks[ids] * per_min, 4).tolist(),
+            }
+        )
+        self.cli.publish("hh/batch/sensors", body, qos=0)
+        now = time.time()
+        self.rate_out.extend(now for _ in range(min(int(ids.size), 600)))
+        self.tail.append({"dir": "out", "topic": "hh/batch/sensors", "body": f"{ids.size} houses: " + body[:140], "at": now})
+        self.last_t_in[ids] = w.h_t_in[ids]
+        self.last_flags[ids] = flags[ids]
+        self.last_pub_t[ids] = w.t
+        self.sent += int(ids.size)
 
     def status(self):
         w = self.w
