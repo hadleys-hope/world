@@ -32,7 +32,7 @@ function flows() {
   const agg = new Map();
   for (const x of f) {
     const a = party(x.from), b = party(x.to);
-    if (!byId[a] || !byId[b] || a === b) continue;
+    if (!byId[a] || !byId[b] || a === b || !(x.amount > 0.5)) continue;   // zero payments draw no lane
     const key = a + '>' + b;
     const e = agg.get(key) || { key, from: a, to: b, amount: 0, whats: new Map() };
     e.amount += x.amount;
