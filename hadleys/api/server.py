@@ -3,6 +3,8 @@
 from __future__ import annotations
 from typing import Optional
 
+import gzip
+import hashlib
 import json
 import os
 from http.server import ThreadingHTTPServer
@@ -16,7 +18,7 @@ from hadleys.simulation import inject, new_colony
 from hadleys.web import HTMLATTR, HTMLBUS, HTMLFINANCE, HTMLGRAPH, HTMLHOUSE
 
 from hadleys.web import STATIC_ROOT
-from hadleys.api.static import serve_asset
+from hadleys.api.static import accepts_gzip, serve_asset
 
 
 class HttpServer(ThreadingHTTPServer):
@@ -40,6 +42,17 @@ def make_handler(
 ):
     from http.server import BaseHTTPRequestHandler
 
+    geom_body = geom_json.encode("utf-8")
+    geom = {
+        "body": geom_body,
+        "gzip": gzip.compress(geom_body, compresslevel=6, mtime=0),
+        "etag": '"' + hashlib.sha256(geom_body).hexdigest()[:32] + '"',
+    }
+    # /state is built at most once per (world, tick, change): every viewer polls it every 300 ms, and building it
+    # holds the world lock. Operator commands bump "changes", so their effect shows before the next tick.
+    state_cache = {"key": None, "body": b""}
+    changes = [0]
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
             pass
@@ -49,6 +62,27 @@ def make_handler(
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _send_geometry(self):
+            """The colony geometry never changes while the server runs: compressed once, revalidated by ETag."""
+            if self.headers.get("If-None-Match", "") == geom["etag"]:
+                self.send_response(304)
+                self.send_header("ETag", geom["etag"])
+                self.send_header("Cache-Control", "public, no-cache")
+                self.end_headers()
+                return
+            zipped = accepts_gzip(self.headers.get("Accept-Encoding", ""))
+            body = geom["gzip"] if zipped else geom["body"]
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("ETag", geom["etag"])
+            self.send_header("Cache-Control", "public, no-cache")
+            self.send_header("Vary", "Accept-Encoding")
+            if zipped:
+                self.send_header("Content-Encoding", "gzip")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
 
@@ -68,11 +102,15 @@ def make_handler(
             elif self.path.startswith("/vendor/") and vendor_dir:
                 serve_asset(self, vendor_dir, "/vendor/")
             elif self.path.startswith("/geometry"):
-                self._send(200, "application/json", geom_json.encode("utf-8"))
+                self._send_geometry()
             elif self.path.startswith("/state"):
                 w = w_holder["w"]
                 with w.lock:
-                    body = json.dumps(snapshot(w)).encode("utf-8")
+                    key = (id(w), w.t, changes[0])
+                    if state_cache["key"] != key:
+                        state_cache["body"] = json.dumps(snapshot(w)).encode("utf-8")
+                        state_cache["key"] = key
+                    body = state_cache["body"]
                 self._send(200, "application/json", body)
             elif self.path.startswith("/water.json"):
                 w = w_holder["w"]
@@ -140,6 +178,7 @@ def make_handler(
                 self._send(404, "text/plain", b"not found")
 
         def do_POST(self):
+            changes[0] += 1  # an operator or driver command may change what /state shows before the next tick
             n = int(self.headers.get("Content-Length", "0"))
             raw = self.rfile.read(n) if n else b"{}"
             try:

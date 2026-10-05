@@ -73,7 +73,36 @@ class HTTPTests(unittest.TestCase):
                 status, headers, body = self.request(path)
                 self.assertEqual(status, 200)
                 json.loads(body)
-                self.assertEqual(headers["Cache-Control"], "no-store")
+                # live data is never cached; the geometry is fixed for the server's lifetime and revalidated
+                expected = "public, no-cache" if path == "/geometry" else "no-store"
+                self.assertEqual(headers["Cache-Control"], expected)
+
+    def test_geometry_is_compressed_and_revalidated(self):
+        status, h, body = self.request("/geometry")
+        self.assertEqual(status, 200)
+        code, gh, compressed = self.request("/geometry", {"Accept-Encoding": "gzip"})
+        self.assertEqual(gh["Content-Encoding"], "gzip")
+        self.assertEqual(gzip.decompress(compressed), body)
+        self.assertLess(len(compressed), len(body) / 3)
+        code, _, cached = self.request("/geometry", {"If-None-Match": h["ETag"]})
+        self.assertEqual(code, 304)
+        self.assertFalse(cached)
+
+    def test_state_is_built_once_per_tick(self):
+        from unittest import mock
+        import hadleys.api.server as server
+
+        with mock.patch.object(server, "snapshot", wraps=server.snapshot) as build:
+            with self.world.lock:
+                self.world.t += 1  # whatever an earlier test cached is stale now
+            first = self.request("/state")[2]
+            second = self.request("/state")[2]
+            self.assertEqual(first, second)
+            self.assertEqual(build.call_count, 1, "same tick, nothing changed: served from the cache")
+            with self.world.lock:
+                self.world.t += 1
+            self.request("/state")
+            self.assertEqual(build.call_count, 2, "a new tick builds a new snapshot")
 
     def test_burst_of_module_requests_is_not_delayed(self):
         # Behind Caddy the 3D view opens ~60 upstream connections at once; with the default backlog of 5 the
