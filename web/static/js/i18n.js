@@ -26,7 +26,7 @@
     }
   };
   Object.assign(translations.ru, {
-    "3D view": "3D-вид", Bus: "Шина", Finance: "Финансы", Speed: "Скорость", Console: "Консоль", Resume: "Продолжить",
+    "3D view": "3D-вид", "2D view": "2D-вид", Bus: "Шина", Finance: "Финансы", Speed: "Скорость", Console: "Консоль", Resume: "Продолжить",
     Alerts: "Тревоги", "All controls": "Все клавиши", "Look around": "Осмотр", Fly: "Полёт", "Inspect and drive": "Осмотр и вождение",
     orbit: "орбита", "zoom in and out": "приблизить и отдалить", "whole solar system": "вся система", "jump to a planet": "перейти к планете",
     "free flight on / off": "свободный полёт", move: "движение", "down / up": "вниз / вверх", "flight speed": "скорость полёта",
