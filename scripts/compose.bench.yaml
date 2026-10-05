@@ -1,0 +1,21 @@
+# MQTT bench in one command: broker + house controllers + scripts/bench_mqtt.py, code mounted from this checkout.
+#   docker compose -f scripts/compose.bench.yaml up --build --attach bench --abort-on-container-exit --exit-code-from bench
+#   docker compose -f scripts/compose.bench.yaml down
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    command: ["sh", "-c", "printf 'listener 1883\\nallow_anonymous true\\n' > /tmp/m.conf && exec mosquitto -c /tmp/m.conf"]
+
+  houses:
+    build: ..
+    volumes: ["..:/app"]
+    working_dir: /app
+    command: ["python3", "houses_runtime.py", "--mqtt", "mosquitto:1883"]
+    depends_on: [mosquitto]
+
+  bench:
+    build: ..
+    volumes: ["..:/app"]
+    working_dir: /app
+    command: ["python3", "scripts/bench_mqtt.py", "mosquitto:1883", "${TICKS:-600}"]
+    depends_on: [houses]

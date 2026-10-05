@@ -160,6 +160,7 @@ class UtilityNetwork:
         self.levels = [
             np.flatnonzero(depth[self.b] == d) for d in range(1, int(depth.max()) + 1)
         ]
+        self._prepare()
         self.head = self.z.copy()
         self.flow = np.zeros(len(self.links))
         self.velocity = self.flow.copy()
@@ -275,24 +276,34 @@ class UtilityNetwork:
             )
         return systems
 
+    def _prepare(self):
+        """Per-level index arrays and link constants used on every solver iteration (derived, not saved)."""
+        self._lvl = [(self.a[ids], self.b[ids], ids) for ids in self.levels]
+        self._pump_level = next(k for k, ids in enumerate(self.levels) if 0 in ids)
+        self._area4 = math.pi * self.diameter**2
+        self._rel_rough = self.roughness / (3.7 * self.diameter)
+
+    def __setstate__(self, d):
+        self.__dict__.update(d)
+        self._prepare()
+
+    def __getstate__(self):
+        return {k: v for k, v in self.__dict__.items() if k not in ("_lvl", "_pump_level", "_area4", "_rel_rough")}
+
     def aggregate(self, demand):
         out = demand.copy()
-        for ids in reversed(self.levels):
-            np.add.at(out, self.a[ids], out[self.b[ids]])
+        for a, b, _ in reversed(self._lvl):
+            np.add.at(out, a, out[b])
         return out[self.b]
 
     def headloss(self, q):
         """Darcy-Weisbach; laminar f=64/Re; Swamee-Jain turbulent estimate."""
-        v = 4 * np.abs(q) / (math.pi * self.diameter**2)
+        v = 4 * np.abs(q) / self._area4
         re = v * self.diameter / 1.31e-6  # 10 C water
         safe = np.maximum(re, 1.0)
         turbulent = (
             0.25
-            / np.log10(
-                self.roughness / (3.7 * self.diameter)
-                + 5.74 / np.maximum(safe, 2300) ** 0.9
-            )
-            ** 2
+            / np.log10(self._rel_rough + 5.74 / np.maximum(safe, 2300) ** 0.9) ** 2
         )
         blend = np.clip((re - 2300) / 1700, 0, 1)
         f = (1 - blend) * 64 / safe + blend * turbulent
@@ -308,7 +319,9 @@ class UtilityNetwork:
             active & w.h_burst, math.pi * 0.0015**2, 0.0
         )  # 3 mm equivalent break
         node_load = np.zeros(len(self.nodes))
-        p = np.maximum(self.pressure / 9.81, 20.0)
+        # A house cut off from the supply has pressure 0 whatever happens; starting it there instead of at
+        # 20 m saves the ~40 relaxation steps it needed to decay, which held every other house in the loop.
+        p = np.where(active, np.maximum(self.pressure / 9.81, 20.0), 0.0)
         use = np.zeros(w.N)
         leak = use.copy()
         for iteration in range(200):
@@ -330,9 +343,9 @@ class UtilityNetwork:
                 if w.pump_station_ok
                 else 0.0
             )
-            for ids in self.levels:
-                head[self.b[ids]] = head[self.a[ids]] - loss[ids]
-                if 0 in ids:
+            for k, (a, b, ids) in enumerate(self._lvl):
+                head[b] = head[a] - loss[ids]
+                if k == self._pump_level:
                     head[1] += pump_gain
             target = np.where(
                 active,
