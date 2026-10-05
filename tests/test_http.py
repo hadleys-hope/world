@@ -77,6 +77,26 @@ class HTTPTests(unittest.TestCase):
                 expected = "public, no-cache" if path == "/geometry" else "no-store"
                 self.assertEqual(headers["Cache-Control"], expected)
 
+    def test_every_page_has_the_same_top_bar(self):
+        order = ['href="/"', 'href="/flat"', 'href="/bus"', 'href="/graph"', 'href="/house"', 'href="/attractors"',
+                 'href="/finance"']
+        for path in ["/", "/flat", "/bus", "/house?id=1", "/graph", "/attractors", "/finance"]:
+            with self.subTest(path=path):
+                html = self.request(path)[2].decode("utf-8")
+                self.assertEqual(html.count('class="hh-bar"'), 1)
+                nav = html[html.index('class="hh-nav"'):html.index("</nav>", html.index('class="hh-nav"'))]
+                self.assertEqual([h for h in order if h in nav], order)
+                self.assertLess(nav.index(order[0]), nav.index(order[-1]))
+                self.assertEqual(html.count('id="time"'), 1, "one clock: page ids must not clash with the bar")
+                self.assertEqual(html.count('id="pause"'), 1)
+        self.assertIn('id="panel-toggle"', self.request("/")[2].decode("utf-8"), "the console button is on the 3D view")
+
+    def test_clock_is_small(self):
+        status, headers, body = self.request("/clock.json")
+        clock = json.loads(body)
+        self.assertEqual(set(clock), {"t", "time", "speed", "paused"})
+        self.assertLess(len(body), 120)
+
     def test_geometry_is_compressed_and_revalidated(self):
         status, h, body = self.request("/geometry")
         self.assertEqual(status, 200)
