@@ -26,6 +26,16 @@
     }
   };
   Object.assign(translations.ru, {
+    "3D view": "3D-вид", Bus: "Шина", Finance: "Финансы", Speed: "Скорость", Console: "Консоль", Resume: "Продолжить",
+    Alerts: "Тревоги", "All controls": "Все клавиши", "Look around": "Осмотр", Fly: "Полёт", "Inspect and drive": "Осмотр и вождение",
+    orbit: "орбита", "zoom in and out": "приблизить и отдалить", "whole solar system": "вся система", "jump to a planet": "перейти к планете",
+    "free flight on / off": "свободный полёт", move: "движение", "down / up": "вниз / вверх", "flight speed": "скорость полёта",
+    "lock the mouse": "захватить мышь", "inspect what you point at": "осмотреть объект под курсором", "drive the selected rover": "вести выбранный ровер",
+    "park and get out": "припарковаться и выйти", console: "консоль", "this sheet": "эта шпаргалка", fly: "полёт", zoom: "масштаб", inspect: "осмотр",
+    "Where the money goes": "Куда идут деньги", "This month": "Этот месяц", "Last month": "Прошлый месяц",
+    "Households by cash": "Домохозяйства по деньгам", "Colony budget and household cash": "Бюджет колонии и деньги домохозяйств",
+    Colony: "Колония", Water: "Вода", Power: "Питание", Network: "Сеть", "Click a sector": "Нажмите на сектор",
+    "Back to the whole colony": "Ко всей колонии", Plants: "Станции", "Operator actions": "Действия оператора",
     "Hadley's Hope: bus and house controllers": "Надежда Хэдли: шина MQTT и контроллеры домов",
     "Hadley's Hope: house": "Надежда Хэдли: дом",
     "Hadley's Hope: systems": "Надежда Хэдли: системы",
@@ -302,7 +312,7 @@
     document.querySelectorAll('[data-i18n-title]').forEach((node) => { node.title = translate(node.dataset.i18nTitle); });
     document.querySelectorAll('[data-i18n-aria]').forEach((node) => { node.setAttribute('aria-label', translate(node.dataset.i18nAria)); });
     let selector = document.getElementById('language-selector');
-    if (!selector) { selector = document.createElement('select'); selector.id = 'language-selector'; selector.setAttribute('aria-label', translate('Language')); selector.innerHTML = '<option value="en">English</option><option value="ru">Русский</option>'; selector.value = language; selector.addEventListener('change', () => { window.hhI18n.setLanguage(selector.value); selector.blur(); }); document.body.append(selector); }
+    if (!selector) { selector = document.createElement('select'); selector.id = 'language-selector'; selector.setAttribute('aria-label', translate('Language')); selector.innerHTML = '<option value="en">EN</option><option value="ru">RU</option>'; selector.value = language; selector.addEventListener('change', () => { window.hhI18n.setLanguage(selector.value); selector.blur(); }); (document.getElementById('lang-slot') || document.body).append(selector); }
     selector.value = language;
   }
   const start = () => {

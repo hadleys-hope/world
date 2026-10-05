@@ -112,6 +112,12 @@ def make_handler(
                         state_cache["key"] = key
                     body = state_cache["body"]
                 self._send(200, "application/json", body)
+            elif self.path.startswith("/clock.json"):
+                # the shared top bar on every 2D page: a few bytes instead of the whole /state
+                w = w_holder["w"]
+                with w.lock:
+                    clock = {"t": w.t, "time": w.time_str(), "speed": w.speed, "paused": w.paused}
+                self._send(200, "application/json", json.dumps(clock).encode("utf-8"))
             elif self.path.startswith("/water.json"):
                 w = w_holder["w"]
                 with w.lock:

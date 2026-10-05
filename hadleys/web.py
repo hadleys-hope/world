@@ -14,8 +14,31 @@ def template(name):
 
 
 NAV_CSS = (STATIC_ROOT / "css/navigation.css").read_text(encoding="utf-8")
-NAV_HTML = template("nav_html.html")
-HTML = template("html.html")
+FONTS = (
+    '<link rel="preconnect" href="https://fonts.googleapis.com">'
+    '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
+    '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500'
+    '&family=IBM+Plex+Sans+Condensed:wght@400;500;600&display=swap">'
+)
+NAV_HTML = template("nav_html.html").replace("CONSOLEBTN", "")
+NAV_HTML_3D = template("nav_html.html").replace(
+    "CONSOLEBTN",
+    '<button class="hh-console" id="panel-toggle" aria-expanded="false" aria-controls="side" '
+    'title="Show or hide the console"><span data-i18n="Console">Console</span><kbd>M</kbd></button>',
+)
+
+
+def page(name, last_css="/static/css/shell.css"):
+    """A 2D page in the shared shell: the top bar, the fonts, and the shell stylesheet after the page's own."""
+    return (
+        template(name)
+        .replace("NAVCSS", NAV_CSS)
+        .replace("NAVHTML", NAV_HTML)
+        .replace("</head>", f'{FONTS}<link rel="stylesheet" href="{last_css}">\n</head>', 1)
+    )
+
+
+HTML = page("html.html")
 # Eager preload avoids a waterfall of requests through the module dependency graph.
 MODULE_PRELOADS = "\n".join(
     f'<link rel="modulepreload" href="/static/{p.relative_to(STATIC_ROOT).as_posix()}">'
@@ -47,17 +70,13 @@ EARLY_PRELOADS = "\n".join(
     + [f'<link rel="modulepreload" href="__THREE_BASE__examples/jsm/{a}">' for a in _addon_closure(THREE_ADDONS)]
     + ['<link rel="preload" href="/geometry" as="fetch" crossorigin="anonymous">']
 )
-HTML3D = template("html3d.html").replace("</head>", EARLY_PRELOADS + "\n" + MODULE_PRELOADS + "\n</head>")
-HTMLBUS = template("htmlbus.html")
-HTMLHOUSE = (
-    template("htmlhouse.html").replace("NAVCSS", NAV_CSS).replace("NAVHTML", NAV_HTML)
+HTML3D = (
+    template("html3d.html")
+    .replace("NAVHTML", NAV_HTML_3D)
+    .replace("</head>", FONTS + "\n" + EARLY_PRELOADS + "\n" + MODULE_PRELOADS + "\n</head>", 1)
 )
-HTMLGRAPH = (
-    template("htmlgraph.html").replace("NAVCSS", NAV_CSS).replace("NAVHTML", NAV_HTML)
-)
-HTMLATTR = (
-    template("htmlattr.html").replace("NAVCSS", NAV_CSS).replace("NAVHTML", NAV_HTML)
-)
-HTMLFINANCE = (
-    template("htmlfinance.html").replace("NAVCSS", NAV_CSS).replace("NAVHTML", NAV_HTML)
-)
+HTMLBUS = page("htmlbus.html")
+HTMLHOUSE = page("htmlhouse.html")
+HTMLGRAPH = page("htmlgraph.html")
+HTMLATTR = page("htmlattr.html")
+HTMLFINANCE = page("htmlfinance.html")

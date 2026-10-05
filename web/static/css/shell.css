@@ -1,0 +1,42 @@
+/* 2D pages inside the shared shell: the blurred planet behind, glass panels, one type family.
+   Loaded after each page's own stylesheet, so it only restyles; the pages' layout and logic stay theirs. */
+:root {
+  --bg: transparent; --panel: var(--hh-glass); --line: var(--hh-line); --text: var(--hh-text); --dim: var(--hh-dim);
+  --ok: var(--hh-ok); --warn: var(--hh-warn); --bad: var(--hh-bad);
+}
+html { background: var(--hh-page); }
+body {
+  font-family: var(--hh-font) !important; color: var(--hh-text); background: transparent !important;
+  padding: 88px 20px 20px !important; box-sizing: border-box;
+}
+body::before {
+  content: ""; position: fixed; inset: -40px; z-index: -1;
+  background: url(/static/img/backdrop.jpg) center / cover no-repeat;
+  filter: brightness(0.42) saturate(0.85);
+}
+:root[data-theme="light"] body::before { filter: brightness(1.35) saturate(0.4) opacity(0.35); }
+h1 { font-size: 18px; font-weight: 600; letter-spacing: 0.02em; }
+h2 { font-size: 12px !important; font-weight: 600; letter-spacing: 0.14em !important; color: var(--hh-dim) !important; }
+.card, .pn, .gauge, .kpi > div, #side, #map, #wrap, #houses, #tail, #log, #ops {
+  background: var(--hh-glass) !important; border: 1px solid var(--hh-line) !important; border-radius: 16px !important;
+  backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+}
+.card, .pn { padding: 14px 16px !important; }
+#log, #ops, #tail { font-family: var(--hh-mono) !important; border-radius: 12px !important; }
+table th { background: transparent !important; color: var(--hh-dim) !important; font-weight: 500; }
+table td, table th { border-bottom-color: var(--hh-line) !important; }
+button, select, input:not([type="range"]) {
+  background: var(--hh-chip) !important; color: var(--hh-text) !important; border: 1px solid var(--hh-line-strong) !important;
+  border-radius: 10px !important; font-family: var(--hh-font) !important;
+}
+button { padding: 6px 12px !important; }
+button:hover { border-color: var(--hh-acc) !important; }
+.hh-bar button, .hh-bar select { padding: 0 12px !important; }
+.hh-bar .hh-icon { padding: 0 !important; }
+.pill { border-radius: 999px !important; }
+.dim { color: var(--hh-dim) !important; } .ok { color: var(--hh-ok) !important; } .warn { color: var(--hh-warn) !important; } .bad { color: var(--hh-bad) !important; }
+a { color: var(--hh-acc-text); }
+/* full-height pages (map, attractors, systems): the panels sit below the bar with the same gutters */
+body.hh-full { height: 100vh !important; overflow: hidden; gap: 14px; }
+body.hh-full #side { border-left: 1px solid var(--hh-line) !important; }
+body.hh-full #map, body.hh-full #wrap { overflow: hidden; }
