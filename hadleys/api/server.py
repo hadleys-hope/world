@@ -112,6 +112,10 @@ def make_handler(
                         state_cache["key"] = key
                     body = state_cache["body"]
                 self._send(200, "application/json", body)
+            elif self.path.startswith("/klyaksa/geometry.json") and w_holder.get("colony"):
+                self._send(200, "application/json", w_holder["colony"].geometry())
+            elif self.path.startswith("/klyaksa/state.json") and w_holder.get("colony"):
+                self._send(200, "application/json", w_holder["colony"].state())
             elif self.path.startswith("/clock.json"):
                 # the shared top bar on every 2D page: a few bytes instead of the whole /state
                 w = w_holder["w"]

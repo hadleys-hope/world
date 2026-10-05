@@ -68,6 +68,12 @@ def main():
         help="send all houses due in a tick as one message (hh/batch/sensors); hope-runtime answers in batches",
     )
     ap.add_argument(
+        "--no-klyaksa",
+        action="store_true",
+        default=os.environ.get("KLYAKSA", "1") == "0",
+        help="do not simulate Klyaksa's dome cities (about 5000 houses) next to LV-426",
+    )
+    ap.add_argument(
         "--houses-per-sector",
         type=int,
         default=CFG["houses_per_sector"],
@@ -119,6 +125,18 @@ def main():
             print(
                 "paho-mqtt is not installed, run: pip install paho-mqtt ; continuing without the bus"
             )
+    if not args.no_klyaksa and not args.headless:
+        from hadleys.klyaksa import Colony, ColonyBus
+
+        holder_colony = Colony()
+        print(f"klyaksa: {len(holder_colony.cities)} dome cities, {holder_colony.houses} houses (ids from 300)")
+        if args.mqtt:
+            try:
+                ColonyBus(holder_colony, args.mqtt)
+            except ImportError:
+                pass
+    else:
+        holder_colony = None
     if args.headless:
         t0 = time.time()
         for _ in range(args.headless):
@@ -142,7 +160,7 @@ def main():
         for e in list(w.events)[:15]:
             print(f"  t={e['t']:6d} {e['level']:5s} {e['text']}")
         return
-    holder = {"w": w}
+    holder = {"w": w, "colony": holder_colony}
     threading.Thread(target=sim_loop, args=(holder, store), daemon=True).start()
     vendor_dir = ""
     for cand in (str(ROOT / "vendor"), os.path.join(args.data or ".", "vendor")):

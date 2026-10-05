@@ -226,6 +226,10 @@ def sim_loop(w_holder: dict, store: Optional[Store]):
                             store.record_hour(w)
                         except Exception as e:
                             print("history write failed:", e)
+            colony = w_holder.get("colony")
+            if colony and n:
+                # Klyaksa follows LV-426's clock; if it cannot keep up it slows down instead of starving LV-426
+                colony.tick(min(n, 4))
             time.sleep(0.01)
         if store and time.time() - last_save > 300:
             with w.lock:

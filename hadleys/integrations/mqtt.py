@@ -82,7 +82,9 @@ class MqttBridge:
     def _on_batch(self, msg):
         try:
             body = msg.payload.decode("utf-8")
-            rows = json.loads(body)["rows"]
+            rows = [r for r in json.loads(body)["rows"] if 0 <= int(r["id"]) < self.w.N]   # Klyaksa's are not ours
+            if not rows:
+                return
             self.inbox.extend((int(r["id"]), r) for r in rows)
             now = time.time()
             self.rate_in.extend(now for _ in range(min(len(rows), 600)))
