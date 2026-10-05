@@ -2,24 +2,42 @@
 <html lang="en"><head><meta charset="utf-8"><title>Hadley's Hope: finance</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="/static/css/navigation.css">
-<link rel="stylesheet" href="/static/css/house.css">
+<link rel="stylesheet" href="/static/css/finance.css">
 </head>
-<body>
+<body class="hh-full fin">
 NAVHTML
-<main>
-<div class="row"><h1>Household finance</h1><span id="sub" class="dim"></span></div>
-<div class="gauges" id="kpi"></div>
-<div class="grid">
-  <div>
-    <h2>Money and debt of the households, daily</h2><div class="card"><div class="dim" style="font-size:11px">cash of all households, cr</div><canvas id="sparkc" width="600" height="80" style="width:100%"></canvas><div class="dim" style="font-size:11px;margin-top:6px">debt: loans + interest + unpaid bills, cr</div><canvas id="sparkd" width="600" height="80" style="width:100%"></canvas><div class="dim" style="font-size:11px;margin-top:6px">households in debt (red: bankrupt)</div><canvas id="sparkn" width="600" height="60" style="width:100%"></canvas></div>
-    <h2>Scenario houses</h2><div class="card"><table id="scen"></table></div>
-    <h2>Households in debt</h2><div class="card"><table id="trouble"></table></div>
-  </div>
-  <div>
-    <h2>Rules</h2><div class="card"><table id="rules"></table></div>
-    <h2>Money flows this month</h2><div class="card"><table id="flows"></table></div>
-    <h2>Money check</h2><div class="card"><table id="check"></table></div>
-  </div>
+<div class="fin-grid">
+ <div class="fin-main">
+  <section class="card" id="flow-card" aria-label="Money flows">
+   <div class="fin-head">
+    <h2 data-i18n="Where the money goes">Where the money goes</h2>
+    <div class="fin-tools">
+     <span id="books" class="books"></span>
+     <div class="seg" role="group" aria-label="Period"><button data-period="month" aria-pressed="true" data-i18n="This month">This month</button><button data-period="prev" aria-pressed="false" data-i18n="Last month">Last month</button></div>
+    </div>
+   </div>
+   <div id="flow-stage"><svg id="flow-svg" aria-hidden="true"></svg><div id="flow-nodes"></div><div id="flow-empty" class="dim" hidden>No money has moved yet this month.</div></div>
+  </section>
+  <section class="card" id="series-card" aria-label="Thirty days">
+   <div class="fin-head"><h2 data-i18n="Colony budget and household cash">Colony budget and household cash</h2><div class="legend-line"><span><i style="background:#ff8a72"></i>colony</span><span><i style="background:#7fd1b9"></i>households</span><span><i style="background:#e8b86b"></i>household debt</span></div></div>
+   <div id="series-read" class="read"></div>
+   <div id="series-wrap"><svg id="series-svg" preserveAspectRatio="none"></svg></div>
+  </section>
+ </div>
+ <aside class="fin-side">
+  <section class="card" id="node-card">
+   <div class="fin-head"><h1 id="node-name">Households</h1><span id="node-net" class="mono"></span></div>
+   <div id="node-rows"></div>
+  </section>
+  <section class="card" id="hist-card">
+   <div class="fin-head"><h2 data-i18n="Households by cash">Households by cash</h2><span id="hist-total" class="dim"></span></div>
+   <div id="hist"></div>
+   <div class="hist-axis"><span>0 cr</span><span id="hist-mid"></span><span id="hist-max"></span></div>
+   <div id="hist-read" class="read"></div>
+   <div class="tiles" id="tiles"></div>
+  </section>
+  <details class="card" id="debt-box"><summary>Households in debt <span id="debt-count" class="dim"></span></summary><table id="trouble"></table><table id="scen"></table></details>
+  <details class="card"><summary>Rules: wages, prices, loans</summary><table id="rules"></table></details>
+ </aside>
 </div>
-</main>
-<script src="/static/js/pages/finance.js"></script></body></html>
+<script src="/static/js/i18n.js"></script><script src="/static/js/pages/finance.js"></script></body></html>

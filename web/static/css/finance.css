@@ -1,0 +1,62 @@
+/* Finance: money moving between the company, the colony, the sectors and the households. */
+* { box-sizing: border-box; }
+body.fin { margin: 0; display: block; }
+.fin-grid { display: flex; gap: 14px; height: 100%; }
+.fin-main { flex: 1; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.fin-side { width: 400px; display: flex; flex-direction: column; gap: 14px; overflow-y: auto; scrollbar-width: thin; }
+.card { padding: 14px 16px; }
+.fin-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.fin-head h1 { margin: 0; font-size: 18px; }
+.fin-head h2 { margin: 0; }
+.fin-tools { display: flex; gap: 12px; align-items: center; }
+.mono, .books { font-family: var(--hh-mono); font-size: 12px; }
+.books { color: var(--hh-ok); }
+.books.off { color: var(--hh-bad); }
+.seg { display: flex; gap: 2px; padding: 3px; border-radius: 12px; background: var(--hh-chip); }
+.seg button { height: 30px; padding: 0 12px !important; border: 0 !important; background: transparent !important; color: var(--hh-text-2) !important; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--hh-acc-bg) !important; color: var(--hh-acc-text) !important; }
+#flow-card { flex: 1; display: flex; flex-direction: column; gap: 8px; min-height: 360px; }
+#flow-stage { position: relative; flex: 1; min-height: 0; }
+#flow-svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+#flow-svg .lane { fill: none; stroke-linecap: round; transition: opacity 0.4s, stroke 0.4s; }
+#flow-svg .lane-dash { fill: none; stroke-linecap: round; stroke-dasharray: 2 14; animation: lane 1.2s linear infinite; transition: opacity 0.4s; }
+@keyframes lane { to { stroke-dashoffset: -16; } }
+#flow-svg .coin { filter: drop-shadow(0 0 4px currentColor); }
+#flow-svg .lane-label { font: 12px var(--hh-mono); fill: var(--hh-text-2); paint-order: stroke; stroke: var(--hh-page); stroke-width: 4px; transition: opacity 0.4s; }
+#flow-nodes button {
+  position: absolute; transform: translate(-50%, -50%); width: 158px; padding: 10px 12px !important; border-radius: 14px !important;
+  background: var(--hh-glass-strong) !important; display: flex; flex-direction: column; gap: 2px; text-align: left; cursor: pointer;
+  transition: border-color 0.3s, box-shadow 0.3s;
+}
+#flow-nodes button[aria-pressed="true"] { border-color: var(--hh-acc) !important; box-shadow: 0 0 0 3px var(--hh-acc-bg); }
+#flow-nodes b { font-size: 13px; font-weight: 600; }
+#flow-nodes .bal { font: 14px var(--hh-mono); }
+#flow-nodes .sub { font-size: 11px; color: var(--hh-dim); }
+#flow-empty { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); }
+#series-card { height: 210px; display: flex; flex-direction: column; gap: 6px; }
+#series-wrap { position: relative; flex: 1; }
+#series-svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+#series-svg path.line { fill: none; stroke-width: 2; vector-effect: non-scaling-stroke; }
+#series-svg .draw { stroke-dasharray: 2000; stroke-dashoffset: 2000; animation: draw 1.6s ease-out forwards; }
+@keyframes draw { to { stroke-dashoffset: 0; } }
+.legend-line { display: flex; gap: 14px; font-size: 12px; color: var(--hh-text-2); }
+.legend-line span { display: inline-flex; gap: 6px; align-items: center; }
+.legend-line i { width: 14px; height: 2px; display: inline-block; }
+.read { font: 12px var(--hh-mono); color: var(--hh-text-2); min-height: 18px; }
+#node-rows .row-f { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-top: 1px solid var(--hh-line); font-size: 13px; }
+#node-rows .row-f span:first-child { color: var(--hh-text-2); }
+#node-rows .row-f span:last-child { font-family: var(--hh-mono); white-space: nowrap; }
+#node-rows .in { color: var(--hh-ok); } #node-rows .out { color: var(--hh-bad); }
+#hist { display: flex; align-items: flex-end; gap: 5px; height: 140px; margin-top: 10px; }
+#hist button { flex: 1; padding: 0 !important; border: 0 !important; border-radius: 6px 6px 2px 2px !important; background: rgba(127, 209, 185, 0.5) !important; transition: height 0.6s cubic-bezier(.2,.8,.2,1), background 0.3s; cursor: pointer; min-height: 2px; }
+#hist button[aria-pressed="true"] { background: var(--hh-acc) !important; }
+.hist-axis { display: flex; justify-content: space-between; font: 11px var(--hh-mono); color: var(--hh-dim); padding-top: 4px; }
+#hist-read a { color: var(--hh-acc-text); margin-right: 6px; }
+.tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }
+.tiles div { padding: 10px 12px; border-radius: 12px; background: var(--hh-chip); }
+.tiles b { display: block; font: 500 18px var(--hh-mono); }
+.tiles span { font-size: 11px; color: var(--hh-dim); }
+details.card summary { cursor: pointer; font-size: 12px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: var(--hh-dim); }
+details.card table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+details.card td { padding: 5px 4px; border-bottom: 1px solid var(--hh-line); }
+@media (max-width: 1100px) { .fin-grid { flex-direction: column; height: auto; } .fin-side { width: auto; } body.hh-full { height: auto !important; overflow: auto; } }
