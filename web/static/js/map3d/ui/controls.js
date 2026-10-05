@@ -1,4 +1,5 @@
 /** ui/controls: procedural colony viewer. */
+import { logicalKey } from "../keys.js";
 import { state } from "../state.js";
 import { polar } from "../geometry/planet.js";
 import { resize } from "../render/frame.js";
@@ -292,7 +293,7 @@ export function initialize() {
       e.altKey
     )
       return;
-    const k = e.key.toLowerCase();
+    const k = logicalKey(e);
     if (k === "m") {
       document.getElementById("panel-toggle").click();
     }

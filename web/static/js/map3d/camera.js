@@ -1,4 +1,5 @@
 /** camera: procedural colony viewer. */
+import { logicalKey } from "./keys.js";
 import { state } from "./state.js";
 import { startDriving, stopDriving, updateDriving } from "./driving.js";
 import { goHome, switchPlanet } from "./models/solar-system.js";
@@ -269,7 +270,7 @@ export function initialize() {
     e.target.closest("input,textarea,select,[contenteditable=true]");
   window.addEventListener("keydown", (e) => {
     if (state.typing(e) || e.ctrlKey || e.metaKey || e.altKey) return;
-    const key = e.key.toLowerCase();
+    const key = logicalKey(e);
     if (key === "shift") {
       e.preventDefault();
       if (!e.repeat && !state.drive)
@@ -329,7 +330,7 @@ export function initialize() {
     }
   });
   window.addEventListener("keyup", (e) =>
-    state.cameraKeys.delete(e.key.toLowerCase()),
+    state.cameraKeys.delete(logicalKey(e)),
   );
   state.clearInput = () => {
     state.cameraKeys.clear();

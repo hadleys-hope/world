@@ -302,7 +302,7 @@
     document.querySelectorAll('[data-i18n-title]').forEach((node) => { node.title = translate(node.dataset.i18nTitle); });
     document.querySelectorAll('[data-i18n-aria]').forEach((node) => { node.setAttribute('aria-label', translate(node.dataset.i18nAria)); });
     let selector = document.getElementById('language-selector');
-    if (!selector) { selector = document.createElement('select'); selector.id = 'language-selector'; selector.setAttribute('aria-label', translate('Language')); selector.innerHTML = '<option value="en">English</option><option value="ru">Русский</option>'; selector.value = language; selector.addEventListener('change', () => window.hhI18n.setLanguage(selector.value)); document.body.append(selector); }
+    if (!selector) { selector = document.createElement('select'); selector.id = 'language-selector'; selector.setAttribute('aria-label', translate('Language')); selector.innerHTML = '<option value="en">English</option><option value="ru">Русский</option>'; selector.value = language; selector.addEventListener('change', () => { window.hhI18n.setLanguage(selector.value); selector.blur(); }); document.body.append(selector); }
     selector.value = language;
   }
   const start = () => {
