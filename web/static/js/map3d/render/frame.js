@@ -1,6 +1,9 @@
 /** render/frame: procedural colony viewer. */
 import { state } from "../state.js";
 import { activeCentre, surfaceClearance, updateCameraMotion } from "../camera.js";
+import { normalXY, surfaceHeight } from "../geometry/planet.js";
+import { bodyHeight } from "../geometry/noise.js";
+import { buildAcheronLife } from "../models/acheron.js";
 import { quatAt, sph } from "../geometry/planet.js";
 import { updateUtilityFlow } from "../models/drainage.js";
 import { updateSolarSystem } from "../models/solar-system.js";
@@ -36,6 +39,22 @@ export function frame() {
     if (u >= 1) state.flyAnim = null;
   }
   updateCameraMotion(now);
+  keepAboveGround();
+  state.envUniforms.uTime.value = t;
+  if (!state.lifeSteps && state.housesMesh) {
+    // after the colony's first frame: build the wild land and the other worlds a step at a time, when idle
+    state.lifeSteps = [];
+    buildAcheronLife(state.lifeSteps);
+    const next = () => {
+      const step = state.lifeSteps.shift();
+      if (!step) return;
+      const t0 = performance.now();
+      step();
+      (state.lifeTimes ||= []).push(Math.round(performance.now() - t0));
+      (window.requestIdleCallback || ((f) => setTimeout(f, 50)))(next, { timeout: 1500 });
+    };
+    setTimeout(next, 400);
+  }
   updateDetail();
   updateUtilityFlow(t);
   {
@@ -53,6 +72,7 @@ export function frame() {
     state.sun.intensity = 0.8 + 1.6 * dl;
     state.sun.color.setHSL(0.08, 0.6, 0.55 + 0.25 * dl);
     state.planetMat.uniforms.uSun.value.copy(state.sun.position).normalize();
+    state.envUniforms.uSun.value.copy(state.planetMat.uniforms.uSun.value);
     // The shadow pass draws every shadow caster a second time. The sun moves a few degrees per second of
     // simulated time, so the shadow map is redrawn five times a second instead of every frame.
     if (state.renderer.shadowMap.enabled) {
@@ -270,4 +290,24 @@ export function initialize() {
   window.addEventListener("resize", resize);
   resize();
   state.t0 = performance.now();
+}
+
+// The camera never sinks into the ground: under the crust there is only the core.
+const _dir = new THREE.Vector3();
+function keepAboveGround() {
+  if (state.systemView || state.drive) return;
+  const centre = activeCentre();
+  _dir.copy(state.camera.position).sub(centre);
+  const dist = _dir.length();
+  _dir.divideScalar(dist || 1);
+  let floor;
+  if (state.activeBody === 2) {
+    const [x, y] = normalXY(_dir);
+    floor = state.RP + Math.max(surfaceHeight(x, y), -10) + 1.5;
+  } else {
+    const spec = state.solarSystem?.specs[state.activeBody];
+    if (!spec) return;
+    floor = spec.radius * (1 + Math.max(0, bodyHeight(spec.kind, _dir.x, _dir.y, _dir.z))) + 6;
+  }
+  if (dist < floor) state.camera.position.copy(centre).addScaledVector(_dir, floor);
 }

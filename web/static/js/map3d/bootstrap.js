@@ -8,6 +8,9 @@ import { flyTo } from "./ui/inspection.js";
 export function initialize() {
   if (new URLSearchParams(location.search).has("inspect"))
     window.HH = {
+      get live() {
+        return state;
+      },
       camera: state.camera,
       controls: state.controls,
       scene: state.scene,

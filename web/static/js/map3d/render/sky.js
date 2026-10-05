@@ -1,84 +1,12 @@
 /** render/sky: procedural colony viewer. */
 import { state } from "../state.js";
 import { surfaceHeight, terrainH } from "../geometry/planet.js";
+import { makeCore } from "../models/acheron.js";
 import * as THREE from "three";
 
 export function makePlanet() {
-  const hash = (x, y, z) => {
-    const s = Math.sin(x * 127.1 + y * 311.7 + z * 74.7) * 43758.5453;
-    return s - Math.floor(s);
-  };
-  const lerp = (a, b, t) => a + (b - a) * t;
-  const noise = (x, y, z) => {
-    const i = Math.floor(x),
-      j = Math.floor(y),
-      k = Math.floor(z);
-    const fx = x - i,
-      fy = y - j,
-      fz = z - k;
-    const u = fx * fx * (3 - 2 * fx),
-      v = fy * fy * (3 - 2 * fy),
-      w = fz * fz * (3 - 2 * fz);
-    const c = (a, b, c2) => hash(i + a, j + b, k + c2);
-    return (
-      lerp(
-        lerp(
-          lerp(c(0, 0, 0), c(1, 0, 0), u),
-          lerp(c(0, 1, 0), c(1, 1, 0), u),
-          v,
-        ),
-        lerp(
-          lerp(c(0, 0, 1), c(1, 0, 1), u),
-          lerp(c(0, 1, 1), c(1, 1, 1), u),
-          v,
-        ),
-        w,
-      ) *
-        2 -
-      1
-    );
-  };
-  const fbm = (x, y, z, o = 6) => {
-    let val = 0,
-      amp = 0.5,
-      f = 1;
-    for (let q = 0; q < o; q++) {
-      val += amp * noise(x * f + 1.7 * q, y * f + 9.2 * q, z * f + 3.1 * q);
-      f *= 2.03;
-      amp *= 0.5;
-    }
-    return val;
-  };
-  const craters = (x, y, z) => {
-    let c = 0;
-    for (let q = 0; q < 2; q++) {
-      const s = 2 + q * 3;
-      const qx = x * s,
-        qy = y * s,
-        qz = z * s;
-      const cx = Math.floor(qx),
-        cy = Math.floor(qy),
-        cz = Math.floor(qz);
-      const h1 = hash(cx, cy, cz),
-        h2 = hash(cx + 7, cy + 3, cz + 1),
-        h3 = hash(cx + 2, cy + 9, cz + 5);
-      const fx = qx - cx - 0.5 + (h2 - 0.5) * 0.4,
-        fy = qy - cy - 0.5 + (h3 - 0.5) * 0.4,
-        fz = qz - cz - 0.5;
-      const r = 0.18 + 0.22 * h1;
-      const d = Math.sqrt(fx * fx + fy * fy + fz * fz);
-      const sm = (e0, e1, t) => {
-        t = Math.min(1, Math.max(0, (t - e0) / (e1 - e0)));
-        return t * t * (3 - 2 * t);
-      };
-      const rim = sm(r, r * 0.75, d) * (1 - sm(r * 0.75, r * 0.35, d)) * 0.5;
-      const bowl = sm(r * 0.75, 0, d);
-      c += ((rim - bowl * 0.8) * (0.5 + 0.5 * h1)) / (1 + q);
-    }
-    return c;
-  };
   const colonyAngle = 1500 / state.RP;
-  const geo = new THREE.SphereGeometry(state.RP, 256, 192);
+  const geo = new THREE.SphereGeometry(state.RP, 384, 288);   // the ice ranges need the vertices
   const pos = geo.attributes.position;
   const hArr = new Float32Array(pos.count);
   const AMP = 90;
@@ -91,18 +19,8 @@ export function makePlanet() {
       ny = y / L,
       nz = z / L;
     const ang = Math.acos(Math.max(-1, Math.min(1, ny)));
-    const mask =
-      1 - Math.min(1, Math.max(0, (ang - colonyAngle) / (colonyAngle * 0.6)));
-    const m = mask * mask * (3 - 2 * mask);
-    const h =
-      (fbm(nx * 3, ny * 3, nz * 3) * 1.0 +
-        (1 - Math.abs(noise(nx * 7, ny * 7, nz * 7))) * 0.35 +
-        craters(nx, ny, nz) * 0.5 +
-        fbm(nx * 22, ny * 22, nz * 22, 3) * 0.08) *
-      (1 - m);
     const dist = ang * state.RP,
       az = Math.atan2(nz, nx),
-      local = terrainH(dist * Math.cos(az), dist * Math.sin(az)),
       height = surfaceHeight(dist * Math.cos(az), dist * Math.sin(az));
     hArr[i] = height / AMP;
     const r = state.RP + height;
@@ -139,6 +57,8 @@ export function makePlanet() {
 }
 
 export function initialize() {
+  // time and sun direction shared by everything outside the colony (water, plants, steam, the core)
+  state.envUniforms = { uTime: { value: 0 }, uSun: { value: new THREE.Vector3(1, 0.3, 0) } };
   state.scene.add(new THREE.AmbientLight(0xa8b0c4, 1.35));
   state.scene.add(new THREE.HemisphereLight(0x778ab0, 0x2a2118, 1.2));
   state.sun = new THREE.DirectionalLight(0xffe0b0, 1.3);
@@ -184,16 +104,13 @@ export function initialize() {
   state.planetMesh = makePlanet();
   state.planetMat = state.planetMesh.material;
   state.scene.add(state.planetMesh);
-  state.scene.add(
-    new THREE.Mesh(
-      new THREE.SphereGeometry(state.RP - 10, 256, 192),
-      new THREE.MeshStandardMaterial({
-        color: 0x749da8,
-        roughness: 0.42,
-        metalness: 0.18,
-      }),
-    ),
+  // The flat sea sphere stands in until the real water (models/acheron.js) is built after the first frame.
+  state.seaSphere = new THREE.Mesh(
+    new THREE.SphereGeometry(state.RP - 10, 128, 96),
+    new THREE.MeshStandardMaterial({ color: 0x749da8, roughness: 0.42, metalness: 0.18 }),
   );
+  state.scene.add(state.seaSphere);
+  state.scene.add(makeCore(state.RP - 160, state.envUniforms));
   state.scene.add(
     new THREE.Mesh(
       new THREE.SphereGeometry(state.RP * 1.035, 64, 48),
