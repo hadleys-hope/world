@@ -1009,3 +1009,28 @@ input[type="checkbox"] {
     right: 12px;
   }
 }
+
+/* The status line, planet buttons, camera strip and alerts stack in one column instead of four fixed offsets,
+   so a multi-line alert pushes nothing over the planet buttons. */
+#hud-stack {
+  position: absolute;
+  left: 24px;
+  top: 83px;
+  z-index: 8;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  max-width: min(760px, calc(100% - 48px));
+  pointer-events: none;
+}
+#hud-stack > * {
+  position: static;
+  pointer-events: auto;
+}
+@media (max-width: 850px) {
+  #hud-stack {
+    left: 15px;
+    top: 105px;
+  }
+}
