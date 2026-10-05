@@ -367,6 +367,9 @@ class UtilityNetwork:
         p = np.where(active, np.maximum(self.pressure / 9.81, 20.0), 0.0)
         use = np.zeros(w.N)
         leak = use.copy()
+        # Plain fixed-point steps converge in a handful of iterations (5-6 at 5040 houses, where the old damped
+        # step needed 66). If an error ever grows, the rest of this solve falls back to the damped step.
+        relax, last_error = 1.0, math.inf
         for iteration in range(200):
             use = requested * np.sqrt(np.clip(p / 15.0, 0, 1))
             leak = 0.62 * leak_area * np.sqrt(2 * 9.81 * np.maximum(p, 0))
@@ -394,7 +397,10 @@ class UtilityNetwork:
             error = float(np.max(np.abs(target - p)))
             if error < 1e-6:
                 break
-            p = 0.65 * p + 0.35 * target
+            if error > last_error:
+                relax = 0.35
+            last_error = error
+            p = (1 - relax) * p + relax * target
         self.iterations = iteration + 1
         self.converged = error < 1e-5
         self.residual = error

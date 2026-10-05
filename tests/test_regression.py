@@ -19,8 +19,10 @@ LIBM_DRIFT = sys.platform == "darwin"
 # The pipe-network solver sums the flows of a subtree as a difference of prefix sums (one numpy call instead of one
 # per tree level). The order of the additions differs from the fixture's level-by-level sums, so a drainage flow
 # rounded to 5 decimals can land one unit in the last place away, and the solver residual (~1e-15 m) differs in
-# its last bits. Nothing else changes: pressures, supply flows, temperatures and money are exact.
-SUMMATION_TOLERANCE = {"drainage_l_s": 1.0001e-5, "residual_m": 1e-12}
+# its last bits. The solver also takes plain fixed-point steps now, so it needs fewer iterations and stops at a
+# different point inside its convergence tolerance (1e-6 m of head). Nothing else changes: pressures, supply
+# flows, temperatures and money are exact.
+SUMMATION_TOLERANCE = {"drainage_l_s": 1.0001e-5, "residual_m": 1e-6}
 
 
 class SimulationRegression(unittest.TestCase):
@@ -68,6 +70,8 @@ class SimulationRegression(unittest.TestCase):
                     row_m[k] = b
         if abs(mine["residual_m"] - theirs["residual_m"]) <= SUMMATION_TOLERANCE["residual_m"]:
             mine["residual_m"] = theirs["residual_m"]
+        if mine["converged"] and theirs["converged"]:
+            mine["iterations"] = theirs["iterations"]  # how many steps it took, not what it found
         return actual
 
     def legacy_house(self, value):
