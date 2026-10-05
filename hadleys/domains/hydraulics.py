@@ -277,36 +277,79 @@ class UtilityNetwork:
         return systems
 
     def _prepare(self):
-        """Per-level index arrays and link constants used on every solver iteration (derived, not saved)."""
+        """Tree order and link constants used on every solver iteration (derived, not saved).
+
+        Nodes are numbered in depth-first order from the root, so every subtree is one contiguous range
+        [tin, tout) of that order. Then the flow of a link (the demand of its subtree) is a difference of two
+        prefix sums, and the head of a node (the source minus the losses on its path) is a prefix sum of range
+        updates: two numpy calls instead of one call per tree level, whatever the depth of the network.
+        """
         self._lvl = [(self.a[ids], self.b[ids], ids) for ids in self.levels]
         self._pump_level = next(k for k, ids in enumerate(self.levels) if 0 in ids)
         self._area4 = math.pi * self.diameter**2
         self._rel_rough = self.roughness / (3.7 * self.diameter)
+        n = len(self.nodes)
+        children = [[] for _ in range(n)]
+        has_parent = np.zeros(n, dtype=bool)
+        for a, b in zip(self.a.tolist(), self.b.tolist()):
+            children[a].append(b)
+            has_parent[b] = True
+        order, tin, tout = [], np.zeros(n, dtype=np.int64), np.zeros(n, dtype=np.int64)
+        for root in np.flatnonzero(~has_parent).tolist():
+            stack = [(root, False)]
+            while stack:
+                node, done = stack.pop()
+                if done:
+                    tout[node] = len(order)
+                    continue
+                tin[node] = len(order)
+                order.append(node)
+                stack.append((node, True))
+                stack.extend((c, False) for c in reversed(children[node]))
+        self._order = np.array(order, dtype=np.int64)
+        self._tin_b = tin[self.b]
+        self._tout_b = tout[self.b]
+        self._pump_range = (int(tin[1]), int(tout[1]))
 
     def __setstate__(self, d):
         self.__dict__.update(d)
         self._prepare()
 
     def __getstate__(self):
-        return {k: v for k, v in self.__dict__.items() if k not in ("_lvl", "_pump_level", "_area4", "_rel_rough")}
+        derived = ("_lvl", "_pump_level", "_area4", "_rel_rough", "_order", "_tin_b", "_tout_b", "_pump_range")
+        return {k: v for k, v in self.__dict__.items() if k not in derived}
 
     def aggregate(self, demand):
-        out = demand.copy()
-        for a, b, _ in reversed(self._lvl):
-            np.add.at(out, a, out[b])
-        return out[self.b]
+        """Flow through every link: the total demand of the subtree below it."""
+        prefix = np.concatenate(([0.0], np.cumsum(demand[self._order])))
+        return prefix[self._tout_b] - prefix[self._tin_b]
+
+    def heads(self, source, loss, pump_gain):
+        """Head at every node: the source minus the losses on its path, plus the pump below node 1."""
+        n = len(self.nodes)
+        diff = np.zeros(n + 1)
+        np.add.at(diff, self._tin_b, loss)
+        np.subtract.at(diff, self._tout_b, loss)
+        lo, hi = self._pump_range
+        diff[lo] -= pump_gain
+        diff[hi] += pump_gain
+        head = np.empty(n)
+        head[self._order] = source - np.cumsum(diff[:-1])
+        return head
 
     def headloss(self, q):
         """Darcy-Weisbach; laminar f=64/Re; Swamee-Jain turbulent estimate."""
         v = 4 * np.abs(q) / self._area4
         re = v * self.diameter / 1.31e-6  # 10 C water
         safe = np.maximum(re, 1.0)
-        turbulent = (
-            0.25
-            / np.log10(self._rel_rough + 5.74 / np.maximum(safe, 2300) ** 0.9) ** 2
-        )
-        blend = np.clip((re - 2300) / 1700, 0, 1)
-        f = (1 - blend) * 64 / safe + blend * turbulent
+        f = 64 / safe
+        # Swamee-Jain (a log10 and a power per link) only where the flow is past laminar: under 1 % of the links,
+        # and for the others the blend is exactly 0, so the result is the same number.
+        t = np.flatnonzero(re > 2300)
+        if t.size:
+            turbulent = 0.25 / np.log10(self._rel_rough[t] + 5.74 / safe[t] ** 0.9) ** 2
+            blend = np.minimum((re[t] - 2300) / 1700, 1)
+            f[t] = (1 - blend) * 64 / safe[t] + blend * turbulent
         return (f * self.length / self.diameter + self.minor) * v * v / (2 * 9.81)
 
     def solve(self, w, requested):
@@ -337,16 +380,12 @@ class UtilityNetwork:
             q = self.aggregate(node_load)
             loss = self.headloss(q)
             source = self.z[0] + 6.12 * w.water_tank_m3 / w.cfg["water_tank_m3"]
-            head = np.full(len(self.nodes), source)
             pump_gain = (
                 max(0, 28 * self.pump_speed**2 - 20000 * q[0] ** 2)
                 if w.pump_station_ok
                 else 0.0
             )
-            for k, (a, b, ids) in enumerate(self._lvl):
-                head[b] = head[a] - loss[ids]
-                if k == self._pump_level:
-                    head[1] += pump_gain
+            head = self.heads(source, loss, pump_gain)
             target = np.where(
                 active,
                 np.maximum(0, head[self.house_nodes] - self.z[self.house_nodes]),

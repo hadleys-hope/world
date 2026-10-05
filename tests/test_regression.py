@@ -16,6 +16,11 @@ FIXTURES = Path(__file__).parent / "fixtures"
 # The fixture was made with a correctly rounding libm (glibc). Only these kinematic leaves get a tolerance.
 KINEMATIC_TOLERANCE = {"x": 0.05, "y": 0.05, "distance_m": 0.05, "heading": 0.02}
 LIBM_DRIFT = sys.platform == "darwin"
+# The pipe-network solver sums the flows of a subtree as a difference of prefix sums (one numpy call instead of one
+# per tree level). The order of the additions differs from the fixture's level-by-level sums, so a drainage flow
+# rounded to 5 decimals can land one unit in the last place away, and the solver residual (~1e-15 m) differs in
+# its last bits. Nothing else changes: pressures, supply flows, temperatures and money are exact.
+SUMMATION_TOLERANCE = {"drainage_l_s": 1.0001e-5, "residual_m": 1e-12}
 
 
 class SimulationRegression(unittest.TestCase):
@@ -53,6 +58,18 @@ class SimulationRegression(unittest.TestCase):
                     mine[key] = theirs[key]
         return actual
 
+    def snap_summation_order(self, actual, expected):
+        """Replace hydraulic leaves that differ from the fixture only by summation order (see SUMMATION_TOLERANCE)."""
+        mine, theirs = actual["hydraulics"], expected["hydraulics"]
+        tol = SUMMATION_TOLERANCE["drainage_l_s"]
+        for row_m, row_t in zip(mine["drainage_l_s"], theirs["drainage_l_s"]):
+            for k, (a, b) in enumerate(zip(row_m, row_t)):
+                if abs(a - b) <= tol:
+                    row_m[k] = b
+        if abs(mine["residual_m"] - theirs["residual_m"]) <= SUMMATION_TOLERANCE["residual_m"]:
+            mine["residual_m"] = theirs["residual_m"]
+        return actual
+
     def legacy_house(self, value):
         finance = value.pop("finance")
         self.assertEqual(finance["status"], "normal")
@@ -74,6 +91,7 @@ class SimulationRegression(unittest.TestCase):
                 # Normalize tuples and string enums exactly as the HTTP JSON boundary does.
                 actual = json.loads(json.dumps(actual, allow_nan=False))
                 self.snap_kinematics(actual["snapshot"], expected[str(tick)]["snapshot"])
+                self.snap_summation_order(actual["snapshot"], expected[str(tick)]["snapshot"])
                 with self.subTest(tick=tick):
                     self.assertEqual(actual, expected[str(tick)])
             if tick < 120:
@@ -82,9 +100,11 @@ class SimulationRegression(unittest.TestCase):
         world_tick(w)
         with self.subTest(tick="day"):
             actual = json.loads(json.dumps(self.legacy_snapshot(snapshot(w))))
-            self.assertEqual(self.snap_kinematics(actual, expected["day"]), expected["day"])
+            self.snap_summation_order(self.snap_kinematics(actual, expected["day"]), expected["day"])
+            self.assertEqual(actual, expected["day"])
         w.t = w.cfg["ticks_per_day"] * w.cfg["days_per_month"] - 1
         world_tick(w)
         with self.subTest(tick="month"):
             actual = json.loads(json.dumps(self.legacy_snapshot(snapshot(w))))
-            self.assertEqual(self.snap_kinematics(actual, expected["month"]), expected["month"])
+            self.snap_summation_order(self.snap_kinematics(actual, expected["month"]), expected["month"])
+            self.assertEqual(actual, expected["month"])
