@@ -4,6 +4,7 @@ import { xyNormal } from "../geometry/planet.js";
 import { quatAt, sph, surfaceHeight, terrainH } from "../geometry/planet.js";
 import { cap } from "../geometry/primitives.js";
 import { Kit } from "./kit.js";
+import { detailGround } from "../render/ground.js";
 import * as THREE from "three";
 
 export function buildLandscape() {
@@ -45,6 +46,7 @@ export function buildLandscape() {
     new THREE.Float32BufferAttribute(colors, 3),
   );
   land.material.vertexColors = true;
+  detailGround(land.material, { radius: state.RP, dome: 700 });   // close-up detail, snow and rock, the lawn
   const k = new Kit(state.world);
   for (const [px, py, height, width] of [
     [1250, 850, 180, 280],

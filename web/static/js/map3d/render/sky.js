@@ -44,9 +44,9 @@ export function makePlanet() {
       float hash(vec3 p){ return fract(sin(dot(p,vec3(127.1,311.7,74.7)))*43758.5453); }
       float vnoise(vec3 p){ vec3 i=floor(p), f=fract(p); vec3 u=f*f*(3.0-2.0*f); return mix(mix(mix(hash(i),hash(i+vec3(1,0,0)),u.x),mix(hash(i+vec3(0,1,0)),hash(i+vec3(1,1,0)),u.x),u.y),mix(mix(hash(i+vec3(0,0,1)),hash(i+vec3(1,0,1)),u.x),mix(hash(i+vec3(0,1,1)),hash(i+vec3(1,1,1)),u.x),u.y),u.z); }
       void main(){ vec3 n=normalize(vN); vec3 sn=normalize(vP); vec3 sd=normalize(uSun); float sun=max(dot(n,sd),0.0); float day=smoothstep(-0.15,0.25,dot(sn,sd));
-        float grain=vnoise(sn*140.0)*0.6+vnoise(sn*900.0)*0.4;
+        float grain=vnoise(sn*140.0)*0.35+vnoise(sn*900.0)*0.25+vnoise(vP*0.05)*0.25+vnoise(vP*0.6)*0.15;
         vec3 rock=mix(vec3(0.15,0.13,0.11), vec3(0.36,0.31,0.26), grain); rock=mix(rock, vec3(0.44,0.38,0.31), smoothstep(0.2,0.6,vH));
-        float snow=smoothstep(0.30-0.35*uCold, 0.60-0.35*uCold, vH+0.25*(grain-0.5)) + 0.35*uStorm; float slope=1.0-max(dot(n,sn),0.0); snow*=1.0-smoothstep(0.25,0.6,slope*3.0); snow=clamp(snow,0.0,1.0);
+        float snow=smoothstep(0.30-0.35*uCold, 0.60-0.35*uCold, vH+0.25*(grain-0.5)) + 0.35*uStorm; float slope=1.0-max(dot(n,sn),0.0); snow*=1.0-smoothstep(0.25,0.6,slope*3.0); vec3 fn2=normalize(cross(dFdx(vP),dFdy(vP))); snow*=smoothstep(0.78,0.92,abs(dot(fn2,sn))+0.1*(grain-0.5)); snow=clamp(snow,0.0,1.0);
         vec3 col=mix(rock, vec3(0.86,0.89,0.94), snow);
         float ang=acos(clamp(dot(sn,uColony),-1.0,1.0)); float glow=(1.0-smoothstep(uColonyAngle*0.8, uColonyAngle*2.2, ang))*(1.0-day);
         vec3 lit=col*(0.10+0.95*sun*day+0.07*(1.0-day)) + vec3(1.0,0.75,0.45)*glow*0.35;
