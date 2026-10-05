@@ -14,3 +14,44 @@
   select, input { background:#0b0e13; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:3px 6px; font-size:12px; }
   .kpi { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:6px; } .kpi .v { font-size:16px; font-weight:600; } .kpi .l { color:var(--dim); font-size:11px; }
   .prog { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:4px; }
+/* shared shell: the bus page as cards; nothing may overflow at any zoom */
+body { overflow-x: hidden; }
+body > section.card, .bus-grid > section { margin-bottom: 14px; min-width: 0; }
+.bus-head { margin-bottom: 14px; } .bus-head h1 { margin: 0 0 10px; }
+.live-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+.live-head h2 { margin: 0 !important; }
+.live-head .dim { font-size: 12px; }
+#live-card { padding: 14px 16px; }
+#live-stage { position: relative; height: 420px; }
+#live-svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+#live-svg .lane { fill: none; stroke-width: 2; transition: opacity 0.3s; }
+#live-svg .pkt { filter: drop-shadow(0 0 3px currentColor); }
+#live-svg .pkt.bright { filter: drop-shadow(0 0 6px currentColor); }
+#live-svg .pkt-label { font: 11px var(--hh-mono); fill: var(--hh-text); paint-order: stroke; stroke: var(--hh-page); stroke-width: 3px; }
+.party { position: absolute; transform: translate(-50%, -50%); width: 170px; padding: 10px 12px; border-radius: 14px; background: var(--hh-glass-strong); border: 1px solid; display: flex; flex-direction: column; gap: 2px; }
+.party b { font-size: 13px; } .party span { font-size: 11px; color: var(--hh-dim); }
+.topic { position: absolute; transform: translate(-50%, -50%); width: 260px; display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 7px 12px !important; border-radius: 999px !important; background: var(--hh-glass-strong) !important; cursor: pointer; }
+.topic code { font: 12px var(--hh-mono); color: var(--hh-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topic .rate { font: 11px var(--hh-mono); color: var(--hh-acc-text); flex-shrink: 0; }
+.topic[aria-pressed="true"] { border-color: var(--hh-acc) !important; box-shadow: 0 0 0 3px var(--hh-acc-bg); }
+.bus-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 14px; }
+@media (max-width: 1100px) { .bus-grid { grid-template-columns: minmax(0, 1fr); } #live-stage { height: 520px; } .party { width: 130px; } .topic { width: 210px; } }
+#topic-card h3 { font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--hh-dim); margin: 14px 0 6px; }
+#topic-card .tname { font: 600 14px var(--hh-mono); color: var(--hh-acc-text); overflow-wrap: anywhere; }
+#topic-card .big { font: 16px var(--hh-mono); }
+#topic-card .what { margin: 4px 0 10px; color: var(--hh-text-2); }
+.route { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.route .who { padding: 4px 10px; border-radius: 999px; border: 1px solid; font-size: 12px; }
+.route .arrow { font: 12px var(--hh-mono); color: var(--hh-dim); }
+.facts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.facts span, .fields code { font: 11px var(--hh-mono); padding: 2px 8px; border-radius: 8px; background: var(--hh-chip); }
+.fields { display: flex; flex-wrap: wrap; gap: 6px; }
+.msg { margin: 0; padding: 10px; border-radius: 10px; background: var(--hh-chip); font: 12px/1.45 var(--hh-mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; }
+#tail { max-height: 420px !important; overflow: auto; background: transparent !important; border: 0 !important; padding: 0 !important; backdrop-filter: none; }
+#tail div { display: flex; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--hh-line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+#tail .arr { flex-shrink: 0; } #tail code { flex-shrink: 0; color: var(--hh-acc-text); }
+#tail .in code { color: var(--hh-ok); }
+#tail .dim { overflow: hidden; text-overflow: ellipsis; }
+#houses-card #houses { max-height: 520px; background: transparent !important; border: 0 !important; backdrop-filter: none; }
+.grid { display: block; }
+#topic-card h2, #topic-card .tname { text-transform: none !important; letter-spacing: 0 !important; }

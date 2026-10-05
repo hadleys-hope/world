@@ -46,6 +46,6 @@ function render() {
   document.getElementById('count').textContent = rows.length + ' houses';
   const flag = (v, good = 'ok', bad = 'bad') => v ? `<span class="${good}">yes</span>` : `<span class="${bad}">no</span>`;
   document.querySelector('#ht tbody').innerHTML = rows.slice(0, 400).map(h => `<tr><td><a href="/house?id=${h[0]}" target="_blank">${h[0]}</a></td><td>${h[1]}</td><td class="l"><span class="prog" style="background:${col(h[2])}"></span>${h[2]}</td><td class="l dim">${h[3]}</td><td>${h[4]}</td><td class="${h[5] > 19 ? 'ok' : h[5] > 15 ? 'warn' : 'bad'}">${h[5]}</td><td>${h[6] ? '<span class="warn">on</span>' : 'off'}</td><td>${h[7]}</td><td>${h[8] ? h[9] ? '<span class="warn">ups</span>' : '<span class="ok">grid</span>' : '<span class="bad">none</span>'}</td><td>${h[10] || ''}</td><td>${flag(h[11])}</td><td>${flag(h[12], 'ok', 'warn')}</td><td>${h[15] ? 'on' : '<span class="warn">off</span>'}</td><td>${h[16] ? 'open' : '<span class="warn">closed</span>'}</td><td class="dim">${h[13] < 0 ? '' : h[13] + ' min'}</td><td class="dim">${h[14] < 0 ? '' : h[14] + ' min'}</td></tr>`).join('');
-  document.getElementById('tail').innerHTML = D.tail.slice().reverse().map(x => `<div class="${x.dir}">${x.dir === 'out' ? '&rarr;' : '&larr;'} ${x.topic} <span class="dim">${x.body}</span></div>`).join('') || '<div class="dim">bus off or nothing yet</div>';
+  // the tail is drawn by bus-live.js, filtered by the selected topic
 }
 poll();
