@@ -8,6 +8,7 @@ import { addLabel, clickable } from "../render/world.js";
 import { industrialPipe } from "./campus.js";
 import { utilityPoint } from "./drainage.js";
 import { Kit } from "./kit.js";
+import { waterMaterial } from "./waters.js";
 import { parkingLot } from "./service-sites.js";
 import * as THREE from "three";
 
@@ -22,29 +23,59 @@ export function coastHeight(x, y, height) {
         0.025 * Math.sin(11 * az)),
     coast = state.sstep(0, 1, Math.max(0, Math.min(1, (1.1 - q) / 0.16)));
   height += (-26 - 22 * Math.max(0, 1 - q * q) - height) * coast;
-  const river = [
-    [500, 1550, 46],
-    [50, 1490, 34],
-    [-410, 1250, 23],
-    [-900, 1060, 12],
-    [-1450, 840, 1],
-    [-2050, 740, -8],
-  ];
-  for (let i = 1; i < river.length; i++) {
-    const a = river[i - 1],
-      b = river[i],
-      dx = b[0] - a[0],
-      dy = b[1] - a[1],
-      t = THREE.MathUtils.clamp(
-        ((x - a[0]) * dx + (y - a[1]) * dy) / (dx * dx + dy * dy),
-        0,
-        1,
-      ),
-      dist = Math.hypot(x - a[0] - dx * t, y - a[1] - dy * t),
-      blend = state.sstep(0, 1, THREE.MathUtils.clamp((95 - dist) / 70, 0, 1));
-    height += (a[2] + (b[2] - a[2]) * t - 2 - height) * blend;
+  // The river: a broad valley along the profile, and inside it a narrow channel that meanders (riverAt).
+  const r = riverAt(x, y);
+  if (r) {
+    const valley = state.sstep(0, 1, THREE.MathUtils.clamp((110 - r.dist) / 80, 0, 1));
+    height += (r.level + 1.2 - height) * valley;
+    const bank = state.sstep(0, 1, THREE.MathUtils.clamp((r.half + 7 - Math.abs(r.u)) / 9, 0, 1));
+    height += (r.level - 1.6 - height) * bank;
   }
   return height;
+}
+
+const RIVER = [
+  [500, 1550, 46],
+  [50, 1490, 34],
+  [-410, 1250, 23],
+  [-900, 1060, 12],
+  [-1450, 840, 1],
+  [-2050, 740, -8],
+];
+const meander = (s) => 26 * Math.sin(s / 95) + 9 * Math.sin(s / 31 + 1.3);
+const halfWidth = (s) => 7 + 5 * Math.sin(s / 140) ** 2 + s / 520;
+
+/** Where (x, y) is relative to the river: dist from the valley axis, u across the meandering channel,
+ * s along the river, the water level there and the channel's half width; null far from it. */
+export function riverAt(x, y) {
+  let best = null, s0 = 0;
+  for (let i = 1; i < RIVER.length; i++) {
+    const a = RIVER[i - 1], b = RIVER[i], dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy);
+    const t = THREE.MathUtils.clamp(((x - a[0]) * dx + (y - a[1]) * dy) / (L * L), 0, 1);
+    const side = ((x - a[0]) * -dy + (y - a[1]) * dx) / L;   // signed distance from the axis
+    const dist = Math.hypot(x - a[0] - dx * t, y - a[1] - dy * t);
+    if (dist < 130 && (!best || dist < best.dist)) {
+      const s = s0 + t * L;
+      best = { dist, s, u: side - meander(s), level: a[2] + (b[2] - a[2]) * t, half: halfWidth(s) };
+    }
+    s0 += L;
+  }
+  return best;
+}
+
+/** The river's water as a strip along the meandering channel: [centre x, y, level, half width, s]. */
+export function riverStrip(step = 6) {
+  const out = [];
+  let s0 = 0;
+  for (let i = 1; i < RIVER.length; i++) {
+    const a = RIVER[i - 1], b = RIVER[i], dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy);
+    for (let d = 0; d < L; d += step) {
+      const t = d / L, s = s0 + d, m = meander(s);
+      out.push([a[0] + dx * t - (dy / L) * m, a[1] + dy * t + (dx / L) * m, a[2] + (b[2] - a[2]) * t, halfWidth(s), s, dx / L, dy / L]);
+    }
+    s0 += L;
+  }
+  return out;
 }
 
 export function seaPoint(x, y, level = -8) {
@@ -100,96 +131,48 @@ export function buildOcean() {
   const geom = new THREE.BufferGeometry();
   geom.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
   geom.setIndex(idx);
-  geom.computeVertexNormals();
-  const ice = new THREE.Mesh(
-    geom,
-    new THREE.MeshStandardMaterial({
-      color: 0x7cabb4,
-      metalness: 0.18,
-      roughness: 0.32,
-      side: THREE.DoubleSide,
-      envMapIntensity: 0.75,
-    }),
-  );
-  state.world.add(ice);
-  state.complex.ocean = ice;
-  // Pressure ridges and branching fractures in the frozen sea, grounded at sea level.
-  const cracks = [],
-    k = new Kit(state.world);
-  for (let n = 0; n < 110; n++) {
-    const a = n * 2.39996,
-      r = Math.sqrt((n + 0.5) / 110) * 0.92,
-      x = cx + Math.cos(a) * rx * r,
-      y = cy + Math.sin(a) * ry * r;
-    const path = [];
-    for (let j = 0; j < 7; j++)
-      path.push(
-        seaPoint(x + j * 13, y + Math.sin(n + j * 1.7) * 12, level + 0.11),
-      );
-    cracks.push(path);
-    if (n % 3 === 0)
-      k.add(
-        "ball",
-        state.M.white,
-        seaPoint(x, y, level + 0.3).toArray(),
-        [12, 1.4, 4],
-        quatAt(x, y, a),
-        0xb5ced0,
-      );
-  }
-  new LineLayer(cracks, 0x335f70);
-  // Frozen river follows an explicit descending hydraulic profile, from highlands to sea.
-  const points = state.G.river || [
-      [500, 1550, 46],
-      [50, 1490, 34],
-      [-410, 1250, 23],
-      [-900, 1060, 12],
-      [-1450, 840, 1],
-      [-2050, 740, -8],
-    ],
-    riverPos = [],
-    riverIdx = [];
-  for (let segment = 1; segment < points.length; segment++) {
-    const a = points[segment - 1],
-      b = points[segment],
-      dx = b[0] - a[0],
-      dy = b[1] - a[1],
-      L = Math.hypot(dx, dy),
-      N = Math.ceil(L / 14);
-    for (let j = 0; j <= N; j++) {
-      const t = j / N,
-        x = a[0] + dx * t,
-        y = a[1] + dy * t,
-        h = a[2] + (b[2] - a[2]) * t + 0.08,
-        width = 12 + segment * 1.5,
-        base = riverPos.length / 3;
-      for (const sign of [-1, 1]) {
-        const p = seaPoint(
-          x - (dy / L) * width * sign,
-          y + (dx / L) * width * sign,
-          h,
-        );
-        riverPos.push(p.x, p.y, p.z);
-      }
-      if (j < N)
-        riverIdx.push(base, base + 2, base + 1, base + 1, base + 2, base + 3);
+  // depth of water under every vertex, so the shallows are clear and the shore foams
+  const depth = [];
+  for (let r = 0; r <= rings; r++)
+    for (let j = 0; j < segs; j++) {
+      const a = (j * Math.PI * 2) / segs,
+        x = cx + ((rx * 1.2 * r) / rings) * Math.cos(a),
+        y = cy + ((ry * 1.2 * r) / rings) * Math.sin(a);
+      depth.push(level - terrainH(x, y));
     }
-  }
+  geom.setAttribute("aDepth", new THREE.Float32BufferAttribute(depth, 1));
+  geom.setAttribute("aLiquid", new THREE.Float32BufferAttribute(new Float32Array(depth.length).fill(1), 1));
+  geom.setAttribute("aWarm", new THREE.Float32BufferAttribute(new Float32Array(depth.length), 1));
+  const sea = new THREE.Mesh(geom, waterMaterial(state.envUniforms, { tint: [0.03, 0.24, 0.30], floes: 0.55 }));
+  sea.renderOrder = 2;
+  state.world.add(sea);
+  state.complex.ocean = sea;
+  const k = new Kit(state.world);
+  // The river: open, fast water that never freezes, on the meandering channel carved in coastHeight.
+  const strip = riverStrip(), rpos = [], rdepth = [], ridx = [];
+  strip.forEach(([x, y, level, half, , ux, uy], i) => {
+    for (const side of [-1.35, -0.6, 0, 0.6, 1.35]) {
+      const px = x - uy * half * side, py = y + ux * half * side;
+      const p = seaPoint(px, py, level - 0.55);
+      rpos.push(p.x, p.y, p.z);
+      rdepth.push(level - 0.55 - terrainH(px, py));
+    }
+    if (i < strip.length - 1)
+      for (let c = 0; c < 4; c++) {
+        const a = i * 5 + c;
+        ridx.push(a, a + 5, a + 1, a + 1, a + 5, a + 6);
+      }
+  });
   const rg = new THREE.BufferGeometry();
-  rg.setAttribute("position", new THREE.Float32BufferAttribute(riverPos, 3));
-  rg.setIndex(riverIdx);
-  rg.computeVertexNormals();
-  state.world.add(
-    new THREE.Mesh(
-      rg,
-      new THREE.MeshStandardMaterial({
-        color: 0x97c0c5,
-        metalness: 0.22,
-        roughness: 0.28,
-        side: THREE.DoubleSide,
-      }),
-    ),
-  );
+  rg.setAttribute("position", new THREE.Float32BufferAttribute(rpos, 3));
+  rg.setAttribute("aDepth", new THREE.Float32BufferAttribute(rdepth, 1));
+  rg.setAttribute("aLiquid", new THREE.Float32BufferAttribute(new Float32Array(rdepth.length).fill(1), 1));
+  rg.setAttribute("aWarm", new THREE.Float32BufferAttribute(new Float32Array(rdepth.length), 1));
+  rg.setIndex(ridx);
+  const flowDir = new THREE.Vector3(-2550, 0, -810).normalize();   // roughly downstream, towards the sea
+  const river = new THREE.Mesh(rg, waterMaterial(state.envUniforms, { tint: [0.06, 0.3, 0.32], flow: flowDir.toArray() }));
+  river.renderOrder = 2;
+  state.world.add(river);
   // Sparse, frost-encrusted columnar organisms and low tundra; no temperate grass at -50 C.
   for (let n = 0; n < 760; n++) {
     const a = n * 2.39996,
