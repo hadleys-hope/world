@@ -1,6 +1,7 @@
 /** geometry/planet: procedural colony viewer. */
 import { state } from "../state.js";
 import { coastHeight } from "../models/ocean.js";
+import { wild } from "./noise.js";
 import * as THREE from "three";
 
 export function terrainH(x, y) {
@@ -30,6 +31,9 @@ export function terrainH(x, y) {
   ])
     natural +=
       height * Math.exp(-((x - px) ** 2 + (y - py) ** 2) / (width * width));
+  // Beyond the facilities the land turns wild: ice ranges, valleys, lakes and rivers (geometry/noise.js).
+  const far = state.sstep(2300, 3300, r);
+  if (far > 0) natural += far * wildXY(x, y).h;
   return coastHeight(
     x,
     y,
@@ -39,20 +43,21 @@ export function terrainH(x, y) {
   );
 }
 
+/** The wild terrain at a point of the colony map (x, y from the colony along the surface). */
+export function wildXY(x, y) {
+  const a = Math.hypot(x, y) / state.RP,
+    p = Math.atan2(y, x),
+    s = Math.sin(a);
+  return wild(s * Math.cos(p), Math.cos(a), s * Math.sin(p));
+}
+
 export function farSurface(x, y) {
-  const n = xyNormal(x, y),
-    p = Math.atan2(n.z, n.x),
-    a = Math.asin(n.y);
-  return (
-    12 +
-    48 * Math.sin(p * 4 + Math.sin(a * 3)) * Math.cos(a * 7) +
-    20 * Math.sin(p * 17 + a * 11) +
-    8 * Math.sin(p * 53 - a * 37)
-  );
+  return 22 + wildXY(x, y).h;
 }
 
 export function surfaceHeight(x, y) {
   const d = Math.hypot(x, y);
+  if (d >= 4700) return farSurface(x, y);   // the colony terrain no longer contributes: skip computing it
   return d < 4350
     ? terrainH(x, y)
     : THREE.MathUtils.lerp(
