@@ -162,3 +162,32 @@ export function hotSprings(vents, radius, uniforms) {
   steam.frustumCulled = false;
   return [pool, steam];
 }
+
+/** Instances split into chunks by direction (cell, radians), one InstancedMesh each. update(cameraLocal)
+ * hides every chunk farther than maxDist from the camera: a forest of 50 000 trees costs only the chunks
+ * around you, the way voxel-game mods keep far terrain cheap. */
+export function chunkedInstances(makeGeometry, material, items, radius, { cell = 0.05, maxDist = 3000 } = {}) {
+  const groups = new Map();
+  for (const it of items) {
+    const n = it.n, key = `${Math.round(n[0] / cell)},${Math.round(n[1] / cell)},${Math.round(n[2] / cell)}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(it);
+  }
+  const root = new THREE.Group();
+  const chunks = [];
+  const base = makeGeometry();                       // built once; every chunk shares its vertex buffers
+  for (const list of groups.values()) {
+    const g = new THREE.BufferGeometry();
+    for (const name of ["position", "normal", "aCol"]) g.setAttribute(name, base.getAttribute(name));
+    const mesh = instances(g, material, list, radius);
+    mesh.visible = false;
+    root.add(mesh);
+    chunks.push(mesh);
+  }
+  root.userData.update = (cam) => {
+    for (const m of chunks) m.visible = m.boundingSphere.center.distanceTo(cam) < maxDist + m.boundingSphere.radius;
+  };
+  root.userData.count = items.length;
+  root.userData.chunks = chunks.length;
+  return root;
+}
