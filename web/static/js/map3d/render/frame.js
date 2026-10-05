@@ -6,6 +6,7 @@ import { bodyHeight } from "../geometry/noise.js";
 import { buildAcheronLife } from "../models/acheron.js";
 import { upgradeWorlds } from "../models/worlds.js";
 import { buildDome, buildOasis } from "../models/oasis.js";
+import { updateKlyaksa } from "../models/klyaksa.js";
 import { quatAt, sph } from "../geometry/planet.js";
 import { updateUtilityFlow } from "../models/drainage.js";
 import { updateSolarSystem } from "../models/solar-system.js";
@@ -42,6 +43,7 @@ export function frame() {
   }
   updateCameraMotion(now);
   keepAboveGround();
+  updateKlyaksa(now);
   state.envUniforms.uTime.value = t;
   if (!state.lifeSteps && state.housesMesh) {
     // after the colony's first frame: build the wild land and the other worlds a step at a time, when idle

@@ -81,10 +81,30 @@ export function bodyHeight(kind, nx, ny, nz) {
     const crater = -Math.max(0, 0.12 - Math.abs(noise3(nx * 11, ny * 11, nz * 11))) * 0.15;
     return 0.004 * dunes + mesa + crater + 0.006 * fbm3(nx * 6, ny * 6, nz * 6, 3);
   }
-  // Klyaksa: continents and islands in a warm ocean, mountains inland
-  const cont = fbm3(nx * 2.2, ny * 2.2, nz * 2.2, 5) + 0.04;
-  const ridge = ridged3(nx * 7, ny * 7, nz * 7, 3) * smooth(0.08, 0.3, cont);
-  return 0.02 * cont + 0.028 * ridge * ridge;
+  // Klyaksa: continents in a warm ocean; ranges inland with valleys between them, rivers down the valleys,
+  // lakes in the basins; flat plateaus where the domed cities stand (setSites).
+  const wx = nx + 0.12 * noise3(nx * 4 + 3, ny * 4, nz * 4), wy = ny + 0.12 * noise3(nx * 4, ny * 4 + 3, nz * 4), wz = nz + 0.12 * noise3(nx * 4, ny * 4, nz * 4 + 3);
+  const cont = fbm3(wx * 2.2, wy * 2.2, wz * 2.2, 5) + 0.04;
+  const land = smooth(0.0, 0.12, cont);
+  const ridge = ridged3(wx * 9, wy * 9, wz * 9, 4) * smooth(0.06, 0.28, cont);
+  const valleys = Math.pow(Math.abs(noise3(wx * 14, wy * 14, wz * 14)), 0.7);       // 0 on valley floors
+  let h = 0.016 * cont + 0.03 * ridge * ridge * (0.35 + 0.65 * valleys) + 0.0015 * fbm3(nx * 60, ny * 60, nz * 60, 3) * land;
+  const rv = Math.abs(noise3(wx * 18 + 1, wy * 18, wz * 18 - 2));
+  const river = (1 - smooth(0.008, 0.03, rv)) * land * (1 - smooth(0.006, 0.02, h));
+  h += (-0.0012 - h) * river;
+  for (const s of SITES) {
+    const d = Math.acos(Math.max(-1, Math.min(1, nx * s.dir[0] + ny * s.dir[1] + nz * s.dir[2])));
+    h += (PLATEAU - h) * (1 - smooth(s.r, s.r * 1.7, d));
+  }
+  return h;
+}
+
+// Klyaksa's city sites: [{ dir: unit vector, r: angular radius }], set before its surface is built
+const SITES = [];
+export const PLATEAU = 0.0035;
+export function setSites(sites) {
+  SITES.length = 0;
+  SITES.push(...sites);
 }
 
 // The same kind of noise for shaders (visual detail only, not heights).

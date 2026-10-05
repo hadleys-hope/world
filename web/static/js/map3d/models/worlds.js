@@ -3,9 +3,10 @@
  * dust storms. Klyaksa, the new colony: continents in a clear ocean, beaches, meadows, forests, snow peaks,
  * clouds. Each body is upgraded after the first frame, one idle step at a time. */
 import { state } from "../state.js";
-import { bodyHeight, fbm3, GLSL_NOISE } from "../geometry/noise.js";
+import { bodyHeight, GLSL_NOISE } from "../geometry/noise.js";
 import { buildWater } from "./waters.js";
-import { instances, lifeMaterial, treeGeometry, tuftGeometry } from "./life.js";
+import { waterMaterial } from "./waters.js";
+import { buildKlyaksa, dirAt, klyaksaSites, loadKlyaksa } from "./klyaksa.js";
 import * as THREE from "three";
 
 function rng(seed) {
@@ -37,15 +38,19 @@ const SURFACE = {
       vec3 glow=vec3(0.0);`,
 };
 
+const PATCH = 11500;   // metres: the fine-grained land around Klyaksa's colony
+
 function surfaceMesh(spec, uniforms) {
   const R = spec.radius, geo = new THREE.SphereGeometry(R, 320, 240), pos = geo.attributes.position;
+  const centre = spec.kind === 3 ? dirAt(0, 0, R) : null;
   const hs = new Float32Array(pos.count);
   let lo = 1e9, hi = -1e9;
   for (let i = 0; i < pos.count; i++) {
     const x = pos.getX(i) / R, y = pos.getY(i) / R, z = pos.getZ(i) / R;
     const h = bodyHeight(spec.kind, x, y, z);
     hs[i] = h; lo = Math.min(lo, h); hi = Math.max(hi, h);
-    pos.setXYZ(i, x * R * (1 + h), y * R * (1 + h), z * R * (1 + h));
+    const sink = centre && centre.angleTo(new THREE.Vector3(x, y, z)) < (PATCH * 0.98) / R ? 25 / R : 0;
+    pos.setXYZ(i, x * R * (1 + h - sink), y * R * (1 + h - sink), z * R * (1 + h - sink));
   }
   // aH: 0..1 across the body's height range; on Klyaksa 0 is the sea level, below it negative
   const aH = new Float32Array(pos.count);
@@ -58,15 +63,59 @@ function surfaceMesh(spec, uniforms) {
       void main(){ vN=normalize(mat3(modelMatrix)*normal); vP=position; vH=aH; vec4 w=modelMatrix*vec4(position,1.0); vW=w.xyz; gl_Position=projectionMatrix*viewMatrix*w; }`,
     fragmentShader: `uniform float uTime, uKind; uniform vec3 uLight; varying vec3 vN, vP, vW; varying float vH;
       ${GLSL_NOISE}
-      void main(){ vec3 p=normalize(vP); float d=fbm(p*40.0)*0.7+n3(vW*0.08)*0.3;
+      void main(){ vec3 p=normalize(vP); float d=fbm(p*40.0)*0.5+n3(vW*0.08)*0.25+n3(vW*0.7)*0.15+n3(vW*4.0)*0.1;
         ${SURFACE[spec.kind]}
         vec3 n=normalize(vN); float light=max(dot(n,normalize(uLight)),0.0);
         float rim=pow(1.0-max(dot(n,normalize(cameraPosition-vW)),0.0),3.0);
         gl_FragColor=vec4(col*(0.07+0.93*light)+glow+rim*0.12*col, 1.0); }`,
   });
+  mat.userData.hi = hi;
   const mesh = new THREE.Mesh(geo, mat);
   mesh.matrixAutoUpdate = false;
   return mesh;
+}
+
+/** Klyaksa around the colony: a fine cap (about 20 m between vertices) with the same material, and its water. */
+function klyaksaPatch(spec, material, uniforms) {
+  const R = spec.radius, rings = 240, segs = 480, hi = material.userData.hi;
+  const pos = [], aH = [], depth = [], idx = [];
+  for (let r = 0; r <= rings; r++)
+    for (let k = 0; k < segs; k++) {
+      const d = (PATCH * r) / rings, a = (k / segs) * Math.PI * 2;
+      const v = dirAt(Math.cos(a) * d, Math.sin(a) * d, R), h = bodyHeight(3, v.x, v.y, v.z);
+      pos.push(...v.clone().multiplyScalar(R * (1 + h)).toArray());
+      aH.push(h / hi);
+      depth.push(-h * R);
+    }
+  for (let r = 0; r < rings; r++)
+    for (let k = 0; k < segs; k++) {
+      const a = r * segs + k, b = r * segs + ((k + 1) % segs), c = a + segs, d = b + segs;
+      idx.push(a, c, b, b, c, d);
+    }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute("aH", new THREE.Float32BufferAttribute(aH, 1));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  const land = new THREE.Mesh(g, material);
+  // water on the same grid, only the cells that are wet
+  const widx = [];
+  for (let t = 0; t < idx.length; t += 3)
+    if (Math.max(depth[idx[t]], depth[idx[t + 1]], depth[idx[t + 2]]) > -0.5) widx.push(idx[t], idx[t + 1], idx[t + 2]);
+  const wg = new THREE.BufferGeometry();
+  const wpos = pos.map((v, i) => v);                                     // water lies on the sphere of radius R
+  for (let i = 0; i < wpos.length; i += 3) {
+    const L = Math.hypot(wpos[i], wpos[i + 1], wpos[i + 2]);
+    wpos[i] *= R / L; wpos[i + 1] *= R / L; wpos[i + 2] *= R / L;
+  }
+  wg.setAttribute("position", new THREE.Float32BufferAttribute(wpos, 3));
+  wg.setAttribute("aDepth", new THREE.Float32BufferAttribute(depth, 1));
+  wg.setAttribute("aLiquid", new THREE.Float32BufferAttribute(new Float32Array(depth.length).fill(1), 1));
+  wg.setAttribute("aWarm", new THREE.Float32BufferAttribute(new Float32Array(depth.length), 1));
+  wg.setIndex(widx);
+  const water = new THREE.Mesh(wg, waterMaterial(uniforms, { tint: [0.03, 0.30, 0.42] }));
+  water.renderOrder = 2;
+  return [land, water];
 }
 
 function cloudLayer(R, uniforms, kind) {
@@ -106,11 +155,18 @@ function ring(R, uniforms) {
 }
 
 export function upgradeWorlds(steps) {
+  loadKlyaksa();
   [0, 1, 3].forEach((i) => {
-    steps.push(() => {
+    const step = () => {
       const ss = state.solarSystem;
       if (!ss) return;
       const body = ss.bodies[i], spec = ss.specs[i], old = body.userData.surface;
+      if (i === 3 && state.klyaksaPlanData === undefined) {
+        // not here yet: ask once, and come back to this step when the plan has arrived
+        if (!state.klyaksaWaiting) state.klyaksaWaiting = klyaksaSites(spec.radius).then((p) => (state.klyaksaPlanData = p || null));
+        steps.push(step);
+        return;
+      }
       const u = { uTime: old.uniforms.uTime, uKind: old.uniforms.uKind, uLight: old.uniforms.uLight };
       const mesh = surfaceMesh(spec, u);
       const flat = body.children.find((c) => c.material === old);
@@ -120,35 +176,25 @@ export function upgradeWorlds(steps) {
       const R = spec.radius;
       body.add(cloudLayer(R * (i === 0 ? 1.06 : 1.03), { uTime: u.uTime, uLight: u.uLight }, spec.kind));
       if (i === 1) body.add(ring(R, { uTime: u.uTime }));
-    });
+      if (i === 3) klyaksaLife(steps, body, spec, mesh.material);
+    };
+    steps.push(step);
   });
-  // Klyaksa: the ocean, the forests and the meadows of the landing coast
+}
+
+// Klyaksa: the ocean, the fine land around the colony, then its cities and valleys
+function klyaksaLife(steps, body, spec, material) {
+  const R = spec.radius, u = material.uniforms, env = { uTime: u.uTime, uSun: u.uLight };
+  const centre = dirAt(0, 0, R);
   steps.push(() => {
-    const ss = state.solarSystem;
-    if (!ss) return;
-    const body = ss.bodies[3], spec = ss.specs[3], R = spec.radius, u = body.userData.surface.uniforms;
-    const env = { uTime: u.uTime, uSun: u.uLight };
     body.add(buildWater({
-      radius: R, res: 320, uniforms: env, tint: [0.03, 0.30, 0.42],
-      sample: (x, y, z) => ({ depth: -bodyHeight(3, x, y, z) * R, liquid: 1, warm: 0 }),
+      radius: R, res: 448, uniforms: env, tint: [0.03, 0.30, 0.42],
+      sample: (x, y, z) => (centre.angleTo(new THREE.Vector3(x, y, z)) < (PATCH * 0.97) / R ? { depth: -5 } : { depth: -bodyHeight(3, x, y, z) * R, liquid: 1, warm: 0 }),
     }));
-    const rand = rng(77), trees = [], tufts = [];
-    for (let k = 0; k < 120000 && trees.length < 9000; k++) {
-      const n = randomDir(rand), h = bodyHeight(3, ...n);
-      if (h < 0.0012 || h > 0.016) continue;
-      if (fbm3(n[0] * 5, n[1] * 5, n[2] * 5, 3) < 0.02) continue;                   // forests come in patches
-      trees.push({ n, h: h * R - 0.3, s: 2.2 + rand() * 2.2, tint: [0.85 + rand() * 0.3, 0.9 + rand() * 0.2, 0.85] });
-    }
-    const site = [-0.66, 0.32, -0.68];                                               // the landing coast
-    for (let k = 0; k < 80000 && tufts.length < 16000; k++) {
-      const n = randomDir(rand);
-      if (n[0] * site[0] + n[1] * site[1] + n[2] * site[2] < 0.9) continue;
-      const h = bodyHeight(3, ...n);
-      if (h < 0.0006 || h > 0.008) continue;
-      tufts.push({ n, h: h * R - 0.05, s: 1.2 + rand() * 1.6, tint: [0.9 + rand() * 0.2, 1, 0.8] });
-    }
-    body.add(instances(treeGeometry("pine"), lifeMaterial(env, { sway: 0.004 }), trees.filter((_, j) => j % 2 === 0), R));
-    body.add(instances(treeGeometry("broad"), lifeMaterial(env, { sway: 0.004 }), trees.filter((_, j) => j % 2 === 1), R));
-    body.add(instances(tuftGeometry(0x2f5a1e, 0x9cc95a), lifeMaterial(env, { sway: 0.1 }), tufts, R));
   });
+  steps.push(() => { for (const m of klyaksaPatch(spec, material, env)) body.add(m); });
+  if (state.klyaksaPlanData) {
+    state.klyaksaLod = [];
+    buildKlyaksa(steps, body, R, u);
+  }
 }

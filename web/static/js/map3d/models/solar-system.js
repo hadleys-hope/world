@@ -46,7 +46,7 @@ export function buildSolarSystem() {
     },
     {
       name: "KLYAKSA",
-      radius: 2800,
+      radius: 12000,
       orbit: 101000,
       period: 17200,
       phase: 5.8,

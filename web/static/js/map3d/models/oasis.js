@@ -19,14 +19,14 @@ const dirOf = (x, y) => {
   return [s * Math.cos(p), Math.cos(a), s * Math.sin(p)];
 };
 
-export function buildDome() {
-  const AZ = 192, EL = 64, rim = surfaceHeight(DOME_R, 0);
+/** A glass dome: point(x, y, h) maps a local plan position and a height to the body's frame. */
+export function makeDome(point, radius, height, uniforms, segments = 192) {
+  const AZ = segments, EL = 64;
   const pos = [], uv = [], idx = [];
   for (let j = 0; j <= EL; j++) {
-    const t = j / EL, r = DOME_R * Math.cos((t * Math.PI) / 2), up = DOME_H * Math.sin((t * Math.PI) / 2);
+    const t = j / EL, r = radius * Math.cos((t * Math.PI) / 2), up = height * Math.sin((t * Math.PI) / 2);
     for (let i = 0; i <= AZ; i++) {
-      const a = (i / AZ) * Math.PI * 2, x = r * Math.cos(a), y = r * Math.sin(a);
-      const p = sph(x, y, rim + up - surfaceHeight(x, y) - 0.5);
+      const a = (i / AZ) * Math.PI * 2, p = point(r * Math.cos(a), r * Math.sin(a), up);
       pos.push(p.x, p.y, p.z);
       uv.push(i / AZ, t);
     }
@@ -41,18 +41,25 @@ export function buildDome() {
   geo.setAttribute("aUV", new THREE.Float32BufferAttribute(uv, 2));
   geo.setIndex(idx);
   geo.computeVertexNormals();
-  const dome = new THREE.Mesh(geo, new THREE.ShaderMaterial({
-    transparent: true, depthWrite: false, side: THREE.DoubleSide, uniforms: state.envUniforms,
-    vertexShader: `attribute vec2 aUV; varying vec2 vUV; varying vec3 vN, vW;
-      void main(){ vUV=aUV; vN=normalize(mat3(modelMatrix)*normal); vec4 w=modelMatrix*vec4(position,1.0); vW=w.xyz; gl_Position=projectionMatrix*viewMatrix*w; }`,
-    fragmentShader: `uniform vec3 uSun; uniform float uTime; varying vec2 vUV; varying vec3 vN, vW;
+  const dome = new THREE.Mesh(geo, glassMaterial(uniforms));
+  dome.renderOrder = 3;
+  dome.matrixAutoUpdate = false;
+  return dome;
+}
+
+export function glassMaterial(uniforms) {
+  return new THREE.ShaderMaterial({
+    transparent: true, depthWrite: false, side: THREE.DoubleSide, uniforms,
+    vertexShader: `attribute vec2 aUV; varying vec2 vUV; varying vec3 vN, vW, vC;
+      void main(){ vUV=aUV; vN=normalize(mat3(modelMatrix)*normal); vec4 w=modelMatrix*vec4(position,1.0); vW=w.xyz;
+        vC=(modelMatrix*vec4(0.,0.,0.,1.)).xyz; gl_Position=projectionMatrix*viewMatrix*w; }`,
+    fragmentShader: `uniform vec3 uSun; varying vec2 vUV; varying vec3 vN, vW, vC;
       void main(){ vec3 n=normalize(vN); vec3 v=normalize(cameraPosition-vW); if(dot(n,v)<0.0) n=-n;
-        vec3 s=normalize(uSun); float day=smoothstep(-0.12,0.25,dot(normalize(vW),s));
-        // geodesic frame: three families of struts, thinning towards the top where the panels get smaller
+        vec3 s=normalize(uSun); float day=smoothstep(-0.12,0.25,dot(normalize(vW-vC),s));
         float u=vUV.x*96.0, w=vUV.y*28.0;
         float l1=abs(fract(u+w*0.5)-0.5), l2=abs(fract(u-w*0.5)-0.5), l3=abs(fract(w)-0.5)*1.7;
         float frame=1.0-smoothstep(0.012,0.035,min(min(l1,l2),l3));
-        float base=smoothstep(0.035,0.0,vUV.y);                                  // the steel footing ring
+        float base=smoothstep(0.035,0.0,vUV.y);
         float fres=pow(1.0-abs(dot(n,v)),3.0);
         float spec=pow(max(dot(reflect(-s,n),v),0.0),300.0)*day*2.5;
         float glint=pow(max(dot(reflect(-s,n),v),0.0),18.0)*day*0.25;
@@ -60,12 +67,14 @@ export function buildDome() {
         vec3 steel=vec3(0.30,0.33,0.36)*(0.35+0.65*max(dot(n,s),0.0)*day+0.15);
         vec3 col=mix(glass, steel, max(frame,base))+vec3(1.0,0.97,0.9)*(spec+glint);
         float a=mix(0.05+0.42*fres+spec, 0.92, max(frame*0.85,base));
-        // at night the city's light glows on the inside of the glass
         col+=vec3(1.0,0.78,0.5)*0.08*(1.0-day)*(1.0-vUV.y);
         gl_FragColor=vec4(col, clamp(a,0.0,1.0)); }`,
-  }));
-  dome.renderOrder = 3;
-  dome.matrixAutoUpdate = false;
+  });
+}
+
+export function buildDome() {
+  const rim = surfaceHeight(DOME_R, 0);
+  const dome = makeDome((x, y, up) => sph(x, y, rim + up - surfaceHeight(x, y) - 0.5), DOME_R, DOME_H, state.envUniforms);
   state.world.add(dome);
   state.dome = dome;
 }
