@@ -6,7 +6,8 @@
     '/bus': 'nav-bus',
     '/house': 'nav-house',
     '/graph': 'nav-graph',
-    '/attractors': 'nav-attr'
+    '/attractors': 'nav-attr',
+    '/finance': 'nav-fin'
   }[p];
   if (id) document.getElementById(id).classList.add('on');
 })();

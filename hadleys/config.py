@@ -128,6 +128,32 @@ CFG = {
     "company_levy_frac": 0.5,  # share of the surplus above the target the company takes at month close
     "sector_budget_cap": 30000.0,  # sector money above this goes to the colony at month close
     "reactor_upkeep_month": 3000.0,
+    # households: one occupied house is one household with its own cash (docs/FINANCE_RU.md)
+    "hh_start_cash": 200.0,  # opening balance of every occupied house
+    "wage_day": {"mine": 36.0, "reactor": 40.0, "water plant": 34.0, "services": 30.0},  # cr per worker per day
+    "wage_manager_mult": 1.6,  # manager houses earn this multiple of the wage
+    "idle_pay_frac": 0.2,  # share of the wage paid while the employer stands still (mine stopped, plant down)
+    "employer_houses": {"reactor": 18, "water plant": 14},  # occupied houses per employer; services up to the payroll, the rest mine
+    "services_payroll_share": 0.9,  # services wages may take at most this share of colony_payroll_day
+    "crew_pay_per_repair_tick": 0.15,  # paid to the crew household out of the repair cost, the rest buys materials
+    "crew_pay_per_trip": 6.0,  # paid to the driver household for a full waste or sludge load
+    "hh_cash_reserve": 600.0,  # above this a household in good standing spends on discretionary purchases
+    "hh_discretionary_frac": 0.2,  # share of the cash above the reserve spent per day at the commissary
+    "bill_grace_days": 5,  # an unpaid bill becomes overdue this many days after it was issued
+    "loan_rate_month": 0.03,  # interest per 30 days on the outstanding principal, accrued daily
+    "loan_period_days": 7,  # one instalment per period
+    "loan_term_periods": 12,
+    "loan_min": 100.0,
+    "loan_step": 50.0,  # loans are rounded up to this step
+    "credit_limit_months": 2.0,  # credit limit = this many months of the nominal wage ...
+    "credit_limit_min": 600.0,  # ... but not below this
+    "loan_max_active": 2,
+    "loan_prepay_keep": 150.0,  # a household in good standing prepays loans with the cash above this
+    "instalment_grace_days": 0,  # an instalment not paid in full at its due day close is overdue at once
+    "bankruptcy_overdue_days": 14,  # continuously overdue this long: bankrupt
+    "bankrupt_interest": False,  # interest stops accruing on the loans of a bankrupt household
+    "bankrupt_eco_heating": True,  # a bankrupt household heats to eco_c to save money
+    "mine_flood_days": 3,  # operator event "mine flooded": the mine stands still this long
     # incidents: probability per tick
     "p_xeno": 0.00004,
     "p_vandal": 0.00025,
