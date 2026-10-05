@@ -83,6 +83,8 @@ export function sectorCards(s) {
 }
 
 export async function loadGeom() {
+  // the first /state downloads while the geometry is parsed and the scene is built, not after
+  state.firstState = fetch("/state").then((r) => r.json()).catch(() => null);
   state.G = await (await fetch("/geometry")).json();
   state.TER = {
     hub: state.G.cfg.hub_radius,
@@ -96,7 +98,9 @@ export async function loadGeom() {
 
 export async function poll() {
   try {
-    const s = await (await fetch("/state")).json();
+    const early = state.firstState ? await state.firstState : null;
+    state.firstState = null;
+    const s = early || (await (await fetch("/state")).json());
     const first = !state.S;
     state.prevS = state.S;
     state.S = s;
