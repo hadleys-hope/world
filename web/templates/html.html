@@ -3,30 +3,27 @@
 <link rel="stylesheet" href="/static/css/navigation.css">
 <link rel="stylesheet" href="/static/css/map.css">
 </head>
-<body>
+<body class="hh-full">
+NAVHTML
 <div id="map"><canvas id="c"></canvas>
   <div id="banner" data-i18n="connecting...">connecting...</div>
-  <div id="legend"><span data-i18n="Map">Map</span>: <span data-i18n="house colour = indoor temperature (blue cold, orange warm), red frame = no power, blue frame = on sector UPS, x = burst pipes.">house colour = indoor temperature (blue cold, orange warm), red frame = no power, blue frame = on sector UPS, x = burst pipes.</span><br>
-  <span data-i18n="Yellow lines = power (moving dashes = energised), blue = water, cyan = internet cable, cyan dots = packets, red dot = packet with no uplink.">Yellow lines = power (moving dashes = energised), blue = water, cyan = internet cable, cyan dots = packets, red dot = packet with no uplink.</span><br>
-  <span data-i18n="Poles: dot; orange = tilted, red x = fallen; glow = street lamp on. Gates on the ring road: green open, grey closed, red lockdown.">Poles: dot; orange = tilted, red x = fallen; glow = street lamp on. Gates on the ring road: green open, grey closed, red lockdown.</span><br>
-  <span data-i18n="Rovers: G garbage, S sludge hauler, E engineers, P plumber. Red diamonds = xenomorphs. ! = open issue.">Rovers: G garbage, S sludge hauler, E engineers, P plumber. Red diamonds = xenomorphs. ! = open issue.</span></div>
+  <div id="layer-seg" role="group" aria-label="Map layer"><button data-layer="colony" aria-pressed="true" data-i18n="Colony">Colony</button><button data-layer="water" aria-pressed="false" data-i18n="Water">Water</button><button data-layer="power" aria-pressed="false" data-i18n="Power">Power</button><button data-layer="network" aria-pressed="false" data-i18n="Network">Network</button></div>
+  <div id="legend"></div>
+  <div id="map-hint" data-i18n="Click a sector">Click a sector</div>
   <div id="finished"></div>
   <div id="tip" style="position:absolute;display:none;background:rgba(23,26,33,.95);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:11px;pointer-events:none"></div>
 </div>
 <div id="side">
-  <div class="row" style="margin-bottom:8px"><a href="/" class="tab" data-i18n="3D planet">3D planet</a><a href="/flat" class="tab on" data-i18n="flat map">flat map</a><a href="/bus" class="tab" data-i18n="bus and programs">bus and programs</a><a href="/house" class="tab" data-i18n="house">house</a><a href="/graph" class="tab" data-i18n="systems">systems</a><a href="/attractors" class="tab" data-i18n="Attractors">Attractors</a><a href="/finance" class="tab" data-i18n="finance">finance</a></div>
-  <h1 data-i18n="Hadley's Hope, LV-426">Hadley's Hope, LV-426</h1>
-  <div class="row"><span id="time" style="font-weight:600;min-width:120px"></span>
-    <button id="pause" data-i18n="Pause">Pause</button>
-    <span class="dim" data-i18n="speed">speed</span><button data-s="1">1x</button><button data-s="20">20x</button><button data-s="120">120x</button><button data-s="600">600x</button></div>
-  <h2 data-i18n="Inject">Inject</h2>
-  <div class="row">
+  <section class="card" id="focus">
+    <div class="focus-head"><h1 id="focus-title">Hadley's Hope</h1><span id="focus-sub" class="dim"></span></div>
+    <div class="kpi" id="kpi"></div>
+    <button id="focus-clear" hidden data-i18n="Back to the whole colony">Back to the whole colony</button>
+  </section>
+  <details class="card" id="ops-box"><summary data-i18n="Operator actions">Operator actions</summary><div class="row ops">
     <button data-i="span" data-i18n="break span">break span</button><button data-i="pole" data-i18n="fell pole">fell pole</button><button data-i="xeno" data-i18n="xenomorphs">xenomorphs</button>
     <button data-i="storm" data-i18n="storm">storm</button><button data-i="trunk" data-i18n="cut trunk">cut trunk</button><button data-i="pump" data-i18n="pump trip">pump trip</button>
     <button data-i="marines" data-i18n="marines fire">marines fire</button><button data-i="scram" data-i18n="SCRAM">SCRAM</button><button data-i="road" data-i18n="break road">break road</button><button data-i="money" data-i18n="+50k cr">+50k cr</button><button data-i="mine" data-i18n="flood mine">flood mine</button><button data-i="sewer_pump" data-i18n="sewage pump">sewage pump</button><button data-i="leak" data-i18n="pipe leak">pipe leak</button>
-  </div>
-  <h2 data-i18n="Colony">Colony</h2>
-  <div class="kpi" id="kpi"></div>
+  </div></details>
   <h2 data-i18n="Reactor and power">Reactor and power</h2>
   <div id="reactor" class="card"></div>
   <h2 data-i18n="Sectors">Sectors</h2>

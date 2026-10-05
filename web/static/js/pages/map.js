@@ -1,5 +1,29 @@
 const cv = document.getElementById('c'),
   ctx = cv.getContext('2d');
+// Which network the map shows (colony = everything) and the sector in focus (-1: the whole colony).
+let LAYER = 'colony',
+  FOCUS = -1;
+const LEGEND = {
+  colony: [['#3a78c9', 'cold'], ['#f0a050', 'warm'], ['#e2574d', 'no power (frame)'], ['#5aa9ff', 'burst pipes (x)']],
+  water: [['#4aa3e0', 'supplied'], ['#55606c', 'no water'], ['#b9a7d6', 'burst pipe']],
+  power: [['#e8c25a', 'grid'], ['#4f7fc4', 'on UPS'], ['#3a434d', 'no power']],
+  network: [['#4fd1c5', 'online'], ['#3a434d', 'offline']],
+};
+const layerAlpha = (kind) => (LAYER === 'colony' || LAYER === kind ? 1 : 0.14);
+function houseColor(hs, i) {
+  if (LAYER === 'water') return hs.burst[i] ? '#b9a7d6' : hs.water[i] ? '#4aa3e0' : '#55606c';
+  if (LAYER === 'power') return hs.power[i] ? (hs.ups[i] ? '#4f7fc4' : '#e8c25a') : '#3a434d';
+  if (LAYER === 'network') return hs.net[i] ? '#4fd1c5' : '#3a434d';
+  return tempColor(hs.t[i]);
+}
+function setLayer(name) {
+  LAYER = name;
+  document.querySelectorAll('#layer-seg button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.layer === name)));
+  document.getElementById('legend').innerHTML = LEGEND[name].map(([c, t]) => `<span><i style="background:${c}"></i>${t}</span>`).join('');
+}
+document.querySelectorAll('#layer-seg button').forEach((b) => (b.onclick = () => setLayer(b.dataset.layer)));
+document.getElementById('focus-clear').onclick = () => { FOCUS = -1; if (S) renderSide(S); };
+setLayer('colony');
 let G = null,
   S = null,
   packetsSeen = new Map(),
@@ -153,6 +177,13 @@ function draw() {
     ctx.arc(X(0), Y(0), sc * (HR + 10), a1, a0, true);
     ctx.closePath();
     const sec = S.sectors[s];
+    if (s === FOCUS) {
+      ctx.fillStyle = 'rgba(232,184,107,.10)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(232,184,107,.8)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
     ctx.fillStyle = sec.lockdown ? 'rgba(226,87,77,.10)' : !sec.online ? 'rgba(226,87,77,.05)' : sec.dark ? 'rgba(0,0,0,.35)' : 'rgba(255,255,255,.025)';
     ctx.fill();
     const [lx, ly] = polar(s * 60 + 30, WR + 40);
@@ -203,12 +234,14 @@ function draw() {
   }
   // Both views consume the same utility graph.
   const waterOn = S.water.tank_m3 > 0 && S.water.pump;
+  ctx.globalAlpha = layerAlpha('water');
   for (const e of G.utilities.links) {
     const pts = e.points;
     const on = (S.hydraulics.flow_l_s[e.id] || 0) > 0;
     for (let j = 0; j < pts.length - 1; j++) flow(pts[j][0], pts[j][1], pts[j + 1][0], pts[j + 1][1], on ? '#65bbd1' : '#344c54', e.kind === 'service' ? .55 : 1.15, on, .5);
   }
 
+  ctx.globalAlpha = layerAlpha('power');
   // power: trunk, tower line, solar line, feeders, spans along the pole tree
   const reactorUp = S.reactor.available_mw > 0;
   flow(c.reactor_pos[0] + 70, 8, -HR + 10, 8, '#f2c14e', 3, S.power.trunk && reactorUp, 2.5);
@@ -230,7 +263,9 @@ function draw() {
     }
     const px1 = G.poles.x[i],
       py1 = G.poles.y[i];
+    ctx.globalAlpha = layerAlpha('power');
     flow(px0, py0, px1, py1, '#f2c14e', 1.6, S.poles.span[i] === 1, 2);
+    ctx.globalAlpha = layerAlpha('network');
     const dx = px1 - px0,
       dy = py1 - py0,
       L = Math.hypot(dx, dy) || 1,
@@ -245,6 +280,7 @@ function draw() {
   line(-HR + 10, 12, -WR - 40, 12, S.net.uplink ? '#4fd1c5' : '#4a3030', 1);
   line(-WR - 40, 12, c.tower_junction[0] - 6, 12, S.net.uplink ? '#4fd1c5' : '#4a3030', 1);
   line(c.tower_junction[0] - 6, 12, c.tower_pos[0] - 6, c.tower_pos[1] + 40, S.net.uplink ? '#4fd1c5' : '#4a3030', 1);
+  ctx.globalAlpha = 1;
   // hub
   dot(0, 0, sc * HR, '#1c2028');
   ctx.beginPath();
@@ -311,7 +347,8 @@ function draw() {
   for (let i = 0; i < G.houses.x.length; i++) {
     const x = X(G.houses.x[i]),
       y = Y(G.houses.y[i]);
-    ctx.fillStyle = tempColor(hs.t[i]);
+    ctx.globalAlpha = FOCUS >= 0 && G.houses.sector[i] !== FOCUS ? 0.3 : 1;
+    ctx.fillStyle = houseColor(hs, i);
     ctx.fillRect(x - sz / 2, y - sz / 2, sz, sz);
     if (!hs.power[i]) {
       ctx.strokeStyle = '#e2574d';
@@ -341,6 +378,7 @@ function draw() {
       ctx.stroke();
     }
   }
+  ctx.globalAlpha = 1;
   // people
   for (const p of S.people) dot(p[0], p[1], 1.6, '#ffffff');
   // internet packets along the pole tree
@@ -453,6 +491,17 @@ function renderSide(s) {
   if (wa) kp.push(['Sewage', `${s.hydraulics.sewer_storage_m3.toFixed(1)} m3 in the sump, pump ${w.sewer_pump ? 'running' : 'STOPPED'}, ${wa.sewer_overflow.toFixed(1)} m3 spilled`, !w.sewer_pump || s.hydraulics.sewer_storage_m3 > 150 ? 'bad' : wa.sewer_overflow > 0 ? 'warn' : 'ok'], ['Water balance', wa.residual < 1e-6 ? `closes: made ${wa.produced.toFixed(0)}, used ${wa.delivered.toFixed(0)}, leaked ${wa.leaked.toFixed(1)} m3` : `off by ${wa.residual} m3`, wa.residual < 1e-6 ? 'ok' : 'bad']);
   const hf = f.households;
   if (hf) kp.push(['Household debt', `${Math.round(hf.debt).toLocaleString()} cr (loans ${Math.round(hf.principal).toLocaleString()}, unpaid bills ${Math.round(hf.arrears).toLocaleString()})`, hf.bankrupt ? 'bad' : hf.overdue ? 'warn' : 'ok'], ['Debtors / overdue / bankrupt', `${hf.debtors} / ${hf.overdue} / ${hf.bankrupt} of ${hf.households}` + (hf.mine_closed ? ', mine flooded' : ''), hf.bankrupt ? 'bad' : hf.overdue || hf.mine_closed ? 'warn' : 'ok']);
+  const fs = FOCUS >= 0 ? s.sectors[FOCUS] : null;
+  document.getElementById('focus-title').textContent = fs ? `Sector ${FOCUS + 1}` : "Hadley's Hope";
+  document.getElementById('focus-sub').textContent = fs ? `gate ${fs.gate.toLowerCase()} · UPS ${fs.ups.toLowerCase()}` : `${s.houses.t.length} houses · ${s.sectors.length} sectors`;
+  document.getElementById('focus-clear').hidden = !fs;
+  if (fs) {
+    kp.length = 0;
+    kp.push(['Average indoor', fs.avg_t + ' °C', fs.avg_t > 15 ? 'ok' : fs.avg_t > 4 ? 'warn' : 'bad'], ['Coldest house', fs.min_t + ' °C', fs.min_t > 4 ? 'ok' : 'bad'],
+      ['Houses powered', fs.power_ok + ' / 50', cls(fs.power_ok === 50, fs.power_ok > 30)], ['Houses with water', fs.water_ok + ' / 50', cls(fs.water_ok === 50, fs.water_ok > 30)],
+      ['Online', fs.net_ok + ' / 50', cls(fs.net_ok === 50, fs.net_ok > 30)], ['Sector budget', fs.budget.toLocaleString() + ' cr', fs.budget > 2000 ? 'ok' : 'warn'],
+      ['Load', fs.demand_kw + ' kW', 'dim'], ['Sanitary', fs.sanitary + ' %', fs.sanitary > 70 ? 'ok' : 'bad']);
+  }
   document.getElementById('kpi').innerHTML = kp.map(([l, v, c]) => `<div class="card"><div class="v ${c}">${v}</div><div class="l">${l}</div></div>`).join('');
   const inf = p.infra;
   document.getElementById('reactor').innerHTML = `<div><b class="${r.mode === 'ONLINE' ? 'ok' : r.mode === 'RUNBACK' || r.mode === 'STARTING' ? 'warn' : 'bad'}">${r.mode}</b> &nbsp; ${r.power_mw} MW gross, ${r.available_mw} MW to grid, core ${r.core_temp} C${r.decay_mw ? `, decay ${r.decay_mw} MW` : ''}</div>
@@ -468,6 +517,19 @@ function renderSide(s) {
     document.getElementById('report').textContent = `Month ${rp.month}: owners billed ${Math.round(rp.houses_total)} cr (energy ${Math.round(rp.energy_total)}, water ${Math.round(rp.water_total)}, repairs ${Math.round(rp.repairs_total)}), ${Math.round(rp.kwh_total)} kWh\n` + `colony: income ${rp.colony_income}, expense ${rp.colony_expense}, budget ${rp.colony_budget}, unpaid ${rp.unpaid}\n` + `sector income ${rp.sector_income.join(' | ')}\nsector expense ${rp.sector_expense.join(' | ')}\n` + `expense by cause: ${Object.entries(rp.by_cause).map(([k, v]) => k + ' ' + v).join(', ')}\n` + `top houses: ${rp.top_houses.map(h => `#${h.house} (S${h.sector}) ${h.total}`).join(', ')}` + (rp.households ? `\nhouseholds: earned ${Math.round(rp.households.earned)}, paid ${Math.round(rp.households.paid)}, borrowed ${Math.round(rp.households.borrowed)} cr; debt ${Math.round(rp.households.debt)} cr, ${rp.households.debtors} debtors, ${rp.households.overdue} overdue, ${rp.households.bankrupt} bankrupt` : '');
   }
 }
+// A click on the map focuses the sector under it; a click outside the wall goes back to the whole colony.
+cv.addEventListener('click', (ev) => {
+  if (!G || !S) return;
+  const r = cv.getBoundingClientRect(),
+    mx = (ev.clientX - r.left - ox) / sc,
+    my = (ev.clientY - r.top - oy) / sc,
+    rad = Math.hypot(mx, my),
+    c = G.cfg;
+  const inside = rad > c.hub_radius && rad < c.wall_radius;
+  const sector = Math.floor((((Math.atan2(my, mx) * 180) / Math.PI + 360) % 360) / (360 / c.sectors));
+  FOCUS = inside ? (FOCUS === sector ? -1 : sector) : -1;
+  renderSide(S);
+});
 cv.addEventListener('mousemove', ev => {
   const tip = document.getElementById('tip');
   if (!G || !S) {

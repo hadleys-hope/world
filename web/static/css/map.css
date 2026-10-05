@@ -29,3 +29,27 @@
     #legend { display:none; }
     #banner { font-size:11px; }
   }
+
+/* shared shell: the map and the side panel are two glass panels under the bar */
+body.hh-full { gap: 14px; }
+#map { border-radius: 16px; }
+#side { width: 420px; flex-basis: 420px; padding: 14px 16px; display: flex; flex-direction: column; gap: 12px; }
+#side h2 { margin: 6px 0 0; }
+#layer-seg { position: absolute; left: 14px; top: 14px; display: flex; gap: 2px; padding: 3px; border-radius: 12px; background: var(--hh-glass-strong); border: 1px solid var(--hh-line); }
+#layer-seg button { height: 32px; padding: 0 12px !important; border: 0 !important; background: transparent !important; color: var(--hh-text-2) !important; }
+#layer-seg button[aria-pressed="true"] { background: var(--hh-acc-bg) !important; color: var(--hh-acc-text) !important; }
+#legend { left: 16px; bottom: 14px; display: flex; gap: 14px; flex-wrap: wrap; background: var(--hh-glass-strong); border: 1px solid var(--hh-line); border-radius: 12px; color: var(--hh-text-2); font-size: 12px; max-width: 70%; }
+#legend span { display: inline-flex; gap: 6px; align-items: center; }
+#legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+#map-hint { position: absolute; right: 16px; bottom: 16px; font-size: 12px; color: var(--hh-dim); }
+#banner { display: none; }
+.focus-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.focus-head h1 { margin: 0; }
+#kpi { grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+#kpi .card { background: var(--hh-chip) !important; border: 0 !important; border-radius: 12px !important; backdrop-filter: none; padding: 10px 12px !important; }
+#kpi .v { font-family: var(--hh-mono); font-size: 16px; font-weight: 500; }
+#focus-clear { margin-top: 10px; width: 100%; height: 34px; }
+#ops-box summary { cursor: pointer; font-size: 12px; font-weight: 600; letter-spacing: 0.14em; color: var(--hh-dim); text-transform: uppercase; }
+#ops-box .ops { padding-top: 10px; }
+#side { background: transparent !important; border: 0 !important; backdrop-filter: none !important; padding: 0 !important; overflow-y: auto; }
+#kpi .v { font-size: 14px; line-height: 1.3; }
