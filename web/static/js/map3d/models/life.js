@@ -72,9 +72,9 @@ export function crystalGeometry() {
 }
 
 // ---- one material for everything that grows or lies on the ground ----
-export function lifeMaterial(uniforms, { sway = 0, glow = 0 } = {}) {
+export function lifeMaterial(uniforms, { sway = 0, glow = 0, indoor = 0 } = {}) {
   return new THREE.ShaderMaterial({
-    uniforms: { ...uniforms, uSway: { value: sway }, uGlow: { value: glow } },
+    uniforms: { ...uniforms, uSway: { value: sway }, uGlow: { value: glow }, uIndoor: { value: indoor } },
     vertexShader: `attribute vec3 aCol; attribute vec3 aTint; uniform float uTime, uSway; varying vec3 vC, vN, vW, vUp;
       void main(){
         vec3 p=position; vec3 o=instanceMatrix[3].xyz;
@@ -85,11 +85,13 @@ export function lifeMaterial(uniforms, { sway = 0, glow = 0 } = {}) {
         vN=normalize(mat3(modelMatrix)*mat3(instanceMatrix)*normal);
         vUp=normalize(mat3(modelMatrix)*instanceMatrix[1].xyz);
         vC=aCol*aTint; vW=wp.xyz; gl_Position=projectionMatrix*viewMatrix*wp; }`,
-    fragmentShader: `uniform vec3 uSun; uniform float uGlow; varying vec3 vC, vN, vW, vUp;
+    fragmentShader: `uniform vec3 uSun; uniform float uGlow, uIndoor; varying vec3 vC, vN, vW, vUp;
       void main(){ vec3 s=normalize(uSun); vec3 n=normalize(vN);
         float day=smoothstep(-0.12,0.25,dot(normalize(vUp),s));
         float diff=max(dot(n,s),0.0)*0.75+0.25*max(dot(-n,s),0.0);
         vec3 c=vC*(0.10+0.95*diff*day+0.05) + vC*uGlow*(0.35+0.65*(1.0-day));
+        // under the dome the city's lamps light the garden at night
+        c+=uIndoor*(1.0-day)*vC*vec3(1.0,0.86,0.66)*(0.38+0.25*max(dot(n,normalize(vUp)),0.0));
         float rim=pow(1.0-max(dot(n,normalize(cameraPosition-vW)),0.0),3.0);
         gl_FragColor=vec4(c+rim*0.08*vC,1.0); }`,
   });
