@@ -1,6 +1,6 @@
 /** render/frame: procedural colony viewer. */
 import { state } from "../state.js";
-import { surfaceClearance, updateCameraMotion } from "../camera.js";
+import { activeCentre, surfaceClearance, updateCameraMotion } from "../camera.js";
 import { quatAt, sph } from "../geometry/planet.js";
 import { updateUtilityFlow } from "../models/drainage.js";
 import { updateSolarSystem } from "../models/solar-system.js";
@@ -69,8 +69,10 @@ export function frame() {
       !state.systemView &&
       (state.weather.precip === "snow" || state.weather.storm);
     const mat = state.weather.snow.material;
-    const dist = state.camera.position.distanceTo(state.controls.target);
-    const near = 1 - Math.min(1, Math.max(0, (dist - 700) / 1400));
+    // Snow falls around the camera, not around the orbit target: in free flight the target can be far away,
+    // and the snow box then hung in the sky above a distant part of the city.
+    const clearance = surfaceClearance();
+    const near = 1 - Math.min(1, Math.max(0, (clearance - 700) / 1400));
     mat.opacity +=
       ((snowOn ? (state.weather.storm ? 0.85 : 0.55) * near : 0) -
         mat.opacity) *
@@ -78,8 +80,9 @@ export function frame() {
     mat.size = 3 + 3 * near;
     if (mat.opacity > 0.02) {
       const p = state.weather.snow.geometry.attributes.position;
-      const c = state.controls.target;
-      const n = c.clone().normalize();
+      const centre = activeCentre();
+      const n = state.camera.position.clone().sub(centre).normalize();
+      const c = centre.clone().addScaledVector(n, state.camera.position.distanceTo(centre) - clearance);
       const side = new THREE.Vector3()
         .crossVectors(n, new THREE.Vector3(0, 0, 1))
         .normalize();
