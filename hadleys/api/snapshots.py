@@ -12,6 +12,7 @@ from hadleys.geometry.roads import colony_layout, traffic_junctions
 from hadleys.geometry.terrain import RIVER_PROFILE
 from hadleys.models import Issue
 from hadleys.domains.households import house_finance, summary as households_summary
+from hadleys.domains.hydraulics import water_balance
 
 
 from hadleys.domains.driving import driver_holds
@@ -146,6 +147,8 @@ def snapshot(w: World):
             "burst": int(w.h_burst.sum()),
             "frozen": int((~w.h_pipes_ok).sum()),
             "sector_m3_h": [round(float(x) * 60, 2) for x in w.sector_water_m3],
+            "sewer_pump": bool(w.sewer_pump_on and w.pump_station_ok),
+            "accounts": water_snapshot_accounts(w),
         },
         "net": {
             "mobile": w.mobile_online,
@@ -284,6 +287,47 @@ def snapshot(w: World):
                 w.bridge.status() if getattr(w, "bridge", None) else {"enabled": False}
             ),
         },
+    }
+
+
+def water_snapshot_accounts(w: World):
+    """Cumulative volumes and the worst balance residual, m3 (full detail in /water.json)."""
+    a = w.water_acc
+    return {
+        "produced": round(a["produced"], 3),
+        "delivered": round(a["delivered"], 3),
+        "leaked": round(a["leaked"], 3),
+        "consumed": round(a["consumed"], 3),
+        "to_sewer": round(a["to_sewer"], 3),
+        "sewer_pumped": round(a["sewer_pumped"], 3),
+        "sewer_overflow": round(a["sewer_overflow"], 3),
+        "storm_pumped": round(a["storm_pumped"], 3),
+        "storm_overflow": round(a["storm_overflow"], 3),
+        "residual": max(abs(p["residual"]) for p in water_balance(w).values()),
+    }
+
+
+def water_json(w: World):
+    """/water.json: every water account, the stocks and the balance of each part of the system."""
+    u = w.utilities
+    return {
+        "t": w.t,
+        "time": w.time_str(),
+        "stocks": {
+            "tank_m3": round(w.water_tank_m3, 6),
+            "tank_cap_m3": w.cfg["water_tank_m3"],
+            "sewer_storage_m3": round(u.sewer_storage, 6),
+            "storm_storage_m3": round(u.storm_storage, 6),
+            "snow_m3": round(u.snow_m3, 6),
+            "sump_cap_m3": w.cfg["drain_storage_m3"],
+        },
+        "pumps": {
+            "station_powered": bool(w.pump_station_ok),
+            "sewer_pump_on": bool(w.sewer_pump_on),
+            "plant_ok": bool(w.water_plant_ok),
+        },
+        "accounts": {k: round(v, 6) for k, v in w.water_acc.items()},
+        "balance": water_balance(w),
     }
 
 

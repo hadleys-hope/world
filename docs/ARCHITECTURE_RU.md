@@ -22,6 +22,8 @@
 | Типы и состояния транспорта | `hadleys/enums.py`; данные — `hadleys/models.py` |
 | Интернет, люди, финансы, аварии, безопасность | Одноимённые файлы в `hadleys/domains/` |
 | Деньги домохозяйств, счета, кредиты, банкротство | `hadleys/domains/households.py`; правила — `docs/FINANCE_RU.md` |
+| Профилирование и замеры до/после | `scripts/profile_run.py`, `scripts/bench_ticks.py`, `scripts/bench_mqtt.py`; результаты — `docs/PERF_RU.md` |
+| Баланс воды и стоков, счета объёмов | `hadleys/domains/hydraulics.py` (`water_balance`); описание — `docs/WATER_RU.md`; сценарий — `scripts/water_scenario.py` |
 | Финансовые сценарии A/B/C и эталонный расчёт | `hadleys/scenarios.py`, `hadleys/finance_reference.py`, `scripts/finance_acceptance.py` |
 | Данные аттракторов | `hadleys/domains/attractors.py` |
 | HTTP-маршруты, JSON-снимки, статика | `hadleys/api/` |

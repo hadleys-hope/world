@@ -331,7 +331,7 @@
           while (walker.nextNode()) nodes.push(walker.currentNode);
           ['title', 'aria-label', 'placeholder'].forEach((attr) => {
             const val = node.getAttribute(attr);
-            if (val && translations.ru[val]) node.setAttribute(attr, translations.ru[val]);
+            if (val && translations.ru[val] && translations.ru[val] !== val) node.setAttribute(attr, translations.ru[val]);
           });
         }
       });
@@ -339,7 +339,7 @@
         const raw = node.nodeValue;
         if (!raw) return;
         const trimmed = raw.trim();
-        if (trimmed && translations.ru[trimmed]) node.nodeValue = raw.replace(trimmed, translations.ru[trimmed]);
+        if (trimmed && translations.ru[trimmed] && translations.ru[trimmed] !== trimmed) node.nodeValue = raw.replace(trimmed, translations.ru[trimmed]);
       });
     }
   });
