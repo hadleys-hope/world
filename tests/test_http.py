@@ -52,7 +52,7 @@ class HTTPTests(unittest.TestCase):
         return result
 
     def test_all_pages_and_json_endpoints(self):
-        for path in ["/", "/flat", "/bus", "/house?id=1", "/graph", "/attractors"]:
+        for path in ["/", "/flat", "/bus", "/house?id=1", "/graph", "/attractors", "/finance"]:
             with self.subTest(path=path):
                 status, headers, body = self.request(path)
                 self.assertEqual(status, 200)
@@ -65,6 +65,7 @@ class HTTPTests(unittest.TestCase):
             "/bus.json",
             "/house.json?id=1",
             "/attractors.json?hist=1",
+            "/finance.json",
             "/history",
         ]:
             with self.subTest(path=path):

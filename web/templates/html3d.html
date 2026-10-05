@@ -9,7 +9,7 @@
 <body class="panel-collapsed">
 <header id="commandbar">
  <div class="brand"><span class="brand-mark" aria-hidden="true">HH</span><div><strong>HADLEY'S HOPE</strong><small>LV–426 · COLONY OPERATIONS</small></div></div>
- <nav class="main-nav" aria-label="Main navigation"><a href="/" aria-current="page">3D map</a><a href="/flat">Map</a><a href="/attractors" class="attr-link">Attractors</a><a href="/graph">Systems</a><a href="/bus">Controllers</a><a href="/house">House</a></nav>
+ <nav class="main-nav" aria-label="Main navigation"><a href="/" aria-current="page">3D map</a><a href="/flat">Map</a><a href="/attractors" class="attr-link">Attractors</a><a href="/graph">Systems</a><a href="/bus">Controllers</a><a href="/house">House</a><a href="/finance">Finance</a></nav>
  <div class="transport"><span id="time"></span><button id="pause" title="Pause or resume simulation">Pause</button><label for="speed">Speed</label><input type="range" id="speed" min="0" max="100" value="45"><span id="speedv"></span><button id="panel-toggle" aria-expanded="false" aria-controls="side" title="Show or hide management panel">M · Console</button></div>
 </header>
 <div id="map">
@@ -52,7 +52,7 @@
   <div class="section-kicker">Operator console</div><h2>Simulation controls</h2>
   <details><summary>Operator access <span id="tokenstate" class="dim"></span></summary><label for="token" class="muted-copy">Admin token</label><input type="password" id="token" placeholder="Enter token" autocomplete="off"><button id="tokenbtn">Enable controls</button></details>
   <details><summary>House controllers</summary><div id="ctrl" class="dim" style="font-size:11px"></div><p><a href="/bus">Controller messages &amp; programs →</a></p></details>
-  <details><summary>Scenario events</summary><p class="muted-copy">These actions change the running simulation.</p><div class="ops-actions"><button data-i="storm">Storm</button><button data-i="xeno">Xenomorphs</button><button data-i="span">Break power span</button><button data-i="pole">Fell pole</button><button data-i="trunk">Cut main cable</button><button data-i="pump">Pump trip</button><button data-i="marines">Marine response</button><button data-i="road">Damage road</button><button data-i="money">Add 50k credits</button><button data-i="scram" class="danger">Reactor SCRAM</button><button id="reset" class="danger">Found new colony</button></div></details>
+  <details><summary>Scenario events</summary><p class="muted-copy">These actions change the running simulation.</p><div class="ops-actions"><button data-i="storm">Storm</button><button data-i="xeno">Xenomorphs</button><button data-i="span">Break power span</button><button data-i="pole">Fell pole</button><button data-i="trunk">Cut main cable</button><button data-i="pump">Pump trip</button><button data-i="marines">Marine response</button><button data-i="road">Damage road</button><button data-i="money">Add 50k credits</button><button data-i="mine">Flood mine</button><button data-i="scram" class="danger">Reactor SCRAM</button><button id="reset" class="danger">Found new colony</button></div></details>
  </section>
 </aside>
-<script type="module" src="/static/js/map3d/main.js"></script></body></html>
+<script src="/static/js/i18n.js"></script><script type="module" src="/static/js/map3d/main.js"></script></body></html>

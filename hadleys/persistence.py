@@ -7,6 +7,8 @@ import os
 import pickle
 import sqlite3
 from hadleys.config import CFG
+from hadleys.domains.households import internal_total
+from hadleys.domains.incidents import abandon_job
 from hadleys.domains.hydraulics import UtilityNetwork
 from hadleys.world import World
 
@@ -69,6 +71,7 @@ class Store:
                 )
                 return None
             added = self.migrate(w)
+            self._resume_cursors(w)
             print(
                 f"resumed world from {self.pkl} at {w.time_str()} (tick {w.t}){', added fields: ' + ', '.join(added) if added else ''}"
             )
@@ -103,6 +106,9 @@ class Store:
             added.append("road verges v4")
         for k, v in fresh.cfg.items():
             w.cfg.setdefault(k, v)
+        if "fin_baseline" in added:
+            # households get their opening cash now; the money check starts from the resumed state
+            w.fin_baseline = internal_total(w) - sum(w.fin_ext.values())
         if w.utilities.version != UtilityNetwork.VERSION:
             old = w.utilities
             w.utilities = UtilityNetwork(w)
@@ -124,12 +130,24 @@ class Store:
                 if key not in r.__dict__:
                     setattr(r, key, value)
         for r in w.rovers + getattr(w, "traffic", []):
+            if getattr(r, "driver_owner", None) or getattr(r, "driver_parked", False):
+                abandon_job(w, r)
             if getattr(r, "driver_owner", None):
                 r.driver_owner = None
                 r.driver_parked = True
                 r.velocity = 0
                 r.state = "PARKED"
         return added
+
+    def _resume_cursors(self, w: World):
+        """A resumed world's events and reports up to now are already in history.db."""
+        con = sqlite3.connect(self.db)
+        row = con.execute("SELECT MAX(t) FROM events WHERE t <= ?", (w.t,)).fetchone()
+        rep = con.execute("SELECT MAX(month) FROM reports").fetchone()
+        con.close()
+        self.last_event_t = row[0] if row and row[0] is not None else -1
+        self.last_report_month = rep[0] if rep and rep[0] is not None else 0
+        self.world_id = w.uid
 
     def save_world(self, w: World):
         tmp = self.pkl + ".tmp"
@@ -138,6 +156,12 @@ class Store:
         os.replace(tmp, self.pkl)
 
     def record_hour(self, w: World):
+        if getattr(self, "world_id", None) != w.uid:
+            if getattr(self, "world_id", None) is not None:
+                # a new colony in the same process starts its own event and report sequence
+                self.last_event_t = -1
+                self.last_report_month = 0
+            self.world_id = w.uid
         con = sqlite3.connect(self.db)
         con.execute(
             "INSERT OR REPLACE INTO hourly VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",

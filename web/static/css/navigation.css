@@ -2,3 +2,4 @@
   nav.hh { overflow-x:auto;white-space:nowrap;min-height:52px;flex-shrink:0;display:flex; gap:6px; align-items:center; padding:6px 10px; background:#12151c; border-bottom:1px solid #262b36; font-size:12px; }
   nav.hh a { color:#d9dde6; text-decoration:none; padding:4px 10px; border:1px solid #262b36; border-radius:6px; background:#1c212c; }
   nav.hh a.on { border-color:#9fbca9; color:#d3e0c6; background:#20352e; } nav.hh a:hover { background:#2d3444; } nav.hh .t { margin-left:auto; color:#8a93a6; }
+#language-selector { position:fixed; right:14px; bottom:14px; z-index:1000; color:#d9dde6; background:#1c212c; border:1px solid #3b4352; border-radius:6px; padding:6px 10px; font:inherit; box-shadow:0 4px 14px rgba(0,0,0,.35); }

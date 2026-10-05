@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Hadley's Hope: finance</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/css/navigation.css">
+<link rel="stylesheet" href="/static/css/house.css">
+</head>
+<body>
+NAVHTML
+<main>
+<div class="row"><h1>Household finance</h1><span id="sub" class="dim"></span></div>
+<div class="gauges" id="kpi"></div>
+<div class="grid">
+  <div>
+    <h2>Money and debt of the households, daily</h2><div class="card"><div class="dim" style="font-size:11px">cash of all households, cr</div><canvas id="sparkc" width="600" height="80" style="width:100%"></canvas><div class="dim" style="font-size:11px;margin-top:6px">debt: loans + interest + unpaid bills, cr</div><canvas id="sparkd" width="600" height="80" style="width:100%"></canvas><div class="dim" style="font-size:11px;margin-top:6px">households in debt (red: bankrupt)</div><canvas id="sparkn" width="600" height="60" style="width:100%"></canvas></div>
+    <h2>Scenario houses</h2><div class="card"><table id="scen"></table></div>
+    <h2>Households in debt</h2><div class="card"><table id="trouble"></table></div>
+  </div>
+  <div>
+    <h2>Rules</h2><div class="card"><table id="rules"></table></div>
+    <h2>Money flows this month</h2><div class="card"><table id="flows"></table></div>
+    <h2>Money check</h2><div class="card"><table id="check"></table></div>
+  </div>
+</div>
+</main>
+<script src="/static/js/pages/finance.js"></script></body></html>

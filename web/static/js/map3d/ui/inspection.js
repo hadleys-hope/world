@@ -132,7 +132,8 @@ export function houseInfo(i, short) {
     : `built-in thermostat, target ${ctl.targets[i]} C`;
   return (
     `<b>House ${i + 1}</b> (Sector ${state.G.houses.sector[i] + 1}, ${state.G.types[state.G.houses.type[i]]}, ${state.G.houses.residents[i]} residents)<br>indoor ${h.t[i]} C, heater ${h.heater[i] ? "on" : "off"}, draw ${h.draw[i]} W${h.limit[i] ? " (limit " + h.limit[i] + " W)" : ""}<br>power ${h.power[i] ? (h.ups[i] ? "sector UPS" : "grid") : '<span class="bad">none</span>'}, water ${h.water[i] ? "ok" : '<span class="bad">no</span>'}${h.burst[i] ? ', <span class="bad">pipes burst</span>' : ""}<br>pressure ${state.S.hydraulics.pressure_kpa[i]} kPa · delivered ${state.S.hydraulics.delivered_l[i]} L/tick · leak ${state.S.hydraulics.leak_l[i]} L/tick<br>internet ${h.net[i] ? "online" : '<span class="warn">offline</span>'}, aeration sludge ${Math.round(h.sludge[i] * 100)}%<br><span class="dim">program:</span> ${prog}` +
-    (short ? "" : `<br>pole ${state.G.houses.pole[i]}`)
+    (short ? "" : `<br>pole ${state.G.houses.pole[i]}`) +
+    (short || !h.fin ? "" : `<br>money ${h.fin[i] < 0 ? '<span class="dim">vacant, company housing</span>' : `${h.cash[i]} cr, <span class="${["ok", "warn", "bad"][h.fin[i]]}">${["normal", "overdue", "bankrupt"][h.fin[i]]}</span>`} · <a href="/house?id=${i + 1}">house page</a>`)
   );
 }
 
@@ -290,6 +291,11 @@ export function renderInfo() {
       ["colony budget", s.finance.colony + " cr"],
       ["month income", s.finance.month_income + " cr"],
       ["month expense", s.finance.month_expense + " cr"],
+      ...(s.finance.households ? [
+        ["household debt", Math.round(s.finance.households.debt) + " cr"],
+        ["debtors / overdue / bankrupt", `${s.finance.households.debtors} / ${s.finance.households.overdue} / ${s.finance.households.bankrupt}`],
+        ["finance", '<a href="/finance">open finance page</a>'],
+      ] : []),
     ]);
   } else if (k === "pump" || k === "tank") {
     title = k === "pump" ? "Pump station" : "Water tank";

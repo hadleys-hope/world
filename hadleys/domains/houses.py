@@ -19,6 +19,8 @@ def houses_decide(w: World):
     target = np.full(w.N, c["comfort_c"])
     target[w.h_on_ups | (w.h_limit_w > 0)] = c["eco_c"]
     target[(w.h_limit_w > 0) & (w.h_limit_w <= c["limit_level5_w"])] = c["antifreeze_c"]
+    if c["bankrupt_eco_heating"]:  # a bankrupt household saves on heating
+        target = np.where(w.hh_status == 2, np.minimum(target, c["eco_c"]), target)
     on = w.h_heater_on.copy()
     on[w.h_t_in < target - 0.5] = True
     on[w.h_t_in > target + 0.5] = False
@@ -109,12 +111,12 @@ def house_events(w: World):
     if prev is not None:
         texts = {
             "power": ("power restored", "power lost"),
-            "ups": ("back on the grid", "running on the sector UPS"),
+            "ups": ("running on the sector UPS", "back on the grid"),  # up = on UPS
             "water": ("water supply restored", "no water"),
             "net": ("network link up", "network link lost"),
             "pipes": ("pipes thawed or repaired", "pipes frozen"),
-            "burst": ("pipes repaired", "pipes burst"),
-            "limit": ("power limit lifted", "power limit imposed by the grid"),
+            "burst": ("pipes burst", "pipes repaired"),  # up = burst is True
+            "limit": ("power limit imposed by the grid", "power limit lifted"),  # up = limited
         }
         for key, (up, down) in texts.items():
             changed = np.flatnonzero(cur[key] != prev[key])

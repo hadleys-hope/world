@@ -43,6 +43,9 @@ def driver_command(w, req):
             lane = 8.5 if r.state == TransportState.IDLE else 2.2
             r.x -= math.sin(r.heading) * lane
             r.y += math.cos(r.heading) * lane
+        from hadleys.domains.incidents import abandon_job
+
+        abandon_job(w, r)  # a repair left half done goes back to the queue
         r.driver_owner = owner
         r.driver_until = now + 6
         r.driver_pose_at = now

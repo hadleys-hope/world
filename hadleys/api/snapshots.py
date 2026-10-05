@@ -11,6 +11,7 @@ from hadleys.config import TYPE_NAMES
 from hadleys.geometry.roads import colony_layout, traffic_junctions
 from hadleys.geometry.terrain import RIVER_PROFILE
 from hadleys.models import Issue
+from hadleys.domains.households import house_finance, summary as households_summary
 
 
 from hadleys.domains.driving import driver_holds
@@ -165,6 +166,11 @@ def snapshot(w: World):
             "month_expense": round(w.colony_month_expense),
             "month_income": round(w.colony_month_income),
             "waste_station": round(w.waste_station_level, 2),
+            "households": {
+                **households_summary(w),
+                "households": int(w.hh_active.sum()),
+                "mine_closed": w.mine_closed_until > w.t,
+            },
         },
         "sectors": sec,
         "houses": {
@@ -179,6 +185,9 @@ def snapshot(w: World):
             "sludge": [round(float(x), 2) for x in w.h_sludge],
             "limit": [int(x) for x in w.h_limit_w],
             "draw": [int(x) for x in w.h_draw_w],
+            # household money: status -1 vacant, 0 normal, 1 overdue, 2 bankrupt; cash in whole credits
+            "fin": np.where(w.hh_active, w.hh_status, -1).tolist(),
+            "cash": [round(float(x)) for x in w.hh_cash],
         },
         "poles": {
             "state": w.p_state.tolist(),
@@ -418,6 +427,7 @@ def house_snapshot(w: World, i: int):
         "time": w.time_str(),
         "t": w.t,
         "shedding": w.shedding,
+        "finance": house_finance(w, i),
     }
 
 
