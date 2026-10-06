@@ -21,7 +21,7 @@ const dirOf = (x, y) => {
 };
 
 /** A glass dome: point(x, y, h) maps a local plan position and a height to the body's frame. */
-export function makeDome(point, radius, height, uniforms, segments = 192) {
+export function makeDome(point, radius, height, uniforms, segments = 192, portals = []) {
   const AZ = segments, EL = 64;
   const pos = [], uv = [], idx = [];
   for (let j = 0; j <= EL; j++) {
@@ -34,6 +34,10 @@ export function makeDome(point, radius, height, uniforms, segments = 192) {
   }
   for (let j = 0; j < EL; j++)
     for (let i = 0; i < AZ; i++) {
+      const angle = (i + 0.5) / AZ * Math.PI * 2;
+      const bottom = height * Math.sin(j / EL * Math.PI / 2);
+      if (portals.some(p => bottom < p.height &&
+        Math.abs(Math.atan2(Math.sin(angle - p.angle), Math.cos(angle - p.angle))) * radius < p.width / 2)) continue;
       const a = j * (AZ + 1) + i, b = a + 1, c = a + AZ + 1, d = c + 1;
       idx.push(a, c, b, b, c, d);
     }

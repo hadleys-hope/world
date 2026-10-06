@@ -1,3 +1,5 @@
+import { refineRiverTerrain } from "../geometry/river-terrain.js";
+import { riverContains, riverBounds } from "./urban/geography.js";
 /** models/worlds: the other bodies get real relief and climate instead of a painted ball.
  * Hephaestus: volcanoes, glowing lava cracks, acid cyclones. Russet: dune seas, mesas, craters, a ring and
  * dust storms. Klyaksa, the new colony: continents in a clear ocean, beaches, meadows, forests, snow peaks,
@@ -63,7 +65,7 @@ function surfaceMesh(spec, uniforms) {
       void main(){ vN=normalize(mat3(modelMatrix)*normal); vP=position; vH=aH; vec4 w=modelMatrix*vec4(position,1.0); vW=w.xyz; gl_Position=projectionMatrix*viewMatrix*w; }`,
     fragmentShader: `uniform float uTime, uKind; uniform vec3 uLight; varying vec3 vN, vP, vW; varying float vH;
       ${GLSL_NOISE}
-      void main(){ vec3 p=normalize(vP); float d=fbm(p*40.0)*0.5+n3(vW*0.08)*0.25+n3(vW*0.7)*0.15+n3(vW*4.0)*0.1;
+      void main(){ vec3 p=normalize(vP); float d=fbm(p*40.0)*0.5+n3(vP*0.08)*0.25+n3(vP*0.7)*0.15+n3(vP*4.0)*0.1;
         ${SURFACE[spec.kind]}
         vec3 n=normalize(vN); float light=max(dot(n,normalize(uLight)),0.0);
         float rim=pow(1.0-max(dot(n,normalize(cameraPosition-vW)),0.0),3.0);
@@ -76,29 +78,37 @@ function surfaceMesh(spec, uniforms) {
 }
 
 /** Klyaksa around the colony: a fine cap (about 20 m between vertices) with the same material, and its water. */
-function klyaksaPatch(spec, material, uniforms) {
+export function klyaksaPatch(spec, material, uniforms) {
   const R = spec.radius, rings = 240, segs = 480, hi = material.userData.hi;
-  const pos = [], aH = [], depth = [], idx = [];
-  for (let r = 0; r <= rings; r++)
-    for (let k = 0; k < segs; k++) {
-      const d = (PATCH * r) / rings, a = (k / segs) * Math.PI * 2;
-      const v = dirAt(Math.cos(a) * d, Math.sin(a) * d, R), h = bodyHeight(3, v.x, v.y, v.z);
-      pos.push(...v.clone().multiplyScalar(R * (1 + h)).toArray());
-      aH.push(h / hi);
-      depth.push(-h * R);
-    }
-  for (let r = 0; r < rings; r++)
-    for (let k = 0; k < segs; k++) {
-      const a = r * segs + k, b = r * segs + ((k + 1) % segs), c = a + segs, d = b + segs;
-      idx.push(a, c, b, b, c, d);
-    }
+  const xy = [], heights = [], cells = [];
+  const sample = (x, y) => {
+    const n = dirAt(x, y, R);
+    return bodyHeight(3, n.x, n.y, n.z);
+  };
+  for (let r = 0; r <= rings; r++) for (let k = 0; k < segs; k++) {
+    const d = PATCH * r / rings, a = k / segs * Math.PI * 2;
+    const x = Math.cos(a) * d, y = Math.sin(a) * d;
+    xy.push([x, y]); heights.push(sample(x, y));
+  }
+  for (let r = 0; r < rings; r++) for (let k = 0; k < segs; k++) {
+    const a = r * segs + k, b = r * segs + (k + 1) % segs;
+    cells.push([a, a + segs, b, b, a + segs, b + segs]);
+  }
+  const refined = refineRiverTerrain({ xy, heights, cells, sample, contains: riverContains, bounds: riverBounds() });
+  const pos = [], aH = [], depth = [], idx = refined.indices;
+  for (let i = 0; i < xy.length; i++) {
+    const v = dirAt(...xy[i], R).multiplyScalar(R * (1 + heights[i]));
+    pos.push(v.x, v.y, v.z); aH.push(heights[i] / hi); depth.push(-heights[i] * R);
+  }
   const g = new THREE.BufferGeometry();
   g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
   g.setAttribute("aH", new THREE.Float32BufferAttribute(aH, 1));
   g.setIndex(idx);
   g.computeVertexNormals();
   const land = new THREE.Mesh(g, material);
+  g.userData.terrainCells = refined.cells;
   state.klyaksaGroundAt = groundSampler(g, R, rings, segs, PATCH);
+  state.klyaksaTerrainStats = { vertices: xy.length, triangles: idx.length / 3 };
   // water on the same grid, only the cells that are wet
   const widx = [];
   for (let t = 0; t < idx.length; t += 3)
@@ -218,6 +228,16 @@ export function groundSampler(geometry, R, rings, segs, reach) {
     for (const offset of [0, 1, -1]) {
       const r = row + offset;
       if (r < 0 || r >= rings) continue;
+      const triangles = geometry.userData.terrainCells?.get(r * segs + col);
+      if (triangles) {
+        for (let i = 0; i < triangles.length; i += 3) {
+          A.fromBufferAttribute(positions, triangles[i]);
+          B.fromBufferAttribute(positions, triangles[i + 1]);
+          C.fromBufferAttribute(positions, triangles[i + 2]);
+          if (ray.intersectTriangle(A, B, C, false, hit)) return hit.length() - R;
+        }
+        continue;
+      }
       const a = r * segs + col, b = r * segs + (col + 1) % segs;
       A.fromBufferAttribute(positions, a); B.fromBufferAttribute(positions, b);
       C.fromBufferAttribute(positions, a + segs); D.fromBufferAttribute(positions, b + segs);

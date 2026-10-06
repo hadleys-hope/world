@@ -68,7 +68,7 @@ export function wild(nx, ny, nz) {
 }
 
 /** Other worlds: a height in units of the body radius (about ±0.03) and a material id the shader reads. */
-export function bodyHeight(kind, nx, ny, nz) {
+export function bodyHeight(kind, nx, ny, nz, skipRiver = false) {
   if (kind === 0) {           // Hephaestus: volcanoes, lava plains, cracked crust
     const v = ridged3(nx * 5, ny * 5, nz * 5, 3);
     const cones = Math.pow(Math.max(0, noise3(nx * 3.2, ny * 3.2, nz * 3.2)), 3) * 3;
@@ -99,7 +99,7 @@ export function bodyHeight(kind, nx, ny, nz) {
     const d = Math.acos(Math.max(-1, Math.min(1,dot)));
     h += (PLATEAU - h) * (1 - smooth(s.r, s.r * 1.7, d));
   }
-  return riverHeight(nx,ny,nz,h);
+  return skipRiver ? h : riverHeight(nx,ny,nz,h);
 }
 
 // Klyaksa's city sites: [{ dir: unit vector, r: angular radius }], set before its surface is built

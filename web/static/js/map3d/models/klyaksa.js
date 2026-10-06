@@ -1,10 +1,19 @@
+import { buildUtilitiesSteps } from "./urban/utilities.js";
+import { buildTelecom } from "./urban/telecom.js";
+import { buildConnections } from "./urban/connections.js";
+import { worldPointToBody } from "../geometry/body-frame.js";
+import { createPlacement, roadClearance } from "./urban/placement.js";
 import {
   buildIndustry,
   syncCityVisuals,
   updateCityVehicles,
 } from "./urban/industry.js";
-import { enableCityRiver } from "./urban/geography.js";
-import { buildWaterfronts, updateMarine } from "./urban/marine.js";
+import {
+  enableCityRiver,
+  configureCityRiver,
+  riverContains,
+} from "./urban/geography.js";
+import { buildWaterfrontSteps, updateMarine } from "./urban/marine.js";
 /** models/klyaksa: the new colony on Klyaksa. A branching chain of glass domes, each a city with the structure
  * of Hadley's Hope (rows of houses, roads, the towers of the hub), linked by glass corridors; forests, meadows
  * and flowers in the valleys around them; gardens inside. Plans come from /klyaksa/geometry.json once, the
@@ -12,7 +21,7 @@ import { buildWaterfronts, updateMarine } from "./urban/marine.js";
  * What keeps it cheap: every house of every city is one InstancedMesh (one draw call for 5010 houses), every
  * road one mesh, the vegetation is chunked and only the chunks near the camera are drawn. */
 import { buildHomes } from "./urban/buildings.js";
-import { buildDistrict, reservation, Surface } from "./urban/streets.js";
+import { buildDistrict, reservation } from "./urban/streets.js";
 import { state } from "../state.js";
 import { bodyHeight, fbm3, PLATEAU, setSites } from "../geometry/noise.js";
 import {
@@ -23,7 +32,6 @@ import {
   treeGeometry,
   tuftGeometry,
 } from "./life.js";
-import { glassMaterial, makeDome } from "./oasis.js";
 import * as THREE from "three";
 
 const CENTRE = new THREE.Vector3(-0.66, 0.32, -0.68).normalize(); // the landing coast
@@ -62,9 +70,9 @@ export async function klyaksaSites(R) {
   enableCityRiver(R);
   const sites = plan.cities.flatMap((c) => [
     { dir: dirAt(...c.at, R).toArray(), r: (c.wall + 160) / R },
-    ...Object.values(c.facilities || {}).map(([x, y]) => ({
+    ...Object.entries(c.facilities || {}).map(([kind, [x, y]]) => ({
       dir: dirAt(c.at[0] + x, c.at[1] + y, R).toArray(),
-      r: 65 / R,
+      r: (kind === "reactor_pos" ? 128 : 65) / R,
     })),
   ]);
   const byId = Object.fromEntries(plan.cities.map((c) => [c.id, c]));
@@ -80,103 +88,47 @@ export async function klyaksaSites(R) {
         r: 40 / R,
       });
   }
-  setSites(sites);
+  // Prepare connected service corridors before the terrain mesh is sampled.
+  for (const c of plan.cities)
+    for (const road of c.service_roads || []) {
+      for (let i = 1; i < road.points.length; i++) {
+        const A = road.points[i - 1],
+          B = road.points[i];
+        const L = Math.hypot(B[0] - A[0], B[1] - A[1]);
+        const count = Math.max(1, Math.ceil(L / 50));
+        for (let j = 0; j <= count; j++)
+          sites.push({
+            dir: dirAt(
+              c.at[0] + A[0] + ((B[0] - A[0]) * j) / count,
+              c.at[1] + A[1] + ((B[1] - A[1]) * j) / count,
+              R,
+            ).toArray(),
+            r: 36 / R,
+          });
+      }
+    }
+  const distinctSites = new Map();
+  for (const site of sites) {
+    const key = site.dir.map((n) => Math.round((n * R) / 25)).join(",");
+    if (!distinctSites.has(key) || distinctSites.get(key).r < site.r)
+      distinctSites.set(key, site);
+  }
+  setSites([...distinctSites.values()]);
+  configureCityRiver(R, (x, y) => {
+    const n = dirAt(x, y, R);
+    return bodyHeight(3, n.x, n.y, n.z, true) * R;
+  });
   return plan;
 }
 
 export function buildKlyaksa(steps, body, R, uniforms) {
   const plan = state.klyaksaPlanData;
   const ground = R * (1 + PLATEAU);
-  const cityPoint = (c, x, y, h) =>
-    dirAt(c.at[0] + x, c.at[1] + y, R).multiplyScalar(ground + h);
   const env = { uTime: uniforms.uTime, uSun: uniforms.uLight };
   const rand = rng(5010);
-  // 1. domes, corridors, roads
-  steps.push(() => {
-    const byId = Object.fromEntries(plan.cities.map((c) => [c.id, c]));
-    for (const c of plan.cities) {
-      const r = c.wall + 45;
-      body.add(
-        makeDome(
-          (x, y, up) => cityPoint(c, x, y, up - 0.5),
-          r,
-          r * 0.42,
-          {
-            uSun: uniforms.uLight,
-            uStructure: { value: 0.25 },
-            uGlare: { value: 0.18 },
-          },
-          160,
-        ),
-      );
-    }
-    // glass corridors along the branches, half sunk into the plateau, edge to edge
-    const pos = [],
-      uv = [],
-      idx = [];
-    for (const [a, b] of plan.branches) {
-      const A = byId[a],
-        B = byId[b],
-        dx = B.at[0] - A.at[0],
-        dy = B.at[1] - A.at[1],
-        L = Math.hypot(dx, dy);
-      const ux = dx / L,
-        uy = dy / L,
-        from = A.wall + 40,
-        to = L - B.wall - 40,
-        steps = Math.ceil((to - from) / 20);
-      const base = pos.length / 3;
-      for (let k = 0; k <= steps; k++) {
-        const s = from + ((to - from) * k) / steps;
-        for (let j = 0; j <= 12; j++) {
-          const t = (j / 12) * Math.PI;
-          const X = A.at[0] + ux * s - uy * Math.cos(t) * 32,
-            Y = A.at[1] + uy * s + ux * Math.cos(t) * 32;
-          const p = dirAt(X, Y, R).multiplyScalar(ground + Math.sin(t) * 26);
-          pos.push(p.x, p.y, p.z);
-          uv.push(j / 12 / 3, (s - from) / 400);
-        }
-        if (k < steps)
-          for (let j = 0; j < 12; j++) {
-            const q = base + k * 13 + j;
-            idx.push(q, q + 13, q + 1, q + 1, q + 13, q + 14);
-          }
-      }
-    }
-    const g = new THREE.BufferGeometry();
-    g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
-    g.setAttribute("aUV", new THREE.Float32BufferAttribute(uv, 2));
-    g.setIndex(idx);
-    g.computeVertexNormals();
-    const tubes = new THREE.Mesh(g, glassMaterial({ uSun: uniforms.uLight }));
-    tubes.renderOrder = 3;
-    body.add(tubes);
-    const streets = new Surface((x, y, h = 0) =>
-      dirAt(x, y, R).multiplyScalar(ground + h),
-    );
-    for (const [a, b] of plan.branches) {
-      const A = byId[a],
-        B = byId[b],
-        dx = B.at[0] - A.at[0],
-        dy = B.at[1] - A.at[1],
-        L = Math.hypot(dx, dy),
-        from = A.wall - 50,
-        to = L - B.wall + 50;
-      for (let d = from; d < to; d += 12) {
-        const at = (t) => [A.at[0] + (dx * t) / L, A.at[1] + (dy * t) / L],
-          a = at(d),
-          b = at(Math.min(to, d + 12));
-        streets.strip(a, b, 14, 0.16, 0x38444c);
-        for (const side of [-6.4, 6.4])
-          streets.strip(a, b, 0.15, 0.18, 0xe9e2c9, side);
-        if (Math.floor(d / 12) % 2 === 0)
-          streets.strip(a, b, 0.18, 0.18, 0xe9e2c9);
-      }
-    }
-    body.add(streets.mesh());
-  });
-  const globalPoint = (x, y, h = 0) =>
-    dirAt(x, y, R).multiplyScalar(ground + h);
+  // The same gate coordinates terminate both the road graph and the open galleries.
+  steps.push(() => buildConnections(plan, body, R, { uSun: uniforms.uLight }));
+  const globalPoint = createPlacement(R, plan);
   steps.push(() => buildHomes(body, R, plan, globalPoint, env));
   for (const c of plan.cities)
     steps.push(() => {
@@ -184,10 +136,29 @@ export function buildKlyaksa(steps, body, R, uniforms) {
       const next = () => {
         if (!build.next().done) steps.unshift(next);
       };
+      next.task = `district/${c.id}`;
       next();
     });
-  for (const c of plan.cities) steps.push(() => buildIndustry(c, body, R, env));
-  steps.push(() => buildWaterfronts(body, R, plan, env, globalPoint));
+  for (const c of plan.cities) {
+    steps.push(() => buildIndustry(c, body, R, env));
+    steps.push(() => {
+      const build = buildUtilitiesSteps(c, body, R, env);
+      const next = () => {
+        if (!build.next().done) steps.unshift(next);
+      };
+      next.task = `utilities/${c.id}`;
+      next();
+    });
+    steps.push(() => buildTelecom(c, body, R, env));
+  }
+  steps.push(() => {
+    const build = buildWaterfrontSteps(body, R, plan, env, globalPoint);
+    const next = () => {
+      if (!build.next().done) steps.unshift(next);
+    };
+    next.task = "waterfront";
+    next();
+  });
   // 3. gardens inside the domes, one city per idle task.
   for (const gardenCity of plan.cities)
     steps.push(() => {
@@ -199,6 +170,7 @@ export function buildKlyaksa(steps, body, R, uniforms) {
         const reserved = state.klyaksaReservations?.get(c.id) || reservation(c);
         const free = (x, y) =>
           reserved.free(x, y, 3) &&
+          !riverContains(c.at[0] + x, c.at[1] + y, 20) &&
           Math.hypot(x, y) > c.hub + 70 &&
           Math.hypot(x, y) < c.wall - 12;
         const area = (c.wall / 690) ** 2;
@@ -287,9 +259,15 @@ export function buildKlyaksa(steps, body, R, uniforms) {
       );
     });
   // 4. the valleys: forests on the slopes, meadows and flowers on the floors, boulders on the heights;
-  // eight steps, an eighth of the land each, so no single step holds the page for long
-  for (let part = 0; part < 8; part++)
-    steps.push(() => {
+  // Preserve eight spatial sectors while yielding during sampling and geometry assembly.
+  let nearPortRoad;
+  for (let part = 0; part < 8; part++) {
+    const build = (function* () {
+      nearPortRoad ||= roadClearance(
+        (state.klyaksaPorts || []).map(
+          (port) => port.accessPoints || port.access,
+        ),
+      );
       const pines = [],
         broad = [],
         meadow = [],
@@ -302,28 +280,16 @@ export function buildKlyaksa(steps, body, R, uniforms) {
       const inDome = (v) => domes.some((x) => v.angleTo(x.d) < x.r);
       const reach = 11000 / R;
       for (let k = 0; k < 52500 && pines.length + broad.length < 7500; k++) {
+        if (k && k % 2048 === 0) yield;
         const d = Math.sqrt(rand()) * reach,
           a = ((part + rand()) * Math.PI) / 4;
         const v = dirAt(Math.cos(a) * d * R, Math.sin(a) * d * R, R);
         if (inDome(v)) continue;
         const X = Math.cos(a) * d * R,
           Y = Math.sin(a) * d * R;
+        if (riverContains(X, Y, 45)) continue;
         // Keep crowns and offset meadow tufts out of the maritime access roads.
-        if (
-          (state.klyaksaPorts || []).some(({ access: [A, B] }) => {
-            const dx = B[0] - A[0],
-              dy = B[1] - A[1];
-            const t = Math.max(
-              0,
-              Math.min(
-                1,
-                ((X - A[0]) * dx + (Y - A[1]) * dy) / (dx * dx + dy * dy),
-              ),
-            );
-            return Math.hypot(X - A[0] - dx * t, Y - A[1] - dy * t) < 42;
-          })
-        )
-          continue;
+        if (nearPortRoad(X, Y)) continue;
         if (
           plan.cities.some(
             (c) =>
@@ -365,11 +331,10 @@ export function buildKlyaksa(steps, body, R, uniforms) {
           });
         else if (h < 0.006 && meadow.length < 15000) {
           for (let m = 0; m < 6; m++) {
-            const w = dirAt(
-              Math.cos(a) * d * R + (rand() - 0.5) * 30,
-              Math.sin(a) * d * R + (rand() - 0.5) * 30,
-              R,
-            );
+            const gx = Math.cos(a) * d * R + (rand() - 0.5) * 30;
+            const gy = Math.sin(a) * d * R + (rand() - 0.5) * 30;
+            if (riverContains(gx, gy, 20)) continue;
+            const w = dirAt(gx, gy, R);
             const hh = bodyHeight(3, w.x, w.y, w.z) * R;
             if (hh < 4) continue;
             (rand() < 0.12 ? bloom : meadow).push({
@@ -394,6 +359,7 @@ export function buildKlyaksa(steps, body, R, uniforms) {
         body.add(g);
         lod.push(g);
       };
+      yield;
       add(
         chunkedInstances(
           () => treeGeometry("pine"),
@@ -407,6 +373,7 @@ export function buildKlyaksa(steps, body, R, uniforms) {
           },
         ),
       );
+      yield;
       add(
         chunkedInstances(
           () => treeGeometry("broad"),
@@ -420,6 +387,7 @@ export function buildKlyaksa(steps, body, R, uniforms) {
           },
         ),
       );
+      yield;
       add(
         chunkedInstances(
           () => tuftGeometry(0x2f5a1e, 0x9cc95a),
@@ -429,6 +397,7 @@ export function buildKlyaksa(steps, body, R, uniforms) {
           { cell: 0.06, maxDist: 1800 },
         ),
       );
+      yield;
       add(
         chunkedInstances(
           () => tuftGeometry(0x2f5a1e, 0xffffff),
@@ -438,6 +407,7 @@ export function buildKlyaksa(steps, body, R, uniforms) {
           { cell: 0.06, maxDist: 1800 },
         ),
       );
+      yield;
       add(
         chunkedInstances(rockGeometry, lifeMaterial(env), rocks, R, {
           cell: 0.12,
@@ -456,7 +426,13 @@ export function buildKlyaksa(steps, body, R, uniforms) {
       c.meadow += meadow.length;
       c.bloom += bloom.length;
       c.rocks += rocks.length;
-    });
+    })();
+    const next = () => {
+      if (!build.next().done) steps.unshift(next);
+    };
+    next.task = `wilderness/${part}`;
+    steps.push(next);
+  }
 }
 
 /** Houses take the colour of their state: cold blue to warm amber, dark without power. */
@@ -467,7 +443,7 @@ export function updateKlyaksa(now) {
   const body = state.solarSystem.bodies[3];
   updateCityVehicles(now);
   if (state.klyaksaFrame === undefined || ++state.klyaksaFrame % 12 === 0) {
-    const cam = state.camera.position.clone().sub(body.position);
+    const cam = worldPointToBody(3, state.camera.position);
     for (const g of lod) g.userData.update(cam);
     state.klyaksaFrame = state.klyaksaFrame || 0;
   }
