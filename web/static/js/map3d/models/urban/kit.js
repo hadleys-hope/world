@@ -74,6 +74,68 @@ export class Model {
     return merge(this.parts);
   }
 }
+/** Small, readable die-cut signs, generated without canvas/font downloads. Each contiguous
+ * glyph stroke is one box; signs remain geometry and do not add a draw call per label. */
+export function lettering(
+  model,
+  text,
+  x,
+  y,
+  z,
+  size = 0.16,
+  color = palette.white,
+) {
+  const glyphs = {
+    A: [14, 17, 17, 31, 17, 17, 17],
+    B: [30, 17, 17, 30, 17, 17, 30],
+    C: [14, 17, 16, 16, 16, 17, 14],
+    D: [30, 17, 17, 17, 17, 17, 30],
+    E: [31, 16, 16, 30, 16, 16, 31],
+    F: [31, 16, 16, 30, 16, 16, 16],
+    G: [14, 17, 16, 23, 17, 17, 15],
+    H: [17, 17, 17, 31, 17, 17, 17],
+    I: [31, 4, 4, 4, 4, 4, 31],
+    J: [7, 2, 2, 2, 18, 18, 12],
+    K: [17, 18, 20, 24, 20, 18, 17],
+    L: [16, 16, 16, 16, 16, 16, 31],
+    M: [17, 27, 21, 21, 17, 17, 17],
+    N: [17, 25, 21, 19, 17, 17, 17],
+    O: [14, 17, 17, 17, 17, 17, 14],
+    P: [30, 17, 17, 30, 16, 16, 16],
+    Q: [14, 17, 17, 17, 21, 18, 13],
+    R: [30, 17, 17, 30, 20, 18, 17],
+    S: [15, 16, 16, 14, 1, 1, 30],
+    T: [31, 4, 4, 4, 4, 4, 4],
+    U: [17, 17, 17, 17, 17, 17, 14],
+    V: [17, 17, 17, 17, 17, 10, 4],
+    W: [17, 17, 17, 21, 21, 21, 10],
+    X: [17, 17, 10, 4, 10, 17, 17],
+    Y: [17, 17, 10, 4, 4, 4, 4],
+    Z: [31, 1, 2, 4, 8, 16, 31],
+    " ": [0, 0, 0, 0, 0, 0, 0],
+  };
+  const width = (text.length * 6 - 1) * size;
+  [...text.toUpperCase()].forEach((letter, index) => {
+    const rows = glyphs[letter] || glyphs[" "];
+    rows.forEach((bits, row) => {
+      for (let col = 0; col < 5; col++) {
+        if (!(bits & (1 << (4 - col)))) continue;
+        const start = col;
+        while (col + 1 < 5 && bits & (1 << (3 - col))) col++;
+        model.box(
+          x - width / 2 + (index * 6 + (start + col + 1) / 2) * size,
+          y + (3 - row) * size,
+          z,
+          (col - start + 1) * size * 0.94,
+          size * 0.9,
+          size * 0.2,
+          color,
+        );
+      }
+    });
+  });
+  return model;
+}
 export function roofPlant() {
   const m = new Model();
   m.box(0, 0.45, 0, 2.3, 0.9, 1.6, palette.metal).box(
@@ -181,6 +243,30 @@ export function car(tanker = false) {
     m.box(x, 0.87, 2.34, 0.4, 0.16, 0.08, 0xffe3ac);
   return m.finish();
 }
+/** Bounds in the planet's coordinate frame. World-space Box3 bounds silently hide all
+ * distance-limited batches when the planet is translated along its orbit or rotated. */
+export function bodyLocalSphere(root, body) {
+  const bounds = new T.Box3(),
+    local = new T.Matrix4(),
+    box = new T.Box3();
+  root.traverse((object) => {
+    if (!object.geometry) return;
+    if (object.isInstancedMesh) {
+      object.computeBoundingBox();
+      box.copy(object.boundingBox);
+    } else {
+      if (!object.geometry.boundingBox) object.geometry.computeBoundingBox();
+      box.copy(object.geometry.boundingBox);
+    }
+    local.identity();
+    for (let node = object; node && node !== body; node = node.parent) {
+      if (node.matrixAutoUpdate) node.updateMatrix();
+      local.premultiply(node.matrix);
+    }
+    bounds.union(box.applyMatrix4(local));
+  });
+  return bounds.getBoundingSphere(new T.Sphere());
+}
 /** Spherical batches grouped by material/prototype; persistent instance IDs for picking. */
 export function planYaw(point, x, y, yaw = 0, h = 0) {
   const p = point(x, y, h),
@@ -237,9 +323,8 @@ export class Batches {
     }
     this.body.add(root);
     if (distance) {
-      const sphere = new T.Box3()
-        .setFromObject(root)
-        .getBoundingSphere(new T.Sphere());
+      const sphere = bodyLocalSphere(root, this.body);
+      root.userData.localBounds = sphere;
       root.userData.update = (cam) =>
         (root.visible =
           cam.distanceTo(sphere.center) < sphere.radius + distance);

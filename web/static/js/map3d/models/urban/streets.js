@@ -1,22 +1,12 @@
-import { streetTexture } from "./materials.js";
-import { treeGeometry } from "../life.js";
-import { bridgeLift } from "./geography.js";
-/** Continuous street meshes, reusable street furniture, collision-aware planting reservations. */
+/** Continuous, terrain-tessellated streets driven by the same graph as traffic and utilities. */
 import * as T from "three";
 import { state } from "../../state.js";
-import {
-  Batches,
-  Model,
-  pole,
-  bench,
-  bin,
-  antenna,
-  car,
-  palette,
-  roofPlant,
-  planYaw,
-} from "./kit.js";
-import { civicGeometry, facadeMaterial } from "./buildings.js";
+import { streetTexture } from "./materials.js";
+import { riverContains, riverCentre } from "./geography.js";
+import { Batches, Model, bench, bin, palette } from "./kit.js";
+import { buildCivicDistrict } from "./civic.js";
+import { roadNetwork, registerTrafficSignals } from "./traffic.js";
+
 export function reservation(city) {
   const cell = 16,
     grid = new Map(),
@@ -51,6 +41,13 @@ export function reservation(city) {
         );
     }
   for (const [x, y] of Object.values(city.facilities || {})) mark(x, y, 58);
+  for (const q of [
+    ...(city.civic_plots || []),
+    ...(city.sector_services || []),
+  ])
+    mark(q.x, q.y, Math.hypot(q.w || 30, q.d || 30) / 2 + 3);
+  for (const q of city.parks || [])
+    mark(q.x, q.y, Math.hypot(q.w || 25, q.d || 25) / 2);
   const free = (x, y, r = 0) => {
     for (
       let a = Math.floor((x - r) / cell);
@@ -64,7 +61,7 @@ export function reservation(city) {
       )
         for (const q of grid.get(`${a},${b}`) || [])
           if (Math.hypot(x - q.x, y - q.y) < r + q.r) return false;
-    return !(city.id === "k1" && Math.abs(y) < 34);
+    return !riverContains(city.at[0] + x, city.at[1] + y, r + 3);
   };
   return { mark, free };
 }
@@ -77,12 +74,45 @@ export class Surface {
   }
   quad(points, color) {
     const C = new T.Color(color),
-      ps = points.map(([x, y, h = 0]) => this.point(x, y, h));
-    for (const i of [0, 1, 2, 2, 1, 3]) {
-      this.p.push(...ps[i].toArray());
-      this.uv.push(points[i][0] * 0.5, points[i][1] * 0.5);
-      this.c.push(C.r, C.g, C.b);
-    }
+      length = (a, b) =>
+        Math.hypot(a[0] - b[0], a[1] - b[1], (a[2] || 0) - (b[2] || 0));
+    const nu = Math.max(
+      1,
+      Math.ceil(
+        Math.max(length(points[0], points[1]), length(points[2], points[3])) /
+          4,
+      ),
+    );
+    const nv = Math.max(
+      1,
+      Math.ceil(
+        Math.max(length(points[0], points[2]), length(points[1], points[3])) /
+          4,
+      ),
+    );
+    const at = (u, v) =>
+      [0, 1, 2].map(
+        (k) =>
+          (points[0][k] || 0) * (1 - u) * (1 - v) +
+          (points[1][k] || 0) * u * (1 - v) +
+          (points[2][k] || 0) * (1 - u) * v +
+          (points[3][k] || 0) * u * v,
+      );
+    for (let v = 0; v < nv; v++)
+      for (let u = 0; u < nu; u++) {
+        const flat = [
+            at(u / nu, v / nv),
+            at((u + 1) / nu, v / nv),
+            at(u / nu, (v + 1) / nv),
+            at((u + 1) / nu, (v + 1) / nv),
+          ],
+          ps = flat.map(([x, y, h]) => this.point(x, y, h));
+        for (const i of [0, 1, 2, 2, 1, 3]) {
+          this.p.push(...ps[i].toArray());
+          this.uv.push(flat[i][0] * 0.5, flat[i][1] * 0.5);
+          this.c.push(C.r, C.g, C.b);
+        }
+      }
   }
   strip(a, b, w, h, color, offset = 0) {
     const L = Math.hypot(b[0] - a[0], b[1] - a[1]);
@@ -125,352 +155,314 @@ export class Surface {
     );
   }
 }
-function lineMesh(segments, color) {
-  const g = new T.BufferGeometry().setFromPoints(segments);
-  return new T.LineSegments(g, new T.LineBasicMaterial({ color }));
+const crossingCache = new WeakMap();
+export function roadCrossesRiver(c, r) {
+  if (r.bridge) return true;
+  if (crossingCache.has(r)) return crossingCache.get(r);
+  if (c.id !== "k1") return false;
+  let wet = false,
+    positive = false,
+    negative = false;
+  for (const p of r.points) {
+    wet ||= riverContains(c.at[0] + p[0], c.at[1] + p[1], 0);
+    positive ||= p[1] > 18;
+    negative ||= p[1] < -18;
+  }
+  const crossing = wet && positive && negative;
+  crossingCache.set(r, crossing);
+  return crossing;
+}
+/** Kept on each graph edge so traffic, markings and utility underpasses share a deck height. */
+export function roadElevation(c, r, x, y) {
+  if (!roadCrossesRiver(c, r)) return 0;
+  const a = r.points[0],
+    b = r.points.at(-1),
+    delta = (px, py) => py + c.at[1] - riverCentre(px + c.at[0]),
+    d = delta(x, y);
+  const endpoint = Math.sign(d) === Math.sign(delta(...a)) ? a : b,
+    end = Math.min(220, Math.abs(delta(...endpoint)));
+  const t = Math.max(
+    0,
+    Math.min(1, (Math.abs(d) - 58) / Math.max(1, end - 58)),
+  );
+  return 24 * (1 - t * t * (3 - 2 * t));
+}
+export function roadDeckHeight(c, x, y, R) {
+  let lift = 0;
+  for (const r of [...c.roads, ...(c.service_roads || [])]) {
+    if (!roadCrossesRiver(c, r)) continue;
+    for (let i = 1; i < r.points.length; i++) {
+      const a = r.points[i - 1],
+        b = r.points[i],
+        dx = b[0] - a[0],
+        dy = b[1] - a[1],
+        t = Math.max(
+          0,
+          Math.min(
+            1,
+            ((x - a[0]) * dx + (y - a[1]) * dy) / (dx * dx + dy * dy || 1),
+          ),
+        );
+      if (Math.hypot(x - a[0] - dx * t, y - a[1] - dy * t) < r.width / 2 + 9)
+        lift = Math.max(lift, roadElevation(c, r, x, y));
+    }
+  }
+  return R * 0.0035 + 0.25 + lift;
+}
+const signalPost = () =>
+  new Model()
+    .cyl(0, 1.9, 0, 0.075, 3.8)
+    .box(0, 3.45, 0, 0.4, 1.08, 0.3, palette.dark)
+    .box(0, 4.02, 0.07, 0.5, 0.08, 0.5, palette.dark)
+    .finish();
+const bollard = () =>
+  new Model()
+    .cyl(0, 0.55, 0, 0.075, 1.1, palette.dark)
+    .cyl(0, 0.92, 0, 0.09, 0.12, 0xe6daba)
+    .finish();
+function disk(surface, x, y, r, h, color) {
+  for (let i = 0; i < 24; i++) {
+    const a = (i * Math.PI) / 12,
+      b = ((i + 1) * Math.PI) / 12;
+    surface.quad(
+      [
+        [x, y, h],
+        [x + Math.cos(a) * r, y + Math.sin(a) * r, h],
+        [x, y, h],
+        [x + Math.cos(b) * r, y + Math.sin(b) * r, h],
+      ],
+      color,
+    );
+  }
+}
+function curveDashes(surface, A, B, C, h) {
+  const length =
+    Math.hypot(B[0] - A[0], B[1] - A[1]) + Math.hypot(C[0] - B[0], C[1] - B[1]);
+  const at = (t) => [
+    (1 - t) ** 2 * A[0] + 2 * (1 - t) * t * B[0] + t * t * C[0],
+    (1 - t) ** 2 * A[1] + 2 * (1 - t) * t * B[1] + t * t * C[1],
+  ];
+  const steps = Math.max(4, Math.ceil(length / 1.3));
+  for (let i = 0; i < steps; i += 3)
+    surface.strip(
+      at(i / steps),
+      at(Math.min(1, (i + 1.35) / steps)),
+      0.12,
+      h,
+      0xd4d5c8,
+    );
 }
 export function* buildDistrict(c, body, R, globalPoint, env) {
   const point = (x, y, h = 0) => globalPoint(c.at[0] + x, c.at[1] + y, h),
+    network = roadNetwork(c),
     b = new Batches(body, R, point, env),
-    roadPoint = (x, y, h = 0) =>
-      point(x, y, h + (c.id === "k1" ? bridgeLift(y) : 0)),
-    road = new Surface(roadPoint),
-    walk = new Surface(roadPoint),
-    wires = [],
-    publicGround = new Surface(point),
-    ponds = new Surface(point),
     reserve = reservation(c),
-    streetPoles = [];
-  const occupiedPoles = new Set();
-  let roadIndex = 0;
-  for (const r of c.roads) {
-    if (roadIndex++ % 8 === 0) yield;
+    furniturePositions = [],
+    accesses = (c.parcels || []).filter((p) => p.access).map((p) => p.access);
+  const lights = [],
+    allRoads = new Surface(point),
+    allWalks = new Surface(point);
+  let counter = 0;
+  const houseClear = (x, y) =>
+    !c.x.some((hx, i) => Math.abs(hx - x) < 8 && Math.abs(c.y[i] - y) < 8);
+  const placed = (x, y) => {
+    if (furniturePositions.some((p) => Math.hypot(p[0] - x, p[1] - y) < 5))
+      return false;
+    furniturePositions.push([x, y]);
+    return true;
+  };
+  for (const edge of network.edges) {
+    if (counter++ % 6 === 0) yield;
+    const r = edge.road,
+      deck = (x, y, h = 0) => point(x, y, h + roadElevation(c, r, x, y)),
+      asphalt = allRoads,
+      walk = allWalks;
+    asphalt.point = deck;
+    walk.point = deck;
+    const crossing = roadCrossesRiver(c, r),
+      endpointGap = (n) =>
+        n.edges.length > 2
+          ? Math.max(...n.edges.map((e) => e.road.width)) * 0.75 + 3
+          : 0;
+    const gapA = endpointGap(edge.a),
+      gapB = endpointGap(edge.b),
+      cycle = r.width >= 12 && r.kind !== "service",
+      width = r.width;
     let distance = 0,
-      nextLamp = 12;
+      nextFurniture = 28;
     for (let j = 1; j < r.points.length; j++) {
       const A = r.points[j - 1],
         B = r.points[j],
         dx = B[0] - A[0],
         dy = B[1] - A[1],
         L = Math.hypot(dx, dy);
-      if (!L) continue;
+      if (L < 0.001) continue;
       const n = [-dy / L, dx / L],
         at = (t) => [A[0] + dx * t, A[1] + dy * t];
-      road.strip(A, B, r.width, 0.16, 0x303b42);
-      road.strip(A, B, 0.16, 0.18, 0xe2debd, r.width / 2 - 0.55);
-      road.strip(A, B, 0.16, 0.18, 0xe2debd, -r.width / 2 + 0.55);
-      for (let d = Math.ceil(distance / 9) * 9; d < distance + L; d += 9) {
-        const a = at(Math.max(0, (d - distance) / L)),
-          z = at(Math.min(1, (d + 4 - distance) / L));
-        road.strip(a, z, 0.18, 0.19, 0xe2debd);
-      }
-      for (const side of [-1, 1]) {
-        // Raised sidewalks, with vertical curb faces; interrupt at radial junctions.
-        const mid = at(0.5),
-          angle = Math.atan2(mid[1], mid[0]),
-          rad = Math.hypot(...mid),
-          junction =
-            (Math.abs(Math.sin(angle * 3)) * rad) / 3 < r.width ||
-            (Math.abs(rad - 210) < 8 &&
-              (Math.abs(Math.cos(angle * 6)) * rad) / 6 < 4);
-        if (!junction) {
-          walk.strip(A, B, 2.2, 0.39, 0xa8a99f, side * (r.width / 2 + 1.1));
-          const off = (side * r.width) / 2;
+      asphalt.strip(A, B, width, 0.24, 0x293339);
+      const pieces = Math.max(1, Math.ceil(L / 3.5));
+      for (let k = 0; k < pieces; k++) {
+        const a = at(k / pieces),
+          z = at((k + 1) / pieces),
+          d = distance + ((k + 0.5) * L) / pieces;
+        if (d < gapA || edge.length - d < gapB) continue;
+        const midpoint = [(a[0] + z[0]) / 2, (a[1] + z[1]) / 2];
+        if (
+          accesses.some(
+            (p) => Math.hypot(p.x - midpoint[0], p.y - midpoint[1]) < 6,
+          )
+        )
+          continue;
+        for (const side of [-1, 1]) {
+          asphalt.strip(a, z, 0.16, 0.27, 0xe1debe, side * (width / 2 - 0.45));
+          walk.strip(a, z, 2.2, 0.46, 0xa9aaa1, side * (width / 2 + 1.1));
+          const off = (side * width) / 2;
           walk.quad(
             [
-              [A[0] + n[0] * off, A[1] + n[1] * off, 0.16],
-              [A[0] + n[0] * off, A[1] + n[1] * off, 0.39],
-              [B[0] + n[0] * off, B[1] + n[1] * off, 0.16],
-              [B[0] + n[0] * off, B[1] + n[1] * off, 0.39],
+              [a[0] + n[0] * off, a[1] + n[1] * off, 0.24],
+              [a[0] + n[0] * off, a[1] + n[1] * off, 0.46],
+              [z[0] + n[0] * off, z[1] + n[1] * off, 0.24],
+              [z[0] + n[0] * off, z[1] + n[1] * off, 0.46],
             ],
-            0xb9bbad,
+            0xd0cbb9,
           );
+          if (cycle) {
+            walk.strip(a, z, 1.8, 0.45, 0x567d72, side * (width / 2 + 3.3));
+            walk.strip(a, z, 0.1, 0.48, 0xc6d6b0, side * (width / 2 + 4.13));
+          }
         }
       }
-      while (nextLamp < distance + L) {
-        const p = at((nextLamp - distance) / L),
-          off = r.width / 2 + 2.8,
+      for (let d = Math.ceil(distance / 9) * 9; d < distance + L; d += 9) {
+        if (d < gapA || edge.length - d < gapB) continue;
+        asphalt.strip(
+          at(Math.max(0, (d - distance) / L)),
+          at(Math.min(1, (d + 4 - distance) / L)),
+          0.17,
+          0.28,
+          0xe1debe,
+        );
+      }
+      while (nextFurniture < distance + L) {
+        const p = at((nextFurniture - distance) / L),
+          off = width / 2 + (cycle ? 5 : 3),
           x = p[0] + n[0] * off,
-          y = p[1] + n[1] * off,
-          k = `${Math.round(x / 10)},${Math.round(y / 10)}`;
-        if (!occupiedPoles.has(k) && !(c.id === "k1" && Math.abs(y) < 32)) {
-          b.add("lamp", pole, x, y, 0.2, 1, Math.atan2(-dx, dy));
-          streetPoles.push([x, y, Math.atan2(-dx, dy)]);
-          occupiedPoles.add(k);
+          y = p[1] + n[1] * off;
+        if (
+          nextFurniture > gapA + 5 &&
+          edge.length - nextFurniture > gapB + 5 &&
+          !crossing &&
+          houseClear(x, y) &&
+          placed(x, y)
+        ) {
+          b.add("street-benches", bench, x, y, 0.46, 1, -Math.atan2(dy, dx));
+          b.add("street-bins", bin, x + n[0] * 2.5, y + n[1] * 2.5, 0.46, 1);
         }
-        nextLamp += 45;
+        nextFurniture += 72;
       }
       distance += L;
     }
   }
-  // Exact insulator anchors use the same orientation as the pole instances.
-  const up = new T.Vector3(0, 1, 0),
-    anchor = (p, phase) => {
-      const base = point(p[0], p[1], 0.2),
-        n = base.clone().normalize(),
-        q = new T.Quaternion()
-          .setFromUnitVectors(up, n)
-          .multiply(
-            new T.Quaternion().setFromAxisAngle(
-              up,
-              planYaw(point, p[0], p[1], p[2], 0.2),
-            ),
-          );
-      return new T.Vector3(phase, 7.95, 0).applyQuaternion(q).add(base);
-    };
-  const cable = (A, B, sag) => {
-    const n = A.clone().add(B).normalize();
-    for (let k = 0; k < 8; k++) {
-      const at = (t) =>
-        A.clone()
-          .lerp(B, t)
-          .addScaledVector(n, -sag * 4 * t * (1 - t));
-      wires.push(at(k / 8), at((k + 1) / 8));
-    }
-  };
-  for (let i = 1; i < streetPoles.length; i++) {
-    const A = streetPoles[i - 1],
-      B = streetPoles[i],
-      L = Math.hypot(B[0] - A[0], B[1] - A[1]);
-    if (L > 65 || L < 10) continue;
-    for (const phase of [-1.1, 0, 1.1])
-      cable(anchor(A, phase), anchor(B, phase), 1.25);
-  }
-  const matrix = new T.Matrix4(),
-    inverse = new T.Matrix4(),
-    offset = state.klyaksaHouseMeta.findIndex((h) => h.city === c.id);
-  for (let i = 0; i < c.houses; i++) {
-    if (i % 200 === 0) yield;
-    let nearest = null,
-      dist = Infinity;
-    for (const p of streetPoles) {
-      const d = (p[0] - c.x[i]) ** 2 + (p[1] - c.y[i]) ** 2;
-      if (d < dist) {
-        dist = d;
-        nearest = p;
-      }
-    }
-    if (!nearest) continue;
-    state.klyaksaHouses.getMatrixAt(offset + i, matrix);
-    inverse.copy(matrix).invert();
-    const p = anchor(nearest, 0).applyMatrix4(inverse);
-    const corner = new T.Vector3(
-      Math.sign(p.x) * 4.48,
-      5 + 6.25 / state.klyaksaHouseMeta[offset + i].height,
-      Math.sign(p.z) * 5.43,
-    ).applyMatrix4(matrix);
-    for (const phase of [-0.12, 0, 0.12])
-      cable(
-        anchor(nearest, phase),
-        corner
-          .clone()
-          .addScaledVector(
-            new T.Vector3(1, 0, 0).transformDirection(matrix),
-            phase,
-          ),
-        Math.min(1, Math.sqrt(dist) * 0.018),
+  // Junction islands are asphalt. Curbs are cut back above; no pavement crosses a live lane.
+  const junctionSurface = new Surface(point);
+  for (const node of network.junctions) {
+    const [x, y] = node.point;
+    if (riverContains(c.at[0] + x, c.at[1] + y, 4)) continue;
+    const radius = Math.max(...node.edges.map((e) => e.road.width)) * 0.62;
+    disk(junctionSurface, x, y, radius, 0.235, 0x293339);
+    const approaches = [];
+    for (const edge of node.edges) {
+      const start = edge.a === node,
+        p = edge.points[start ? 1 : edge.points.length - 2],
+        dx = p[0] - x,
+        dy = p[1] - y,
+        L = Math.hypot(dx, dy),
+        u = [dx / L, dy / L],
+        n = [-u[1], u[0]],
+        half = edge.road.width / 2,
+        stop = radius + 3.5;
+      const deck = (xx, yy, h) =>
+          point(xx, yy, h + roadElevation(c, edge.road, xx, yy)),
+        paint = allRoads;
+      paint.point = deck;
+      const A = [x + u[0] * stop, y + u[1] * stop];
+      // Stop line only on incoming half; opposite lane retains a clear exit.
+      paint.strip(
+        [A[0], A[1]],
+        [A[0] + n[0] * (half - 0.3), A[1] + n[1] * (half - 0.3)],
+        0.4,
+        0.285,
+        0xefe6ce,
       );
-  }
-  // Stop lines, pedestrian zebras and signals on every ring/radial junction.
-  const radii = [
-    ...new Set(
-      c.roads
-        .filter((r) => r.points.length > 8)
-        .map((r) => Math.round(Math.hypot(...r.points[0]))),
-    ),
-  ];
-  const signal = () =>
-    new Model()
-      .cyl(0, 1.8, 0, 0.07, 3.6)
-      .box(0, 3.5, 0, 0.35, 0.9, 0.25, palette.dark)
-      .box(0, 3.77, 0.14, 0.16, 0.16, 0.03, 0xd96345)
-      .box(0, 3.25, 0.14, 0.16, 0.16, 0.03, 0x72b994)
-      .finish();
-  for (const r of radii)
-    for (let sector = 0; sector < 6; sector++) {
-      const a = (sector * Math.PI) / 3,
-        co = Math.cos(a),
-        si = Math.sin(a),
-        x = co * r,
-        y = si * r;
-      for (const sign of [-1, 1]) {
-        const px = x + co * sign * 10,
-          py = y + si * sign * 10;
-        road.strip(
-          [px - si * 4, py + co * 4],
-          [px + si * 4, py - co * 4],
-          0.45,
-          0.2,
-          0xe9e5cb,
+      const zebra = stop + 4.5;
+      for (let lane = -half + 0.5; lane < half - 0.2; lane += 1.05) {
+        const Z = [
+          x + u[0] * zebra + n[0] * lane,
+          y + u[1] * zebra + n[1] * lane,
+        ];
+        paint.strip(
+          [Z[0] - u[0] * 1.5, Z[1] - u[1] * 1.5],
+          [Z[0] + u[0] * 1.5, Z[1] + u[1] * 1.5],
+          0.53,
+          0.285,
+          0xefe6ce,
         );
-        for (let k = -3; k <= 3; k++) {
-          const cx = px + co * sign * 4 - si * k,
-            cy = py + si * sign * 4 + co * k;
-          road.strip(
-            [cx - co * 1.4, cy - si * 1.4],
-            [cx + co * 1.4, cy + si * 1.4],
-            0.5,
-            0.21,
-            0xe9e5cb,
-          );
-        }
-        if (!(c.id === "k1" && Math.abs(py) < 33))
-          b.add("signals", signal, px - si * 7, py + co * 7, 0.2, 1, -a);
       }
-    }
-  body.add(road.mesh(), walk.mesh({ paving: true }), lineMesh(wires, 0x263b44));
-  // Deliberate civic plots between the inner ring and residential streets.
-  const kinds = [
-    "hospital",
-    "library",
-    "sports",
-    "coworking",
-    "garage",
-    "fire",
-    "church",
-    "cafe",
-    "network",
-    "water",
-    "bank",
-    "bank",
-  ];
-  state.klyaksaSitesVisual ||= [];
-  kinds.forEach((kind, i) => {
-    const a = ((i + 0.5) * Math.PI * 2) / kinds.length,
-      r = 170,
-      x = Math.cos(a) * r,
-      y = Math.sin(a) * r;
-    if (!reserve.free(x, y, 17)) return;
-    reserve.mark(x, y, 23);
-    b.add(
-      kind,
-      () => civicGeometry(kind),
-      x,
-      y,
-      0.4,
-      kind === "bank" ? 1 : 0.8,
-      0,
-    );
-    if (kind === "bank" || kind === "network")
-      b.add("5G", antenna, x, y, kind === "bank" ? 74 : 10.5, 1);
-    b.add("HVAC", roofPlant, x + 5, y, kind === "bank" ? 66 : 9, 0.9);
-    state.klyaksaSitesVisual.push({
-      city: c.id,
-      kind,
-      x: c.at[0] + x,
-      y: c.at[1] + y,
-    });
-    const parking = publicGround,
-      side = Math.sign(y) || 1;
-    parking.quad(
-      [
-        [x - 16, y + side * 13, 0.18],
-        [x + 16, y + side * 13, 0.18],
-        [x - 16, y + side * 24, 0.18],
-        [x + 16, y + side * 24, 0.18],
-      ],
-      0x41494c,
-    );
-    for (let k = -3; k <= 3; k++) {
-      parking.strip(
-        [x + k * 4, y + side * 15],
-        [x + k * 4, y + side * 22],
-        0.13,
-        0.21,
-        0xe2dfc9,
+      const sx = A[0] + n[0] * (half + 0.6),
+        sy = A[1] + n[1] * (half + 0.6),
+        angle = Math.atan2(u[1], u[0]),
+        height = roadElevation(c, edge.road, sx, sy);
+      b.add(
+        "traffic-posts",
+        signalPost,
+        sx,
+        sy,
+        0.25 + height,
+        1,
+        -angle - Math.PI / 2,
       );
-      if (k % 2 === 0)
-        b.add("parked", car, x + k * 4 + 1.8, y + side * 18, 0.2, 0.7, 0);
+      lights.push({
+        node,
+        heading: angle + Math.PI,
+        positions: [3.78, 3.45, 3.12].map((h) =>
+          point(sx + u[0] * 0.19, sy + u[1] * 0.19, h + 0.25 + height),
+        ),
+      });
+      for (const sign of [-1, 1])
+        b.add(
+          "crossing-bollards",
+          bollard,
+          x + u[0] * (zebra + 2) + n[0] * (half + 0.4) * sign,
+          y + u[1] * (zebra + 2) + n[1] * (half + 0.4) * sign,
+          0.3,
+          1,
+        );
+      approaches.push({ u, n, half });
     }
-    // A continuous access spur to the adjacent ring instead of an isolated parking rectangle.
-    parking.strip(
-      [x, y + side * 24],
-      [Math.cos(a) * 210, Math.sin(a) * 210],
-      5,
-      0.2,
-      0x41494c,
-    );
-  });
-  // Hub: utilities, two stepped bank towers, reservoir and UPS cabinets, clear of the river axis.
-  for (const [kind, x, y] of [
-    ["bank", -42, 55],
-    ["bank", 37, 58],
-    ["network", -20, -57],
-    ["tank", 25, -60],
-  ]) {
-    b.add("hub-" + kind, () => civicGeometry(kind), x, y, 0.4, 1);
-    if (kind === "bank") b.add("5G", antenna, x, y, 74, 1);
-  }
-  for (let i = 0; i < 5; i++)
-    b.add(
-      "UPS",
-      () =>
-        new Model()
-          .box(0, 1.3, 0, 1.3, 2.6, 1.4, palette.metal)
-          .box(0, 1.9, 0.72, 0.7, 0.4, 0.05, 0x78cca7)
-          .finish(),
-      -10 + i * 3,
-      -86,
-      0.2,
-    );
-  // Parks occupy verified vacant plots. Benches, bins, paths and small stages share batches.
-  for (let k = 0; k < 100; k++) {
-    const a = k * 2.39996,
-      r = 245 + ((k * 137) % (c.wall - 280)),
-      x = Math.cos(a) * r,
-      y = Math.sin(a) * r;
-    if (!reserve.free(x, y, 12)) continue;
-    reserve.mark(x, y, 12);
-    const patch = publicGround;
-    for (let j = 0; j < 24; j++) {
-      const t = (j * Math.PI) / 12,
-        u = ((j + 1) * Math.PI) / 12;
-      patch.quad(
-        [
-          [x, y, 0.09],
-          [x + Math.cos(t) * 11, y + Math.sin(t) * 11, 0.09],
-          [x, y, 0.09],
-          [x + Math.cos(u) * 11, y + Math.sin(u) * 11, 0.09],
-        ],
-        0x4c7756,
-      );
-    }
-    patch.strip([x - 10, y], [x + 10, y], 2, 0.15, 0xb5ac90);
-    b.add("bench", bench, x - 3, y + 2, 0.2, 1);
-    b.add("bench", bench, x + 3, y - 2, 0.2, 1, Math.PI);
-    b.add("bins", bin, x + 5, y + 2, 0.2, 1);
-    for (const dx of [-7, 7])
-      b.add("park-tree", () => treeGeometry("broad"), x + dx, y + 5, 0, 1.4);
-    if (k % 3 === 0)
-      for (let j = 0; j < 24; j++) {
-        const a = (j * Math.PI) / 12,
-          z = ((j + 1) * Math.PI) / 12;
-        ponds.quad(
-          [
-            [x, y - 5, 0.13],
-            [x + Math.cos(a) * 3.5, y - 5 + Math.sin(a) * 3.5, 0.13],
-            [x, y - 5, 0.13],
-            [x + Math.cos(z) * 3.5, y - 5 + Math.sin(z) * 3.5, 0.13],
+    for (let a = 0; a < approaches.length; a++)
+      for (let z = a + 1; z < approaches.length; z++) {
+        const A = approaches[a],
+          Z = approaches[z],
+          dot = A.u[0] * Z.u[0] + A.u[1] * Z.u[1];
+        if (dot < -0.8) continue;
+        const from = [
+            x + A.u[0] * (radius + 2) + A.n[0] * A.half * 0.48,
+            y + A.u[1] * (radius + 2) + A.n[1] * A.half * 0.48,
           ],
-          0x408797,
-        );
+          to = [
+            x + Z.u[0] * (radius + 2) - Z.n[0] * Z.half * 0.48,
+            y + Z.u[1] * (radius + 2) - Z.n[1] * Z.half * 0.48,
+          ];
+        curveDashes(junctionSurface, from, [x, y], to, 0.29);
       }
   }
-  body.add(publicGround.mesh());
-  const pondMesh = ponds.mesh();
-  pondMesh.material.roughness = 0.2;
-  pondMesh.material.metalness = 0.35;
-  body.add(pondMesh);
-  const facades = facadeMaterial(env);
-  const furniture = b.finish({
-    distance: 3500,
-    materialFor: (key) =>
-      /^(hub-bank|hub-network|bank|hospital|library|sports|coworking|garage|fire|church|cafe|network|water)$/.test(
-        key,
-      )
-        ? facades
-        : null,
-  });
+  body.add(
+    allRoads.mesh(),
+    allWalks.mesh({ paving: true }),
+    junctionSurface.mesh(),
+  );
+  registerTrafficSignals(body, lights);
+  const furniture = b.finish({ distance: 3500 });
   state.klyaksaLod.push(furniture);
   (state.klyaksaReservations ||= new Map()).set(c.id, reserve);
+  yield* buildCivicDistrict(c, body, R, globalPoint, env);
 }

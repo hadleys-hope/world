@@ -3,34 +3,67 @@
 import * as T from "three";
 import { state } from "../../state.js";
 import { instances, chunkedInstances, lifeMaterial } from "../life.js";
-import { Model, roofPlant, Batches, palette, planYaw } from "./kit.js";
+import {
+  Model,
+  roofPlant,
+  Batches,
+  palette,
+  planYaw,
+  lettering,
+} from "./kit.js";
 export function facadeMaterial(env) {
   return new T.ShaderMaterial({
     extensions: { derivatives: true },
     uniforms: env,
-    vertexShader: `attribute vec3 aCol,aTint;attribute float aFacade;varying float vFacade; varying vec3 vP,vN,vW,vC,vUp; varying float vSeed;
+    vertexShader: `attribute vec3 aCol,aTint;attribute float aFacade;varying float vFacade; varying vec3 vP,vN,vW,vC,vUp,vLocalN,vView; varying float vSeed;
  void main(){vFacade=aFacade;vec3 scale=vec3(length(instanceMatrix[0].xyz),length(instanceMatrix[1].xyz),length(instanceMatrix[2].xyz));vP=position*scale;
- vec4 w=modelMatrix*instanceMatrix*vec4(position,1.);vW=w.xyz;vN=normalize(mat3(modelMatrix)*mat3(instanceMatrix)*normal);vUp=normalize(mat3(modelMatrix)*instanceMatrix[1].xyz);vC=aCol*aTint;vSeed=dot(instanceMatrix[3].xyz,vec3(.013,.031,.019));gl_Position=projectionMatrix*viewMatrix*w;}`,
-    fragmentShader: `varying float vFacade;uniform vec3 uSun; varying vec3 vP,vN,vW,vC,vUp; varying float vSeed;
+ vec4 w=modelMatrix*instanceMatrix*vec4(position,1.);vW=w.xyz;vN=normalize(mat3(modelMatrix)*mat3(instanceMatrix)*normal);vUp=normalize(mat3(modelMatrix)*instanceMatrix[1].xyz);vLocalN=normal;
+ mat3 basis=mat3(modelMatrix)*mat3(instanceMatrix);vec3 toEye=cameraPosition-w.xyz;
+ vView=vec3(dot(toEye,normalize(basis[0])),dot(toEye,normalize(basis[1])),dot(toEye,normalize(basis[2])));
+ vC=aCol*aTint;vSeed=dot(instanceMatrix[3].xyz,vec3(.013,.031,.019));gl_Position=projectionMatrix*viewMatrix*w;}`,
+    fragmentShader: `varying float vFacade;uniform vec3 uSun; varying vec3 vP,vN,vW,vC,vUp,vLocalN,vView; varying float vSeed;
  float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7))+vSeed)*43758.5453);}
+ // Rooms have real perspective depth behind the glass, with ray/box furniture silhouettes.
+ // This is bounded interior mapping: no per-window geometry, lights, textures or scene ray tracing.
+ float hitBox(vec3 ro,vec3 rd,vec3 lo,vec3 hi){vec3 inv=1./(mix(vec3(-1.),vec3(1.),step(vec3(0.),rd))*max(abs(rd),vec3(.0001)));vec3 a=(lo-ro)*inv,b=(hi-ro)*inv;vec3 near=min(a,b),far=max(a,b);float t=max(max(near.x,near.y),near.z),f=min(min(far.x,far.y),far.z);return f>max(t,0.)?max(t,0.):999.;}
+ vec3 room(vec2 f,vec3 eye,vec2 id,float daylight){
+   vec3 ro=vec3((f.x-.5)*2.7,(f.y-.53)*3.7,0.02),rd=normalize(vec3(-eye.xy,max(abs(eye.z),.01)));
+   vec3 farPlane=vec3(rd.x>0.?1.35:-1.35,rd.y>0.?1.75:-1.05,4.5);
+   vec3 ds=(farPlane-ro)/(mix(vec3(-1.),vec3(1.),step(vec3(0.),rd))*max(abs(rd),vec3(.0001)));float wall=min(min(ds.x,ds.y),ds.z);vec3 p=ro+rd*wall;
+   float seed=hash(id),light=.35+.45*daylight;vec3 col=vec3(.65,.62,.51)*light;
+   if(ds.y<min(ds.x,ds.z)) col=p.y<0.?mix(vec3(.27,.17,.10),vec3(.42,.28,.17),step(.07,fract(p.z*3.))):vec3(.78,.77,.67)*light;
+   else if(ds.z<ds.x){col=mix(vec3(.49,.58,.59),vec3(.72,.63,.46),seed)*light;float picture=step(abs(p.x-.25),.48)*step(abs(p.y-.5),.43);col=mix(col,vec3(.15,.31,.38),picture);}
+   float bed=hitBox(ro,rd,vec3(-1.2,-1.02,1.35),vec3(.1,-.56,3.6));
+   float table=hitBox(ro,rd,vec3(.3,-.6,1.1),vec3(1.05,-.47,2.));
+   float couch=hitBox(ro,rd,vec3(-1.22,-1.02,3.45),vec3(1.12,-.15,4.05));
+   float tv=hitBox(ro,rd,vec3(.7,-.12,2.6),vec3(1.18,.7,2.72));
+   if(bed<wall&&seed<.55){wall=bed;col=mix(vec3(.43,.59,.63),vec3(.75,.59,.38),seed)*light;}
+   if(couch<wall&&seed>=.55){wall=couch;col=vec3(.31,.40,.29)*light;}
+   if(table<wall){wall=table;col=vec3(.61,.43,.26)*light;}
+   if(tv<wall)col=vec3(.09,.23,.31);
+   return col;
+ }
  void main(){vec3 n=normalize(vN),view=normalize(cameraPosition-vW),sun=normalize(uSun);float roof=step(.65,abs(dot(n,normalize(vUp))));
  // Pick the local wall coordinate without needing one draw call for each facade.
- float along=abs(vP.x)>abs(vP.z)*.80?vP.z:vP.x;
+ bool side=abs(vLocalN.x)>.5;float along=side?vP.z:vP.x;
  vec2 uv=vec2(along/2.25,vP.y/3.15),f=fract(uv),aa=max(fwidth(uv),vec2(.003));
- float window=(smoothstep(.13-aa.x,.13+aa.x,f.x)-smoothstep(.87-aa.x,.87+aa.x,f.x))*(smoothstep(.25-aa.y,.25+aa.y,f.y)-smoothstep(.82-aa.y,.82+aa.y,f.y))*(1.-roof);
+ float border=mix(.13,.055,step(1.5,vFacade));float window=(smoothstep(border-aa.x,border+aa.x,f.x)-smoothstep(1.-border-aa.x,1.-border+aa.x,f.x))*(smoothstep(.25-aa.y,.25+aa.y,f.y)-smoothstep(.82-aa.y,.82+aa.y,f.y))*(1.-roof);
  float reveal=(step(.09,f.x)*step(f.x,.91)*step(.20,f.y)*step(f.y,.86))*(1.-roof);
  float brickY=vP.y/.24;vec2 mortar=fract(vec2(along/.55+mod(floor(brickY),2.)*.5,brickY));float detail=1.-smoothstep(.02,.2,length(fwidth(vP)));
  float joint=(1.-step(.06,min(mortar.x,mortar.y)))*detail;
  float floorBand=(1.-smoothstep(.02,.055,min(f.y,1.-f.y)))*(1.-roof);
  vec3 wall=vC*(.94-.18*joint-.24*floorBand);wall=mix(wall,vec3(.12,.17,.19),reveal*.85);
  float fres=pow(1.-abs(dot(n,view)),3.);float reflected=pow(max(dot(reflect(-sun,n),view),0.),64.);
- float occupied=step(.32,hash(floor(uv)));float curtain=step(.5,fract(f.x*6.+hash(floor(uv))))*.07;
+ float occupied=step(.32,hash(floor(uv)));float curtain=step(.91,f.x)*.12;
  float day=smoothstep(-.12,.3,dot(normalize(vUp),sun));
- vec3 glass=mix(vec3(.07,.18,.23),vec3(.47,.68,.76),fres)*(.4+.6*day)+reflected*vec3(1.,.85,.6)+curtain;
+ vec3 glass=mix(vec3(.09,.22,.27),vec3(.47,.68,.76),fres)*(.4+.6*day);
+ float nearby=1.-smoothstep(100.,260.,length(vView));
+ if(window>.02&&vFacade>.5&&nearby>.01){vec3 eye=side?vec3(vView.z,vView.y,vView.x):vView;vec3 interior=room(f,eye,floor(uv),day);glass=mix(glass,interior*(.55+.45*day),nearby*(.76-.60*fres));}
+ glass+=reflected*vec3(1.,.85,.6)*.55+curtain;
  glass+=occupied*(1.-day)*vec3(.95,.58,.22)*.8;
  float mullion=(1.-smoothstep(.01,.025,abs(f.x-.5)))*detail;glass*=1.-mullion*.6;
  vec3 lit=wall*(.3+.65*max(dot(n,sun),0.)*day+.15*(1.-day));
- gl_FragColor=vec4(pow(max(mix(lit,glass,window*vFacade),vec3(0.)),vec3(1./2.2)),1.);}`,
+ gl_FragColor=vec4(pow(max(mix(lit,glass,window*step(.5,vFacade)),vec3(0.)),vec3(1./2.2)),1.);}`,
   });
 }
 export function buildHomes(body, R, plan, point, env) {
@@ -44,11 +77,16 @@ export function buildHomes(body, R, plan, point, env) {
       const x = c.at[0] + c.x[i],
         z = c.at[1] + c.y[i],
         p = point(x, z, 0),
-        seed = Math.imul(i + 31, 2654435761) >>> 0,
+        seed = Math.imul(c.first_id + i + 31, 2654435761) >>> 0,
         floors = 1 + (seed % 10);
       // Preserve the server's footprint and ID: height variation does not move a simulated house.
       const height = floors * 3.15 + 0.7,
-        yaw = planYaw(point, x, z, Math.atan2(c.y[i], c.x[i]) + Math.PI / 2);
+        yaw = planYaw(
+          point,
+          x,
+          z,
+          c.yaw?.[i] ?? Math.atan2(c.y[i], c.x[i]) + Math.PI / 2,
+        );
       items.push({
         n: p.clone().normalize().toArray(),
         h: p.length() - R,
@@ -177,7 +215,146 @@ export function buildHomes(body, R, plan, point, env) {
   body.add(detail);
   state.klyaksaLod.push(detail);
 }
+export const civicRoofHeight = {
+  bank: 142,
+  bigtech: 182,
+  government: 110,
+  hospital: 24,
+  fire: 12,
+  library: 16,
+  sports: 15,
+  church: 39,
+  cafe: 9,
+  network: 18,
+  coworking: 20,
+  garage: 9,
+  water: 12,
+};
+
+/** Three distinct silhouettes rather than one stretched office block. The window
+ * shader uses floor-sized rooms, so making a tower taller never stretches windows. */
+function skyscraper(kind) {
+  const m = new Model(),
+    bank = kind === "bank",
+    tech = kind === "bigtech";
+  const stone = bank ? 0xc4bba3 : tech ? 0x81939a : 0xc9c9bb;
+  m.box(0, 4.5, 0, 44, 9, 34, stone, 2).box(
+    0,
+    0.45,
+    0,
+    47,
+    0.9,
+    37,
+    palette.dark,
+  );
+  for (const z of [-17.3, 17.3])
+    for (let x = -19; x <= 19; x += 6.3)
+      m.box(x, 4.8, z, 0.7, 8.2, 0.8, bank ? palette.brass : palette.white);
+  m.box(0, 5.8, 20, 22, 0.45, 6, palette.metal);
+  lettering(
+    m,
+    bank ? "COLONY BANK" : tech ? "KLYAKSA TECH" : "CITY HALL",
+    0,
+    7.3,
+    17.15,
+    0.3,
+    palette.white,
+  );
+  const addShaft = (x, z, w, d, bottom, top, glass) => {
+    m.box(x, (top + bottom) / 2, z, w, top - bottom, d, glass, 2);
+    for (let floor = bottom + 3.15; floor < top; floor += 3.15)
+      m.box(x, floor, z, w + 0.22, 0.14, d + 0.22, stone);
+    for (let edge = -w / 2; edge <= w / 2 + 0.01; edge += w / 6)
+      for (const side of [-1, 1])
+        m.box(
+          x + edge,
+          (top + bottom) / 2,
+          z + side * (d / 2 + 0.1),
+          0.11,
+          top - bottom,
+          0.22,
+          bank ? palette.brass : palette.white,
+        );
+    for (const edge of [-1, 1])
+      m.box(
+        x + (edge * w) / 2,
+        (top + bottom) / 2,
+        z,
+        0.3,
+        top - bottom,
+        d + 0.3,
+        stone,
+      );
+  };
+  if (bank) {
+    addShaft(0, 0, 31, 27, 9, 112, 0x6b8990);
+    addShaft(-2.5, 0, 26, 23, 112, 132, 0x81959b);
+    addShaft(-2.5, 0, 20, 19, 132, 140, 0x6b8990);
+    m.box(-2.5, 141, 0, 21, 2, 20, palette.brass);
+  } else if (tech) {
+    addShaft(-10, 1, 20, 28, 9, 170, 0x527e90);
+    addShaft(11, -2, 17, 22, 9, 146, 0x85a8aa);
+    for (const h of [52, 102, 139])
+      m.box(2, h, -2, 13, 6, 17, palette.glass, 2);
+    m.box(-10, 173, 1, 16, 6, 22, palette.metal).box(
+      -10,
+      179,
+      1,
+      12,
+      6,
+      16,
+      palette.white,
+    );
+  } else {
+    addShaft(0, 0, 32, 28, 9, 92, 0x9ba9ac);
+    for (const x of [-16, 16]) m.box(x, 50, 0, 2, 82, 29, palette.white);
+    addShaft(0, 0, 24, 21, 92, 106, 0xa8b3b4);
+    m.box(0, 108, 0, 27, 4, 24, palette.white);
+    for (const x of [-10, 0, 10])
+      m.cyl(x, 10, 20, 0.12, 20, palette.metal, 0.12, 6).box(
+        x + 1,
+        17,
+        20,
+        2,
+        3,
+        0.07,
+        0x638c9c,
+      );
+  }
+  // Sky terraces: planted corners and guardrails remain readable in the skyline.
+  const roof = civicRoofHeight[kind],
+    roofX = tech ? -10 : bank ? -2.5 : 0,
+    roofZ = tech ? 1 : 0,
+    spacing = tech ? 3 : bank ? 5 : 7,
+    railWidth = tech ? 11 : bank ? 19 : 25,
+    railDepth = tech ? 7 : bank ? 9 : 11;
+  for (const side of [-1, 1]) {
+    const x = roofX + side * spacing;
+    m.box(x, roof + 0.4, roofZ - 4, 3.5, 0.8, 3, palette.concrete).box(
+      x,
+      roof + 1.05,
+      roofZ - 4,
+      3.1,
+      0.55,
+      2.6,
+      palette.green,
+    );
+  }
+  for (const side of [-1, 1])
+    m.box(
+      roofX,
+      roof + 1,
+      roofZ + side * railDepth,
+      railWidth,
+      0.08,
+      0.08,
+      palette.metal,
+    );
+  return m.finish();
+}
+
 export function civicGeometry(kind) {
+  if (["bank", "bigtech", "government"].includes(kind)) return skyscraper(kind);
   const m = new Model();
   if (kind === "tank") {
     for (let k = 0; k < 4; k++) {
@@ -231,8 +408,8 @@ export function civicGeometry(kind) {
       palette.brass,
     );
   } else {
-    const tall = kind === "bank",
-      h = tall ? 65 : kind === "hospital" ? 16 : 9,
+    const tall = false,
+      h = civicRoofHeight[kind] || 9,
       w = tall ? 15 : 28,
       d = tall ? 17 : 20;
     m.box(0, h / 2, 0, w, h, d, tall ? palette.glass : palette.concrete, 1).box(
@@ -250,7 +427,7 @@ export function civicGeometry(kind) {
       for (const z of [-d / 2 - 0.04, d / 2 + 0.04])
         m.box(x, h / 2, z, 0.12, h, 0.16, palette.brass);
     m.box(0, 3, d / 2 + 2, w * 0.65, 0.4, 4, palette.metal);
-    if (kind === "hospital")
+    if (kind === "hospital") {
       m.box(0, h + 2, 0, 1, 5, 0.4, 0xd7544b).box(
         0,
         h + 2,
@@ -260,6 +437,13 @@ export function civicGeometry(kind) {
         0.4,
         0xd7544b,
       );
+      m.box(-19, 5, 0, 10, 10, 22, palette.white, 1)
+        .box(19, 5, 0, 10, 10, 22, palette.white, 1)
+        .box(0, 4, 16, 21, 0.35, 12, palette.white)
+        .box(-9.4, 2, 20, 0.4, 4, 0.4, palette.metal)
+        .box(9.4, 2, 20, 0.4, 4, 0.4, palette.metal);
+      for (const z of [-10.2, 10.2]) m.box(0, 8, z, 27, 0.7, 0.2, 0x8cb9b7);
+    }
     if (kind === "network")
       for (let k = 0; k < 5; k++)
         m.box(-9 + k * 4, h + 1, 0, 2, 2, 3, palette.dark);
@@ -282,6 +466,20 @@ export function civicGeometry(kind) {
           0.5,
           kind === "fire" ? 0xc45b43 : palette.brass,
         );
+      if (kind === "fire") {
+        m.box(0, 6.6, 10.3, 27, 0.6, 0.3, 0xb24638).box(
+          -17,
+          13,
+          -3,
+          5,
+          26,
+          7,
+          0xa24d3d,
+          1,
+        );
+        for (let y = 4; y < 24; y += 3.5)
+          m.box(-17, y, 1, 4.4, 0.3, 1.5, palette.metal);
+      }
     }
     if (kind === "library" || kind === "coworking") {
       for (let x = -11; x <= 11; x += 4.4)
