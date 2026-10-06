@@ -80,3 +80,4 @@ kbd, .hh-kbd {
   .hh-bar { height: auto; flex-wrap: wrap; padding: 8px 10px; gap: 8px; }
   .hh-nav { order: 3; flex-basis: 100%; }
 }
+.hh-city { height: 36px; border-radius: 10px; border: 1px solid var(--hh-line-strong); background: var(--hh-glass-strong); color: var(--hh-text); font: inherit; font-size: 13px; padding: 0 8px; max-width: 190px; }

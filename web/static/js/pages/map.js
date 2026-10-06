@@ -79,10 +79,13 @@ function fit() {
     H = cv.clientHeight;
   cv.width = W * devicePixelRatio;
   cv.height = H * devicePixelRatio;
-  const x0 = -1620,
-    x1 = 800,
-    y0 = -800,
-    y1 = 800;
+  // frame the whole city whatever its size: the wall, and the plants to the west of it
+  const c = G ? G.cfg : null, wall = c ? c.wall_radius : 690;
+  const west = c ? Math.min(c.reactor_pos[0], c.solar_pos[0], c.water_plant_pos[0], c.mine_pos[0]) - 120 : -1620;
+  const x0 = Math.min(-wall - 60, west),
+    x1 = wall + 110,
+    y0 = -wall - 110,
+    y1 = wall + 110;
   sc = Math.min(W / (x1 - x0), H / (y1 - y0));
   ox = W / 2 - sc * (x0 + x1) / 2;
   oy = H / 2 - sc * (y0 + y1) / 2;
@@ -489,13 +492,13 @@ function renderSide(s) {
     r = s.reactor,
     w = s.water,
     f = s.finance;
-  const kp = [['Colony budget', f.colony.toLocaleString() + ' cr', f.colony > 20000 ? 'ok' : f.colony > 0 ? 'warn' : 'bad'], ['Sector budgets', f.sectors.map(x => Math.round(x / 1000) + 'k').join(' '), Math.min(...f.sectors) > 2000 ? 'ok' : 'warn'], ['Power available', p.available_kw + ' kW', p.available_kw > p.demand_kw ? 'ok' : 'bad'], ['Power demand', p.demand_kw + ' kW' + (p.shedding ? ` / shedding L${p.shedding}` : ''), p.shedding ? 'warn' : 'ok'], ['Water tank', w.tank_m3 + ' m3, ' + w.houses_ok + '/300 houses', w.tank_m3 > 100 && w.houses_ok > 280 ? 'ok' : 'warn'], ['Pipes', `${w.frozen} frozen, ${w.burst} burst`, w.burst === 0 ? 'ok' : 'bad'], ['Internet', `${s.net.houses_online}/300 online, uplink ${s.net.uplink ? 'OK' : 'LOST'}`, s.net.uplink && s.net.houses_online > 280 ? 'ok' : 'warn'], ['Open issues', s.issues_total + (f.unpaid ? ` (unpaid ${f.unpaid} cr)` : ''), s.issues_total < 5 ? 'ok' : 'warn'], ['Month income (colony)', f.month_income.toLocaleString() + ' cr', 'dim'], ['Month expense (colony)', f.month_expense.toLocaleString() + ' cr', 'dim']];
+  const kp = [['Colony budget', f.colony.toLocaleString() + ' cr', f.colony > 20000 ? 'ok' : f.colony > 0 ? 'warn' : 'bad'], ['Sector budgets', f.sectors.map(x => Math.round(x / 1000) + 'k').join(' '), Math.min(...f.sectors) > 2000 ? 'ok' : 'warn'], ['Power available', p.available_kw + ' kW', p.available_kw > p.demand_kw ? 'ok' : 'bad'], ['Power demand', p.demand_kw + ' kW' + (p.shedding ? ` / shedding L${p.shedding}` : ''), p.shedding ? 'warn' : 'ok'], ['Water tank', w.tank_m3 + ' m3, ' + w.houses_ok + '/' + s.houses.t.length + ' houses', w.tank_m3 > 100 && w.houses_ok > 280 ? 'ok' : 'warn'], ['Pipes', `${w.frozen} frozen, ${w.burst} burst`, w.burst === 0 ? 'ok' : 'bad'], ['Internet', `${s.net.houses_online}/${s.houses.t.length} online, uplink ${s.net.uplink ? 'OK' : 'LOST'}`, s.net.uplink && s.net.houses_online > 280 ? 'ok' : 'warn'], ['Open issues', s.issues_total + (f.unpaid ? ` (unpaid ${f.unpaid} cr)` : ''), s.issues_total < 5 ? 'ok' : 'warn'], ['Month income (colony)', f.month_income.toLocaleString() + ' cr', 'dim'], ['Month expense (colony)', f.month_expense.toLocaleString() + ' cr', 'dim']];
   const wa = w.accounts;
   if (wa) kp.push(['Sewage', `sump ${s.hydraulics.sewer_storage_m3.toFixed(1)} m³, pump ${w.sewer_pump ? 'on' : 'STOPPED'}`, !w.sewer_pump || s.hydraulics.sewer_storage_m3 > 150 ? 'bad' : wa.sewer_overflow > 0 ? 'warn' : 'ok'], ['Water balance', wa.residual < 1e-6 ? `closes: made ${wa.produced.toFixed(0)}, used ${wa.delivered.toFixed(0)}, leaked ${wa.leaked.toFixed(1)} m3` : `off by ${wa.residual} m3`, wa.residual < 1e-6 ? 'ok' : 'bad']);
   const hf = f.households;
   if (hf) kp.push(['Household debt', `${Math.round(hf.debt).toLocaleString()} cr (loans ${Math.round(hf.principal).toLocaleString()}, unpaid bills ${Math.round(hf.arrears).toLocaleString()})`, hf.bankrupt ? 'bad' : hf.overdue ? 'warn' : 'ok'], ['Debtors / overdue / bankrupt', `${hf.debtors} / ${hf.overdue} / ${hf.bankrupt} of ${hf.households}` + (hf.mine_closed ? ', mine flooded' : ''), hf.bankrupt ? 'bad' : hf.overdue || hf.mine_closed ? 'warn' : 'ok']);
   const fs = FOCUS >= 0 ? s.sectors[FOCUS] : null;
-  document.getElementById('focus-title').textContent = fs ? `Sector ${FOCUS + 1}` : "Hadley's Hope";
+  document.getElementById('focus-title').textContent = fs ? `Sector ${FOCUS + 1}` : window.HH_CITY_NAME || "Hadley's Hope";
   document.getElementById('focus-sub').textContent = fs ? `gate ${fs.gate.toLowerCase()} · UPS ${fs.ups.toLowerCase()}` : `${s.houses.t.length} houses · ${s.sectors.length} sectors`;
   document.getElementById('focus-clear').hidden = !fs;
   if (fs) {

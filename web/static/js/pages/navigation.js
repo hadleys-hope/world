@@ -5,8 +5,39 @@
   const saved = localStorage.getItem('hh_theme');
   if (saved) root.dataset.theme = saved;
 
+  // The city the 2D pages show: LV-426's Hadley's Hope (""), or one of Klyaksa's domes ("k1".."k6").
+  // Every request to the simulation's endpoints carries it, so the pages need no changes of their own.
+  const city = localStorage.getItem('hh_city') || '';
+  const CITY_PATHS = /^\/(state|geometry|bus\.json|house\.json|finance\.json|attractors\.json|water\.json|clock\.json|cmd)/;
+  const is3d = location.pathname === '/' || location.pathname.startsWith('/index');
+  if (city && !is3d) {
+    const plain = window.fetch.bind(window);
+    window.fetch = (input, init) => {
+      if (typeof input === 'string' && CITY_PATHS.test(input)) {
+        if (input.startsWith('/cmd') && init && init.body) {
+          try { init = { ...init, body: JSON.stringify({ ...JSON.parse(init.body), city }) }; } catch (e) { /* not JSON */ }
+        } else input += (input.includes('?') ? '&' : '?') + 'city=' + encodeURIComponent(city);
+      }
+      return plain(input, init);
+    };
+  }
+
   function setup() {
     const path = location.pathname.replace(/\/$/, '') || '/';
+    const select = document.getElementById('city-select');
+    if (select) {
+      fetch('/cities.json').then((r) => r.json()).then((cities) => {
+        const planets = [...new Set(cities.map((c) => c.planet))];
+        select.innerHTML = planets.map((p) => `<optgroup label="${p}">` + cities.filter((c) => c.planet === p)
+          .map((c) => `<option value="${c.id}">${c.name} · ${c.houses}</option>`).join('') + '</optgroup>').join('');
+        select.value = city;
+        const cur = cities.find((c) => c.id === city) || cities[0];
+        window.HH_CITY_NAME = cur ? cur.name : '';
+        const sub = document.getElementById('brand-sub');
+        if (sub && cur) sub.textContent = cur.planet === 'Klyaksa' ? `KLYAKSA · ${cur.name.toUpperCase()}` : 'LV-426 · ACHERON';
+      }).catch(() => { select.hidden = true; });
+      select.onchange = () => { localStorage.setItem('hh_city', select.value); location.reload(); };
+    }
     document.querySelectorAll('.hh-nav a').forEach((a) => {
       if (a.dataset.page === path) a.setAttribute('aria-current', 'page');
     });

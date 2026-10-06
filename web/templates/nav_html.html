@@ -1,7 +1,8 @@
 <header class="hh-bar" id="hh-bar">
- <a class="hh-brand" href="/"><b data-i18n="HADLEY'S HOPE">HADLEY'S HOPE</b><span>LV-426 · ACHERON</span></a>
- <nav class="hh-nav" aria-label="Main navigation"><a href="/" data-page="/" data-i18n="3D view">3D view</a><a href="/flat" data-page="/flat" data-i18n="2D view">2D view</a><a href="/bus" data-page="/bus" data-i18n="Bus">Bus</a><a href="/graph" data-page="/graph" data-i18n="Systems">Systems</a><a href="/house" data-page="/house" data-i18n="House">House</a><a href="/attractors" data-page="/attractors" data-i18n="Attractors">Attractors</a><a href="/finance" data-page="/finance" data-i18n="Finance">Finance</a></nav>
+ <a class="hh-brand" href="/"><b data-i18n="HADLEY'S HOPE">HADLEY'S HOPE</b><span id="brand-sub">LV-426 · ACHERON</span></a>
+ <nav class="hh-nav" aria-label="Main navigation"><a href="/" data-page="/" data-i18n="3D view">3D view</a><a href="/flat" data-page="/flat" data-i18n="2D view">2D view</a><a href="/bus" data-page="/bus" data-i18n="Bus">Bus</a><a href="/programs" data-page="/programs" data-i18n="Programs">Programs</a><a href="/graph" data-page="/graph" data-i18n="Systems">Systems</a><a href="/house" data-page="/house" data-i18n="House">House</a><a href="/attractors" data-page="/attractors" data-i18n="Attractors">Attractors</a><a href="/finance" data-page="/finance" data-i18n="Finance">Finance</a></nav>
  <div class="hh-right">
+  <label class="hh-dim" for="city-select" style="position:absolute;left:-9999px">City</label><select id="city-select" class="hh-city" title="Which city the pages show"></select>
   <span class="hh-clock" id="time"></span><span id="navtime" hidden></span>
   <button class="hh-btn" id="pause" title="Pause or resume the simulation" data-i18n="Pause">Pause</button>
   <label class="hh-dim" for="speed" data-i18n="Speed">Speed</label><input type="range" id="speed" min="0" max="100" value="45"><span class="hh-mono" id="speedv"></span>
