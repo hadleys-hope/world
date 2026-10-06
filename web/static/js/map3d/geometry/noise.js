@@ -1,3 +1,4 @@
+import { riverHeight } from "../models/urban/geography.js";
 /** geometry/noise: deterministic 3D value noise for terrain heights, shared by meshes and placement.
  * Heights are computed once on the CPU (so trees and rocks can stand on them); the shaders only add detail. */
 
@@ -93,10 +94,12 @@ export function bodyHeight(kind, nx, ny, nz) {
   const river = (1 - smooth(0.008, 0.03, rv)) * land * (1 - smooth(0.006, 0.02, h));
   h += (-0.0012 - h) * river;
   for (const s of SITES) {
-    const d = Math.acos(Math.max(-1, Math.min(1, nx * s.dir[0] + ny * s.dir[1] + nz * s.dir[2])));
+    const dot=nx*s.dir[0]+ny*s.dir[1]+nz*s.dir[2];
+    if(dot<s.outerCos)continue;
+    const d = Math.acos(Math.max(-1, Math.min(1,dot)));
     h += (PLATEAU - h) * (1 - smooth(s.r, s.r * 1.7, d));
   }
-  return h;
+  return riverHeight(nx,ny,nz,h);
 }
 
 // Klyaksa's city sites: [{ dir: unit vector, r: angular radius }], set before its surface is built
@@ -104,7 +107,7 @@ const SITES = [];
 export const PLATEAU = 0.0035;
 export function setSites(sites) {
   SITES.length = 0;
-  SITES.push(...sites);
+  SITES.push(...sites.map(s=>({...s,outerCos:Math.cos(s.r*1.7)})));
 }
 
 // The same kind of noise for shaders (visual detail only, not heights).

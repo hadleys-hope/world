@@ -1,12 +1,13 @@
 /** models/life: plants, rocks, ice crystals and hot springs, all instanced: one draw call per kind of thing,
  * whatever the count. Wind is done in the vertex shader, so a swaying forest costs no CPU per frame. */
+import { botanicalTree } from "./urban/foliage.js";
 import * as THREE from "three";
 
 // ---- geometries (vertex colours in aCol; all built small, scaled per instance) ----
 function merge(parts) {
   const pos = [], nor = [], col = [];
   for (const [g, color, tip] of parts) {
-    const geo = g.toNonIndexed();
+    const geo = g.index ? g.toNonIndexed() : g;
     geo.computeVertexNormals();
     const p = geo.attributes.position, n = geo.attributes.normal;
     const box = new THREE.Box3().setFromBufferAttribute(p);
@@ -25,30 +26,13 @@ function merge(parts) {
   return out;
 }
 
-export function treeGeometry(style) {
-  if (style === "frost") {        // LV-426: a squat alien conifer, blue-black needles with frosted tips
-    const trunk = new THREE.CylinderGeometry(0.12, 0.22, 2.2, 5).translate(0, 1.1, 0);
-    const c1 = new THREE.ConeGeometry(1.5, 2.4, 6).translate(0, 2.6, 0);
-    const c2 = new THREE.ConeGeometry(1.15, 2.0, 6).translate(0, 3.8, 0);
-    const c3 = new THREE.ConeGeometry(0.7, 1.6, 6).translate(0, 4.9, 0);
-    return merge([[trunk, 0x3a2c22], [c1, 0x14303a, 0x5b8d9a], [c2, 0x16363f, 0x7fb1bb], [c3, 0x1a3d46, 0xd9eef2]]);
-  }
-  if (style === "broad") {        // Klyaksa: a round broadleaf
-    const trunk = new THREE.CylinderGeometry(0.15, 0.3, 3, 5).translate(0, 1.5, 0);
-    const crown = new THREE.IcosahedronGeometry(1.9, 0).scale(1, 0.85, 1).translate(0, 4.2, 0);
-    return merge([[trunk, 0x4a3524], [crown, 0x2f6b2c, 0x6aa84a]]);
-  }
-  const trunk = new THREE.CylinderGeometry(0.12, 0.25, 2.5, 5).translate(0, 1.25, 0);    // Klyaksa pine
-  const c1 = new THREE.ConeGeometry(1.6, 3.2, 6).translate(0, 3.4, 0);
-  const c2 = new THREE.ConeGeometry(1.0, 2.4, 6).translate(0, 5.0, 0);
-  return merge([[trunk, 0x4a3524], [c1, 0x1d4a2a, 0x3f7a3c], [c2, 0x235533, 0x5a9a4c]]);
-}
+export function treeGeometry(style, far=false) { return botanicalTree(style, far); }
 
 export function tuftGeometry(base, tip) {   // three crossed blades; height 1
   const parts = [];
-  for (let k = 0; k < 3; k++) {
+  for (let k = 0; k < 5; k++) {
     const g = new THREE.BufferGeometry();
-    g.setAttribute("position", new THREE.Float32BufferAttribute([-0.09, 0, 0, 0.09, 0, 0, 0.02, 1, 0.03], 3));
+    g.setAttribute("position", new THREE.Float32BufferAttribute([-0.09, 0, 0, 0.09, 0, 0, 0.06, 0.7 + (k % 3) * 0.16, 0.13], 3));
     g.rotateY((k * Math.PI) / 3 + 0.3).translate(Math.cos(k * 2.1) * 0.12, 0, Math.sin(k * 2.1) * 0.12);
     parts.push([g, base, tip]);
   }
@@ -73,11 +57,13 @@ export function crystalGeometry() {
 
 // ---- one material for everything that grows or lies on the ground ----
 export function lifeMaterial(uniforms, { sway = 0, glow = 0, indoor = 0 } = {}) {
-  return new THREE.ShaderMaterial({
+  const material = new THREE.ShaderMaterial({
+    side: THREE.DoubleSide,
+    extensions:{derivatives:true},
     uniforms: { ...uniforms, uSway: { value: sway }, uGlow: { value: glow }, uIndoor: { value: indoor } },
-    vertexShader: `attribute vec3 aCol; attribute vec3 aTint; uniform float uTime, uSway; varying vec3 vC, vN, vW, vUp;
+    vertexShader: `attribute vec3 aLeaf; varying vec3 vLeaf; attribute vec3 aCol; attribute vec3 aTint; uniform float uTime, uSway; varying vec3 vC, vN, vW, vUp;
       void main(){
-        vec3 p=position; vec3 o=instanceMatrix[3].xyz;
+        vLeaf=aLeaf; vec3 p=position; vec3 o=instanceMatrix[3].xyz;
         float ph=dot(o, vec3(0.031,0.027,0.019));
         float w=uSway*p.y*p.y*(sin(uTime*1.6+ph)*0.6+sin(uTime*3.1+ph*1.7)*0.25);
         p.x+=w; p.z+=w*0.5;
@@ -85,16 +71,29 @@ export function lifeMaterial(uniforms, { sway = 0, glow = 0, indoor = 0 } = {}) 
         vN=normalize(mat3(modelMatrix)*mat3(instanceMatrix)*normal);
         vUp=normalize(mat3(modelMatrix)*instanceMatrix[1].xyz);
         vC=aCol*aTint; vW=wp.xyz; gl_Position=projectionMatrix*viewMatrix*wp; }`,
-    fragmentShader: `uniform vec3 uSun; uniform float uGlow, uIndoor; varying vec3 vC, vN, vW, vUp;
-      void main(){ vec3 s=normalize(uSun); vec3 n=normalize(vN);
+    fragmentShader: `varying vec3 vLeaf; uniform vec3 uSun; uniform float uGlow, uIndoor; varying vec3 vC, vN, vW, vUp;
+      float leaves(vec2 uv,float seed){vec2 cell=floor(uv),f=fract(uv)-.5;float h=fract(sin(dot(cell,vec2(127.1,311.7))+seed)*43758.5453);f+=vec2(h-.5,fract(h*17.)-.5)*.42;float a=h*6.28;f=mat2(cos(a),-sin(a),sin(a),cos(a))*f;return 1.-dot(f/vec2(.56,.28),f/vec2(.56,.28));}
+      void main(){
+        if(vLeaf.z>.5){
+          vec2 uv=vLeaf.xy, q=(uv-.5)*2.;
+          float edge=1.-dot(q,q);
+          vec2 cell=floor(uv*12.); float h=fract(sin(dot(cell,vec2(12.9898,78.233)))*43758.5453);
+          vec2 f=fract(uv*12.)-.5; f.x+=sin(cell.y)*.12;
+          float leaf=max(leaves(uv*13.,1.),leaves(uv*17.+.4,7.));
+          float fine=1.-smoothstep(.012,.08,max(fwidth(uv.x),fwidth(uv.y)));
+          if(edge < .05+h*.3 || (fine>.5 && (leaf<.0 || h<.12)))discard;
+        }
+        vec3 s=normalize(uSun); vec3 n=normalize(vN);
         float day=smoothstep(-0.12,0.25,dot(normalize(vUp),s));
         float diff=max(dot(n,s),0.0)*0.75+0.25*max(dot(-n,s),0.0);
         vec3 c=vC*(0.10+0.95*diff*day+0.05) + vC*uGlow*(0.35+0.65*(1.0-day));
         // under the dome the city's lamps light the garden at night
         c+=uIndoor*(1.0-day)*vC*vec3(1.0,0.86,0.66)*(0.38+0.25*max(dot(n,normalize(vUp)),0.0));
         float rim=pow(1.0-max(dot(n,normalize(cameraPosition-vW)),0.0),3.0);
-        gl_FragColor=vec4(c+rim*0.08*vC,1.0); }`,
+        gl_FragColor=vec4(pow(max(c+rim*0.08*vC,vec3(0.)),vec3(1./2.2)),1.0); }`,
   });
+  material.defaultAttributeValues.aLeaf=[0,0,0];
+  return material;
 }
 
 /** Instances on a sphere: items = [{ n: [nx,ny,nz], h (m above radius), s (scale), tint: [r,g,b] }]. */
@@ -166,7 +165,7 @@ export function hotSprings(vents, radius, uniforms) {
 /** Instances split into chunks by direction (cell, radians), one InstancedMesh each. update(cameraLocal)
  * hides every chunk farther than maxDist from the camera: a forest of 50 000 trees costs only the chunks
  * around you, the way voxel-game mods keep far terrain cheap. */
-export function chunkedInstances(makeGeometry, material, items, radius, { cell = 0.05, maxDist = 3000 } = {}) {
+export function chunkedInstances(makeGeometry, material, items, radius, { cell = 0.05, maxDist = 3000, farGeometry = null, detailDist = 850 } = {}) {
   const groups = new Map();
   for (const it of items) {
     const n = it.n, key = `${Math.round(n[0] / cell)},${Math.round(n[1] / cell)},${Math.round(n[2] / cell)}`;
@@ -175,17 +174,21 @@ export function chunkedInstances(makeGeometry, material, items, radius, { cell =
   }
   const root = new THREE.Group();
   const chunks = [];
+  const distant=farGeometry?.();
   const base = makeGeometry();                       // built once; every chunk shares its vertex buffers
   for (const list of groups.values()) {
     const g = new THREE.BufferGeometry();
-    for (const name of ["position", "normal", "aCol"]) g.setAttribute(name, base.getAttribute(name));
+    for (const name of Object.keys(base.attributes)) g.setAttribute(name, base.getAttribute(name));
     const mesh = instances(g, material, list, radius);
     mesh.visible = false;
     root.add(mesh);
     chunks.push(mesh);
   }
   root.userData.update = (cam) => {
-    for (const m of chunks) m.visible = m.boundingSphere.center.distanceTo(cam) < maxDist + m.boundingSphere.radius;
+    for (const m of chunks) {
+      const d=m.boundingSphere.center.distanceTo(cam);m.visible=d<maxDist+m.boundingSphere.radius;
+      if(distant){const far=d>detailDist+m.boundingSphere.radius;if(m.userData.far!==far){const source=far?distant:base;for(const name of Object.keys(source.attributes))m.geometry.setAttribute(name,source.getAttribute(name));m.userData.far=far;}}
+    }
   };
   root.userData.count = items.length;
   root.userData.chunks = chunks.length;

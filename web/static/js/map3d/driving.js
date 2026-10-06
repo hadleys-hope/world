@@ -1,3 +1,4 @@
+import { stopSailing } from "./models/urban/marine.js";
 /** driving: procedural colony viewer. */
 import { state } from "./state.js";
 import { navigationHUD, nearClip } from "./camera.js";
@@ -137,6 +138,12 @@ export async function startDriving(name) {
 
 export async function stopDriving() {
   if (!state.drive) return;
+  if (state.drive.marine) {
+    stopSailing();
+    navigationHUD();
+    renderInfo();
+    return;
+  }
   const d = state.drive;
   state.cameraKeys.clear();
   d.v = 0;
@@ -192,7 +199,7 @@ export function sendDriverPose(force = false) {
 
 export function updateDriving(dt, now) {
   const d = state.drive;
-  if (!d) return;
+  if (!d || d.marine) return;
   state.driverAccumulator = Math.min(0.12, state.driverAccumulator + dt);
   const input = {
     forward: state.cameraKeys.has("w") || state.cameraKeys.has("arrowup"),
@@ -272,7 +279,7 @@ export function initialize() {
     if (b) startDriving(b.dataset.drive);
   });
   window.addEventListener("pagehide", () => {
-    if (state.drive)
+    if (state.drive && !state.drive.marine)
       navigator.sendBeacon(
         "/cmd",
         new Blob(

@@ -156,6 +156,12 @@ class Colony:
                     "wall": cfg["wall_radius"], "hub": cfg["hub_radius"],
                     "x": np.round(w.h_x, 1).tolist(), "y": np.round(w.h_y, 1).tolist(), "type": w.h_type.tolist(),
                     "roads": roads,
+                    "facilities": {key: list(cfg[key]) for key in ("reactor_pos", "water_plant_pos", "waste_station_pos", "tower_pos", "solar_pos")},
+                    "service_roads": [
+                        {"points": [[round(x, 1), round(y, 1)] for x, y in r["points"]], "width": r.get("width", 10)}
+                        for r in colony_layout(cfg)["roads"]
+                        if any(abs(x) >= cfg["wall_radius"] + 80 or abs(y) >= cfg["wall_radius"] + 80 for x, y in r["points"])
+                    ],
                 })
             self._geometry = json.dumps({"cities": out, "branches": BRANCHES}).encode()
         return self._geometry
@@ -173,6 +179,8 @@ class Colony:
                     "id": c.key, "time": w.time_str(), "t_out": round(w.t_out, 1),
                     "budget": round(float(w.colony_budget)), "power_kw": round(w.available_kw), "demand_kw": round(w.demand_kw),
                     "t_in": np.round(w.h_t_in).astype(int).tolist(),
+                    "water": {"tank_m3": round(w.water_tank_m3, 2), "capacity_m3": w.cfg["water_tank_m3"]},
+                    "rovers": [{"name": r.name, "kind": r.kind, "x": round(r.x, 2), "y": round(r.y, 2), "heading": round(r.heading, 4), "load": round(r.load, 2)} for r in w.rovers + getattr(w, "traffic", [])],
                     "flags": (w.h_power_ok.astype(int) + 2 * w.h_heater_on.astype(int) + 4 * w.h_ext.astype(int)).tolist(),
                 })
         body = json.dumps({"houses": self.houses, "cities": cities}).encode()

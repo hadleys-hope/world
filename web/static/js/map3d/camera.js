@@ -1,3 +1,5 @@
+import { focusKlyaksa, visitKlyaksa } from "./models/urban/inspection.js";
+import { startSailing } from "./models/urban/marine.js";
 /** camera: procedural colony viewer. */
 import { logicalKey } from "./keys.js";
 import { state } from "./state.js";
@@ -218,6 +220,7 @@ export function focusPoint(point, distance = 12, normal = null) {
 }
 
 export function focusSelection() {
+  if (state.activeBody === 3 && focusKlyaksa()) return;
   if (!state.selected) return;
   if (state.selected.kind === "rover") {
     const rv = state.rovers[state.selected.extra || state.selected.id];
@@ -271,6 +274,18 @@ export function initialize() {
   window.addEventListener("keydown", (e) => {
     if (state.typing(e) || e.ctrlKey || e.metaKey || e.altKey) return;
     const key = logicalKey(e);
+    if (!e.repeat && state.activeBody === 3 && !state.drive) {
+      if (e.code === "BracketRight" || e.code === "BracketLeft") {
+        e.preventDefault();
+        visitKlyaksa(false, e.code === "BracketRight" ? 1 : -1);
+        return;
+      }
+      if (e.code === "KeyP") {
+        e.preventDefault();
+        visitKlyaksa(true);
+        return;
+      }
+    }
     if (key === "shift") {
       e.preventDefault();
       if (!e.repeat && !state.drive)
@@ -306,6 +321,10 @@ export function initialize() {
       !state.drive
     )
       startDriving(state.selected.extra || state.selected.id);
+    if (!e.repeat && key === "enter" && state.selected?.kind === "boat" && !state.drive) {
+      startSailing(state.klyaksaBoats[state.selected.id]);
+      navigationHUD();
+    }
     if (!e.repeat && key === "escape") {
       if (state.drive) stopDriving();
       else {

@@ -98,6 +98,7 @@ function klyaksaPatch(spec, material, uniforms) {
   g.setIndex(idx);
   g.computeVertexNormals();
   const land = new THREE.Mesh(g, material);
+  state.klyaksaGroundAt = groundSampler(g, R, rings, segs, PATCH);
   // water on the same grid, only the cells that are wet
   const widx = [];
   for (let t = 0; t < idx.length; t += 3)
@@ -197,4 +198,32 @@ function klyaksaLife(steps, body, spec, material) {
     state.klyaksaLod = [];
     buildKlyaksa(steps, body, R, u);
   }
+}
+
+/** Height on the rendered triangle, including the sphere chord between terrain vertices. */
+export function groundSampler(geometry, R, rings, segs, reach) {
+  const ray = new THREE.Ray(new THREE.Vector3(), new THREE.Vector3());
+  const A = new THREE.Vector3(), B = new THREE.Vector3();
+  const C = new THREE.Vector3(), D = new THREE.Vector3(), hit = new THREE.Vector3();
+  const positions = geometry.attributes.position;
+  return (X, Y) => {
+    const d = Math.hypot(X, Y), n = dirAt(X, Y, R);
+    if (d >= reach) return bodyHeight(3, n.x, n.y, n.z) * R;
+    const row = Math.min(rings - 1, Math.floor(d / reach * rings));
+    const angle = (Math.atan2(Y, X) + Math.PI * 2) % (Math.PI * 2);
+    const col = Math.floor(angle / (Math.PI * 2) * segs);
+    ray.direction.copy(n);
+    // Straight triangle edges deviate slightly from polar ring boundaries.
+    // Probe adjacent rows at seams, rather than falling back to the noise height.
+    for (const offset of [0, 1, -1]) {
+      const r = row + offset;
+      if (r < 0 || r >= rings) continue;
+      const a = r * segs + col, b = r * segs + (col + 1) % segs;
+      A.fromBufferAttribute(positions, a); B.fromBufferAttribute(positions, b);
+      C.fromBufferAttribute(positions, a + segs); D.fromBufferAttribute(positions, b + segs);
+      if (ray.intersectTriangle(A, C, B, false, hit) || ray.intersectTriangle(B, C, D, false, hit))
+        return hit.length() - R;
+    }
+    return bodyHeight(3, n.x, n.y, n.z) * R;
+  };
 }

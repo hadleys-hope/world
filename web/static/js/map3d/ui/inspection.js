@@ -1,3 +1,4 @@
+import { pickKlyaksa, renderKlyaksaInfo, focusKlyaksa } from "../models/urban/inspection.js";
 /** ui/inspection: procedural colony viewer. */
 import { state } from "../state.js";
 import { focusPoint, focusSelection, navigationHUD } from "../camera.js";
@@ -43,7 +44,12 @@ export function setMouse(ev) {
 }
 
 export function pick(ev, click) {
-  if (state.drive || state.systemView || state.activeBody !== 2) return;
+  if (state.drive || state.systemView) return;
+  if (state.activeBody === 3) {
+    pickKlyaksa(ev, click);
+    return;
+  }
+  if (state.activeBody !== 2) return;
   const [mx, my] = setMouse(ev),
     tip = document.getElementById("tip");
   if (!state.housesMesh || !state.S) return;
@@ -157,6 +163,7 @@ export function rows(pairs) {
 }
 
 export function renderInfo() {
+  if (renderKlyaksaInfo()) return;
   const box = document.getElementById("info");
   if (!state.selected || !state.S) {
     box.style.display = "none";
@@ -553,6 +560,11 @@ export function initialize() {
     pick(ev, true);
   });
   state.renderer.domElement.addEventListener("dblclick", (ev) => {
+    if (state.activeBody === 3 && !state.drive && !state.systemView) {
+      pickKlyaksa(ev, true);
+      focusKlyaksa();
+      return;
+    }
     if (state.drive || state.activeBody !== 2 || state.systemView) return;
     pick(ev, true);
     if (state.selected) focusSelection();
