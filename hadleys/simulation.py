@@ -237,4 +237,9 @@ def sim_loop(w_holder: dict, store: Optional[Store]):
                     store.save_world(w)
                 except Exception as e:
                     print("autosave failed:", e)
+            if w_holder.get("colony"):
+                try:
+                    w_holder["colony"].save()
+                except Exception as e:
+                    print("klyaksa autosave failed:", e)
             last_save = time.time()

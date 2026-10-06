@@ -13,8 +13,11 @@ costs ~60 us in Python. Batched it is 6 cities x 20 ticks/s = 120 messages/s eac
 from __future__ import annotations
 
 import json
+import os
+import pickle
 import threading
 import time
+from collections import deque
 
 import numpy as np
 
@@ -37,26 +40,92 @@ BRANCHES = [("k1", "k2"), ("k2", "k5"), ("k1", "k3"), ("k3", "k6"), ("k1", "k4")
 CLIMATE = {"t_mean": 12.0, "t_daily_amp": 5.0}
 
 
+class CityBusView:
+    """What the /bus page reads from a world's bridge, for one Klyaksa city on the shared batched bus.
+    apply/publish are no-ops: the colony drives the bus itself, once per city per tick."""
+
+    def __init__(self, city):
+        self.city = city
+        self.last_pub_t = np.full(city.w.N, -999)
+        self.sent = self.received = 0
+        self.connected = False
+        self.tail = deque(maxlen=150)
+        self.rate_out = deque(maxlen=200)
+        self.rate_in = deque(maxlen=200)
+
+    def apply(self):
+        pass
+
+    def publish(self):
+        pass
+
+    def status(self):
+        w, now = self.city.w, time.time()
+        rate = lambda q: sum(n for t, n in q if now - t < 5) / 5.0
+        return {
+            "enabled": True, "connected": self.connected, "broker": "batched, one message per tick",
+            "controlled": int(((w.t - w.h_ctrl_t) < 15).sum()), "sent": self.sent, "received": self.received,
+            "out_per_s": rate(self.rate_out), "in_per_s": rate(self.rate_in),
+        }
+
+    def tail_list(self):
+        now = time.time()
+        return [{"dir": m["dir"], "topic": m["topic"], "body": m["body"], "age": round(now - m["at"], 1), "at": m["at"]} for m in list(self.tail)[-60:]]
+
+
 class City:
-    def __init__(self, key, name, hps, per_row, at, offset, seed):
+    def __init__(self, key, name, hps, per_row, at, offset, seed, saved=None):
         self.key, self.name, self.at, self.offset = key, name, at, offset
-        self.w = World({**CFG, **CLIMATE, "seed": seed, "houses_per_sector": hps, "houses_per_row": per_row})
+        self.w = saved or World({**CFG, **CLIMATE, "seed": seed, "houses_per_sector": hps, "houses_per_row": per_row})
         self.w.speed = 20
-        self.w.bridge = None
+        self.w.bridge = CityBusView(self)
 
 
 class Colony:
-    def __init__(self, cities=CITIES, first_id=300, seed=4242):
+    def __init__(self, cities=CITIES, first_id=300, seed=4242, data_dir=None):
         self.cities = []
+        self.data_dir = data_dir
         offset = first_id
         for i, (key, name, hps, per_row, at) in enumerate(cities):
-            c = City(key, name, hps, per_row, at, offset, seed + i)
+            c = City(key, name, hps, per_row, at, offset, seed + i, self._load(key, 6 * hps))
             self.cities.append(c)
             offset += c.w.N
         self.houses = offset - first_id
         self.bus = None
         self._state = (0, b"")
         self._geometry = None
+
+    def _path(self, key):
+        return os.path.join(self.data_dir, f"klyaksa-{key}.pkl") if self.data_dir else None
+
+    def _load(self, key, houses):
+        """A saved city, if there is one of the right size and schema; otherwise None (a new one is built)."""
+        path = self._path(key)
+        if not path or not os.path.exists(path):
+            return None
+        try:
+            with open(path, "rb") as f:
+                w = pickle.load(f)
+            if getattr(w, "schema", 1) == World.SCHEMA and w.N == houses:
+                return w
+        except Exception as e:
+            print(f"klyaksa {key}: saved city unreadable ({e}), building a new one")
+        return None
+
+    def save(self):
+        """Each city to its own file, written aside and renamed, so a crash never leaves half a file."""
+        for c in self.cities:
+            path = self._path(c.key)
+            if not path:
+                return
+            bridge, c.w.bridge = c.w.bridge, None             # the bus view holds a lock and a client; not saved
+            try:
+                with c.w.lock:
+                    with open(path + ".tmp", "wb") as f:
+                        pickle.dump(c.w, f, protocol=pickle.HIGHEST_PROTOCOL)
+                os.replace(path + ".tmp", path)
+            finally:
+                c.w.bridge = bridge
 
     def tick(self, n):
         for c in self.cities:
@@ -127,7 +196,12 @@ class ColonyBus:
         self.lock = threading.Lock()
         self.sent = self.received = 0
         self.cli = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="hh-klyaksa", clean_session=True)
-        self.cli.on_connect = lambda c, *a: c.subscribe("hh/batch/actuators")
+        def connected(c, *a):
+            c.subscribe("hh/batch/actuators")
+            for city in colony.cities:
+                city.w.bridge.connected = True
+
+        self.cli.on_connect = connected
         self.cli.on_message = self._on_message
         self.cli.reconnect_delay_set(min_delay=1, max_delay=30)
         self.cli.connect_async(host or "localhost", int(port or 1883), keepalive=30)
@@ -155,6 +229,11 @@ class ColonyBus:
         with self.lock:
             rows, self.inbox[c.key] = self.inbox[c.key], []
         w = c.w
+        view = c.w.bridge
+        if rows:
+            view.received += len(rows)
+            view.rate_in.append((time.time(), len(rows)))
+            view.tail.append({"dir": "in", "topic": "hh/batch/actuators", "body": f"{len(rows)} houses: " + json.dumps(rows[0])[:140], "at": time.time()})
         for a in rows:
             i = int(a["id"]) - c.offset
             self.received += 1
@@ -181,5 +260,12 @@ class ColonyBus:
         for f in self.FIELDS:
             arr = getattr(w, "h_" + f)[ids]
             msg[f] = np.round(arr, 1).tolist() if arr.dtype.kind == "f" else arr.astype(int).tolist()
-        self.cli.publish("hh/batch/sensors", json.dumps(msg), qos=0)
+        body = json.dumps(msg)
+        self.cli.publish("hh/batch/sensors", body, qos=0)
         self.sent += int(ids.size)
+        view = c.w.bridge
+        view.sent += int(ids.size)
+        view.last_pub_t[ids] = w.t
+        view.rate_out.append((time.time(), int(ids.size)))
+        if w.t % 7 == 0:
+            view.tail.append({"dir": "out", "topic": "hh/batch/sensors", "body": f"{ids.size} houses: " + body[:140], "at": time.time()})

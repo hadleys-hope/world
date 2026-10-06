@@ -46,3 +46,50 @@ class KlyaksaTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CityPagesTests(unittest.TestCase):
+    def test_every_endpoint_serves_the_city_asked_for(self):
+        import http.client
+        import threading
+        from hadleys.api.server import HttpServer, make_handler
+        from hadleys.web import HTML
+        from hadleys.world import World
+
+        w = World()
+        colony = Colony(SMALL, first_id=300)
+        holder = {"w": w, "colony": colony}
+        srv = HttpServer(("127.0.0.1", 0), make_handler(holder, HTML, "{}", None, "", HTML, None))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+        def get(path):
+            c = http.client.HTTPConnection("127.0.0.1", srv.server_port, timeout=10)
+            c.request("GET", path)
+            r = c.getresponse()
+            return r.status, r.read()
+
+        try:
+            cities = json.loads(get("/cities.json")[1])
+            self.assertEqual([c["id"] for c in cities], ["", "a", "b"])
+            self.assertEqual(len(json.loads(get("/state")[1])["houses"]["t"]), 300)
+            self.assertEqual(len(json.loads(get("/state?city=b")[1])["houses"]["t"]), 120)
+            self.assertEqual(len(json.loads(get("/geometry?city=a")[1])["houses"]["x"]), 300)
+            bus = json.loads(get("/bus.json?city=b")[1])
+            self.assertEqual(len(bus["houses"]), 120)
+            self.assertTrue(bus["mqtt"]["enabled"])
+            self.assertEqual(get("/finance.json?city=a")[0], 200)
+            self.assertEqual(get("/programs")[0], 200)
+            self.assertEqual(json.loads(get("/programs.json")[1])["programs"], [])
+        finally:
+            srv.shutdown()
+
+    def test_cities_are_saved_and_restored(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            c = Colony(SMALL, first_id=300, data_dir=d)
+            c.tick(3)
+            c.save()
+            again = Colony(SMALL, first_id=300, data_dir=d)
+            self.assertEqual([x.w.t for x in again.cities], [3, 3])
+            self.assertIsNotNone(again.cities[0].w.bridge, "a restored city gets its bus view back")

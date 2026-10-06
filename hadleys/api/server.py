@@ -8,14 +8,14 @@ import hashlib
 import json
 import os
 from http.server import ThreadingHTTPServer
-from hadleys.api.snapshots import bus_snapshot, house_snapshot, snapshot, water_json
+from hadleys.api.snapshots import bus_snapshot, compact_floats, house_geometry, house_snapshot, snapshot, water_json
 from hadleys.domains.attractors import attractor_snapshot
 from hadleys.domains.households import finance_snapshot
 from hadleys.domains.energy import reactor_scram
 from hadleys.domains.driving import driver_command
 from hadleys.numerics import clamp
 from hadleys.simulation import inject, new_colony
-from hadleys.web import HTMLATTR, HTMLBUS, HTMLFINANCE, HTMLGRAPH, HTMLHOUSE
+from hadleys.web import HTMLATTR, HTMLBUS, HTMLFINANCE, HTMLGRAPH, HTMLHOUSE, HTMLPROGRAMS
 
 from hadleys.web import STATIC_ROOT
 from hadleys.api.static import accepts_gzip, serve_asset
@@ -51,6 +51,7 @@ def make_handler(
     # /state is built at most once per (world, tick, change): every viewer polls it every 300 ms, and building it
     # holds the world lock. Operator commands bump "changes", so their effect shows before the next tick.
     state_cache = {"key": None, "body": b""}
+    city_geometry = {}
     changes = [0]
 
     class Handler(BaseHTTPRequestHandler):
@@ -86,6 +87,19 @@ def make_handler(
             self.end_headers()
             self.wfile.write(body)
 
+        def _world(self, city=None):
+            """The world a request is about: LV-426 by default, a Klyaksa city with ?city=k1 (or "city" in a POST)."""
+            if city is None:
+                from urllib.parse import parse_qs, urlsplit
+
+                city = parse_qs(urlsplit(self.path).query).get("city", [""])[0]
+            colony = w_holder.get("colony")
+            if city and colony:
+                for c in colony.cities:
+                    if c.key == city:
+                        return c.w
+            return w_holder["w"]
+
         def do_GET(self):
             if (
                 self.path == "/"
@@ -101,10 +115,39 @@ def make_handler(
                 serve_asset(self, STATIC_ROOT, "/static/")
             elif self.path.startswith("/vendor/") and vendor_dir:
                 serve_asset(self, vendor_dir, "/vendor/")
+            elif self.path.startswith("/geometry") and self._world() is not w_holder["w"]:
+                w = self._world()
+                if id(w) not in city_geometry:
+                    body = json.dumps(compact_floats(house_geometry(w))).encode("utf-8")
+                    city_geometry[id(w)] = {"body": body, "gzip": gzip.compress(body, 6, mtime=0)}
+                g = city_geometry[id(w)]
+                zipped = accepts_gzip(self.headers.get("Accept-Encoding", ""))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Cache-Control", "no-store")
+                if zipped:
+                    self.send_header("Content-Encoding", "gzip")
+                body = g["gzip"] if zipped else g["body"]
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
             elif self.path.startswith("/geometry"):
                 self._send_geometry()
+            elif self.path.startswith("/cities.json"):
+                cities = [{"id": "", "name": "Hadley's Hope", "planet": "Acheron", "houses": w_holder["w"].N, "first_id": 0}]
+                colony = w_holder.get("colony")
+                if colony:
+                    cities += [{"id": c.key, "name": c.name, "planet": "Klyaksa", "houses": c.w.N, "first_id": c.offset} for c in colony.cities]
+                self._send(200, "application/json", json.dumps(cities).encode())
+            elif self.path.startswith("/programs.json"):
+                bridge = getattr(w_holder["w"], "bridge", None)
+                runtime = getattr(bridge, "runtime", None) or {"programs": [], "status": None, "traces": []}
+                body = {"programs": runtime["programs"], "status": runtime["status"], "traces": list(runtime["traces"])}
+                self._send(200, "application/json", json.dumps(body).encode())
+            elif self.path.startswith("/programs"):
+                self._send(200, "text/html; charset=utf-8", HTMLPROGRAMS.encode("utf-8"))
             elif self.path.startswith("/state"):
-                w = w_holder["w"]
+                w = self._world()
                 with w.lock:
                     key = (id(w), w.t, changes[0])
                     if state_cache["key"] != key:
@@ -118,24 +161,24 @@ def make_handler(
                 self._send(200, "application/json", w_holder["colony"].state())
             elif self.path.startswith("/clock.json"):
                 # the shared top bar on every 2D page: a few bytes instead of the whole /state
-                w = w_holder["w"]
+                w = self._world()
                 with w.lock:
                     clock = {"t": w.t, "time": w.time_str(), "speed": w.speed, "paused": w.paused}
                 self._send(200, "application/json", json.dumps(clock).encode("utf-8"))
             elif self.path.startswith("/water.json"):
-                w = w_holder["w"]
+                w = self._world()
                 with w.lock:
                     body = json.dumps(water_json(w)).encode("utf-8")
                 self._send(200, "application/json", body)
             elif self.path.startswith("/finance.json"):
-                w = w_holder["w"]
+                w = self._world()
                 with w.lock:
                     body = json.dumps(finance_snapshot(w)).encode("utf-8")
                 self._send(200, "application/json", body)
             elif self.path.startswith("/finance"):
                 self._send(200, "text/html; charset=utf-8", HTMLFINANCE.encode("utf-8"))
             elif self.path.startswith("/house.json"):
-                w = w_holder["w"]
+                w = self._world()
                 try:
                     hid = int(
                         clamp(
@@ -150,7 +193,7 @@ def make_handler(
             elif self.path.startswith("/house"):
                 self._send(200, "text/html; charset=utf-8", HTMLHOUSE.encode("utf-8"))
             elif self.path.startswith("/attractors.json"):
-                w = w_holder["w"]
+                w = self._world()
                 with w.lock:
                     body = json.dumps(
                         attractor_snapshot(w, "hist=1" in self.path)
@@ -161,7 +204,7 @@ def make_handler(
             elif self.path.startswith("/graph"):
                 self._send(200, "text/html; charset=utf-8", HTMLGRAPH.encode("utf-8"))
             elif self.path.startswith("/bus.json"):
-                w = w_holder["w"]
+                w = self._world()
                 with w.lock:
                     body = json.dumps(bus_snapshot(w)).encode("utf-8")
                 self._send(200, "application/json", body)
@@ -196,7 +239,14 @@ def make_handler(
             except Exception:
                 req = {}
             cmd = req.get("cmd", "")
-            w = w_holder["w"]
+            w = self._world(req.get("city", ""))
+            if cmd == "trace":
+                # anyone may watch a house's program run; it changes nothing
+                bridge = getattr(w_holder["w"], "bridge", None)
+                if bridge and getattr(bridge, "cli", None):
+                    bridge.cli.publish("hh/runtime/trace/request", json.dumps({"house": int(req.get("house", 0))}), qos=0)
+                self._send(200, "application/json", b'{"ok": true}')
+                return
             if cmd == "auth":
                 ok = (not admin_token) or req.get("token", "") == admin_token
                 self._send(

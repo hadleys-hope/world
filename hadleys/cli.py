@@ -128,7 +128,7 @@ def main():
     if not args.no_klyaksa and not args.headless:
         from hadleys.klyaksa import Colony, ColonyBus
 
-        holder_colony = Colony()
+        holder_colony = Colony(data_dir=args.data or None)
         print(f"klyaksa: {len(holder_colony.cities)} dome cities, {holder_colony.houses} houses (ids from 300)")
         if args.mqtt:
             try:
@@ -210,6 +210,9 @@ def main():
             with current.lock:
                 store.save_world(current)
             print("world saved at", current.time_str())
+            if holder.get("colony"):
+                holder["colony"].save()
+                print("klyaksa saved")
         raise SystemExit(0)
 
     signal.signal(signal.SIGTERM, shutdown)
