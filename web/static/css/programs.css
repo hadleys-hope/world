@@ -1,0 +1,48 @@
+/* Programs: the house programs as source, as bytecode, and as runs on the VM. */
+* { box-sizing: border-box; }
+body.prog { height: auto !important; overflow: auto !important; display: block; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.kpis .card { padding: 12px 14px !important; }
+.kpis b { display: block; font: 500 20px var(--hh-mono); }
+.kpis span { font-size: 12px; color: var(--hh-dim); }
+.pgrid { display: grid; grid-template-columns: 260px minmax(0, 1.25fr) minmax(0, 1fr); gap: 14px; margin-bottom: 14px; }
+@media (max-width: 1200px) { .pgrid { grid-template-columns: 1fr; } }
+.card { min-width: 0; }
+.head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.head h2, .card > h2 { margin: 0 0 8px; }
+h2.sub { margin-top: 16px !important; }
+.tools { display: flex; gap: 6px; align-items: center; }
+.mono, .tiny { font-family: var(--hh-mono); font-size: 12px; }
+.tiny { font-size: 11px; }
+#plist button, #tlist button { display: flex; width: 100%; justify-content: space-between; gap: 8px; margin-bottom: 6px; text-align: left; padding: 8px 10px !important; }
+#plist button[aria-pressed="true"], #tlist button[aria-pressed="true"] { border-color: var(--hh-acc) !important; background: var(--hh-acc-bg) !important; color: var(--hh-acc-text) !important; }
+#plist b { font-weight: 600; } #plist span, #tlist span { font: 11px var(--hh-mono); color: var(--hh-dim); }
+.watch { display: flex; gap: 6px; } .watch input { width: 100px; }
+.editor { position: relative; height: 520px; border-radius: 12px; background: var(--hh-chip); overflow: hidden; }
+.editor pre, .editor textarea { position: absolute; inset: 0; margin: 0; padding: 12px 14px 12px 52px; font: 13px/1.55 var(--hh-mono); white-space: pre; overflow: auto; tab-size: 4; border: 0 !important; border-radius: 0 !important; }
+.editor textarea { color: transparent !important; caret-color: var(--hh-acc); background: transparent !important; resize: none; outline: none; }
+.editor pre { color: var(--hh-text); pointer-events: none; counter-reset: line; }
+.editor pre .ln { display: block; position: relative; }
+.editor pre .ln::before { counter-increment: line; content: counter(line); position: absolute; left: -42px; width: 30px; text-align: right; color: var(--hh-dim); opacity: 0.6; }
+.editor pre .ln.hot { background: rgba(232, 184, 107, 0.16); }
+.k { color: #c792ea; } .t { color: #82aaff; } .s { color: #c3e88d; } .n { color: #f78c6c; } .c { color: #6b7684; font-style: italic; } .f { color: #ffcb6b; } .h { color: #89ddff; }
+#bc { height: 520px; overflow: auto; font: 12px/1.6 var(--hh-mono); border-radius: 12px; background: var(--hh-chip); padding: 8px 10px; }
+#bc .fn { color: var(--hh-acc-text); margin: 8px 0 2px; font-weight: 600; }
+#bc .fn:first-child { margin-top: 0; }
+#bc .ins { display: grid; grid-template-columns: 44px 150px 1fr; gap: 6px; padding: 0 4px; border-radius: 4px; transition: background 0.15s; }
+#bc .ins .ip { color: var(--hh-dim); } #bc .ins .op { color: #82aaff; } #bc .ins .arg { color: var(--hh-text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#bc .ins.ran { background: rgba(127, 209, 185, 0.08); }
+#bc .ins.now { background: var(--hh-acc-bg); box-shadow: inset 3px 0 0 var(--hh-acc); }
+.run-grid { display: grid; grid-template-columns: 1fr 1.2fr 1fr; gap: 14px; }
+@media (max-width: 1100px) { .run-grid { grid-template-columns: 1fr; } }
+.run-grid h3 { margin: 0 0 8px; font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--hh-dim); }
+.kv div, #run-calls div { display: flex; justify-content: space-between; gap: 10px; padding: 4px 0; border-bottom: 1px solid var(--hh-line); font: 12px var(--hh-mono); }
+.kv div span:first-child { color: var(--hh-text-2); }
+#run-calls div { opacity: 0.25; transition: opacity 0.2s, background 0.2s; }
+#run-calls div.done { opacity: 1; }
+#run-calls div.now { background: var(--hh-acc-bg); }
+#run-calls .fn { color: #ffcb6b; } #run-calls .res { color: var(--hh-ok); }
+#run-out pre { margin: 0; padding: 10px; border-radius: 10px; background: var(--hh-chip); font: 12px/1.5 var(--hh-mono); white-space: pre-wrap; overflow-wrap: anywhere; opacity: 0.25; transition: opacity 0.3s; }
+#run-out pre.sent { opacity: 1; }
+#run-out .topic { font: 12px var(--hh-mono); color: var(--hh-acc-text); margin-bottom: 6px; }
+#run-scrub { width: 260px; accent-color: var(--hh-acc); }

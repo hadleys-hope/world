@@ -56,9 +56,13 @@ class MqttBridge:
         self.connected = True
         client.subscribe("hh/house/+/actuators")
         client.subscribe("hh/batch/actuators")
+        client.subscribe("hh/runtime/#")
         self.last_pub_t[:] = -999  # resend everything after a reconnect
 
     def _on_message(self, client, userdata, msg):
+        if msg.topic.startswith("hh/runtime/"):
+            self._on_runtime(msg)
+            return
         if msg.topic == "hh/batch/actuators":
             self._on_batch(msg)
             return
@@ -78,6 +82,22 @@ class MqttBridge:
                 )
         except Exception:
             pass
+
+    def _on_runtime(self, msg):
+        """hope-runtime describes itself on the bus: its programs (source and bytecode, retained), its health
+        every two seconds, and traces of single handler runs. Kept here for the /programs page."""
+        try:
+            body = json.loads(msg.payload)
+        except Exception:
+            return
+        if not hasattr(self, "runtime"):
+            self.runtime = {"programs": [], "status": None, "traces": deque(maxlen=40)}
+        if msg.topic == "hh/runtime/programs":
+            self.runtime["programs"] = body
+        elif msg.topic == "hh/runtime/status":
+            self.runtime["status"] = body
+        elif msg.topic == "hh/runtime/trace":
+            self.runtime["traces"].append(body)
 
     def _on_batch(self, msg):
         try:

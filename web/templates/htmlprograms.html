@@ -1,1 +1,35 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Hadley's Hope: programs</title></head><body class="hh-full">NAVHTML</body></html>
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Hadley's Hope: programs</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/css/navigation.css">
+<link rel="stylesheet" href="/static/css/programs.css">
+</head>
+<body class="hh-full prog">
+NAVHTML
+<div class="kpis" id="kpis"></div>
+<div class="pgrid">
+ <section class="card" id="list-card"><h2>Programs</h2><div id="plist"></div>
+  <h2 class="sub">Watch a house</h2>
+  <div class="watch"><input id="watch-id" type="number" min="0" placeholder="house id"><button id="watch-go">Trace next run</button></div>
+  <div class="dim tiny" id="watch-note">LV-426 houses 0–299, Klyaksa from 300</div>
+  <h2 class="sub">Recent runs</h2><div id="tlist"></div>
+ </section>
+ <section class="card" id="src-card">
+  <div class="head"><h2 id="src-title">Source</h2><div class="tools"><button id="src-reset">Reset</button><button id="src-save">Download .hope</button></div></div>
+  <div class="editor"><pre id="src-hl" aria-hidden="true"></pre><textarea id="src" spellcheck="false" aria-label="Program source"></textarea></div>
+ </section>
+ <section class="card" id="bc-card">
+  <div class="head"><h2>Bytecode</h2><span class="dim tiny" id="bc-size"></span></div>
+  <div id="bc"></div>
+ </section>
+</div>
+<section class="card" id="run-card">
+ <div class="head"><h2 id="run-title">A run on the VM</h2>
+  <div class="tools"><button id="run-play">Play</button><input id="run-scrub" type="range" min="0" max="0" value="0" aria-label="Step"><span class="mono" id="run-step"></span></div></div>
+ <div class="run-grid">
+  <div><h3>Read from the world</h3><div id="run-in" class="kv"></div></div>
+  <div><h3>Calls out of the program</h3><div id="run-calls"></div></div>
+  <div><h3>Sent to the bus</h3><div id="run-out"></div></div>
+ </div>
+</section>
+<script src="/static/js/i18n.js"></script><script src="/static/js/pages/programs.js"></script></body></html>
