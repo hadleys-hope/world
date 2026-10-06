@@ -2,16 +2,19 @@
 import json
 import unittest
 from hadleys.klyaksa import Colony
-from hadleys.geometry.roads import colony_layout
 
 
 class VisualPayloadTests(unittest.TestCase):
-    def test_facilities_and_every_road_are_exported(self):
+    def test_presentation_geometry_preserves_domain_coordinates(self):
         colony = Colony([('test', 'Test', 50, 10, (0, 0))])
         world = colony.cities[0].w
         city = json.loads(colony.geometry())['cities'][0]
-        self.assertEqual(city['facilities']['reactor_pos'], list(world.cfg['reactor_pos']))
-        self.assertEqual(len(city['roads']) + len(city['service_roads']), len(colony_layout(world.cfg)['roads']))
+        self.assertEqual(city['sim_facilities']['reactor_pos'], list(world.cfg['reactor_pos']))
+        self.assertEqual(city['sim_x'], world.h_x.round(3).tolist())
+        self.assertEqual(city['sim_y'], world.h_y.round(3).tolist())
+        self.assertEqual(city['presentation_version'], 2)
+        self.assertEqual(len(city['sector_services']), 6)
+        self.assertGreaterEqual(len(city['parks']), 10)
         self.assertEqual(len(city['x']), world.N)
 
     def test_telemetry_matches_domains_without_advancing_them(self):

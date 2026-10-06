@@ -22,7 +22,7 @@ from collections import deque
 import numpy as np
 
 from hadleys.config import CFG
-from hadleys.geometry.roads import colony_layout
+from hadleys.geometry.klyaksa_layout import city_plan
 from hadleys.simulation import world_tick
 from hadleys.world import World
 
@@ -94,6 +94,9 @@ class Colony:
         self.bus = None
         self._state = (0, b"")
         self._geometry = None
+        self._geometry_lock = threading.Lock()
+        self._visual_plans = {}
+        self._visual_anchors = {}
 
     def _path(self, key):
         return os.path.join(self.data_dir, f"klyaksa-{key}.pkl") if self.data_dir else None
@@ -141,46 +144,108 @@ class Colony:
                         self.bus.publish(c)
 
     def geometry(self) -> bytes:
-        """Built once: houses, roads and sizes of every city, for the 3D view."""
+        """Built once: a shared read-only presentation plan for every 3D layer."""
+        with self._geometry_lock:
+            return self._build_geometry()
+
+    def _build_geometry(self) -> bytes:
+        """Keep parallel initial HTTP requests from generating the same plan twice."""
         if self._geometry is None:
             out = []
             for c in self.cities:
                 w, cfg = c.w, c.w.cfg
-                roads = [
-                    {"points": [[round(x, 1), round(y, 1)] for x, y in r["points"]], "width": r.get("width", 10)}
-                    for r in colony_layout(cfg)["roads"]
-                    if all(abs(x) < cfg["wall_radius"] + 80 and abs(y) < cfg["wall_radius"] + 80 for x, y in r["points"])
-                ]
+                neighbours = []
+                for left, right in BRANCHES:
+                    other = right if left == c.key else left if right == c.key else None
+                    target = next((v for v in self.cities if v.key == other), None)
+                    if target:
+                        neighbours.append((target.key, target.at[0] - c.at[0], target.at[1] - c.at[1]))
+                plan = city_plan(c, neighbours)
+                self._visual_plans[c.key] = plan
                 out.append({
                     "id": c.key, "name": c.name, "at": list(c.at), "first_id": c.offset, "houses": w.N,
-                    "wall": cfg["wall_radius"], "hub": cfg["hub_radius"],
-                    "x": np.round(w.h_x, 1).tolist(), "y": np.round(w.h_y, 1).tolist(), "type": w.h_type.tolist(),
-                    "roads": roads,
-                    "facilities": {key: list(cfg[key]) for key in ("reactor_pos", "water_plant_pos", "waste_station_pos", "tower_pos", "solar_pos")},
-                    "service_roads": [
-                        {"points": [[round(x, 1), round(y, 1)] for x, y in r["points"]], "width": r.get("width", 10)}
-                        for r in colony_layout(cfg)["roads"]
-                        if any(abs(x) >= cfg["wall_radius"] + 80 or abs(y) >= cfg["wall_radius"] + 80 for x, y in r["points"])
-                    ],
+                    "hub": cfg["hub_radius"], "type": w.h_type.tolist(),
+                    "sim_x": np.round(w.h_x, 3).tolist(), "sim_y": np.round(w.h_y, 3).tolist(),
+                    "sim_facilities": {key: list(cfg[key]) for key in plan["facilities"]},
+                    **plan,
                 })
             self._geometry = json.dumps({"cities": out, "branches": BRANCHES}).encode()
         return self._geometry
+
+    def _visual_rover(self, c, rover):
+        """Mission metadata for road-following presentation, never a simulation write.
+
+        The 3-D street plan differs from the persisted polar domain plan.  Expose
+        both coordinates explicitly; the browser traverses the exported graph to
+        these destinations instead of interpolating a polar position across blocks.
+        """
+        plan, w = self._visual_plans[c.key], c.w
+        anchors = self._visual_anchors.get(c.key)
+        if anchors is None:
+            points = list(zip(w.h_x, w.h_y))
+            mapped = [{'x': x, 'y': y, 'node': node} for x, y, node in
+                      zip(plan['access_x'], plan['access_y'], plan['access_node'])]
+            for name, access in plan['facility_access'].items():
+                points.append(w.cfg[name])
+                mapped.append(access)
+            for name, index in (('garage', 0), ('cargo_depot', 4)):
+                a, radius = w.cfg[name]
+                a = np.deg2rad(a)
+                points.append((radius * np.cos(a), radius * np.sin(a)))
+                mapped.append(plan['sector_services'][index]['access'])
+            anchors = (np.asarray(points), mapped)
+            self._visual_anchors[c.key] = anchors
+
+        def mapped_point(xy):
+            index = int(np.argmin(np.sum((anchors[0] - xy) ** 2, axis=1)))
+            return anchors[1][index]
+
+        target = mapped_point(rover.route[-1] if rover.route else (rover.x, rover.y))
+        job, mission = rover.job, str(rover.state)
+        if mission == 'TO_GARAGE':
+            target = plan['sector_services'][0]['access']
+        elif mission == 'TO_STATION':
+            target = plan['facility_access']['waste_station_pos']
+        elif mission == 'TO_DEPOT':
+            target = plan['sector_services'][4]['access']
+        if isinstance(job, (int, np.integer)):
+            if mission in ('TO_HOUSE', 'PUMPING') and 0 <= int(job) < w.N:
+                target = anchors[1][int(job)]
+            elif mission in ('TO_BIN', 'TO_STORE', 'LOADING') and 0 <= int(job) < 6:
+                target = plan['sector_services'][int(job)]['access']
+        if getattr(job, 'target', '').startswith('house:'):
+            try:
+                i = int(job.target.split(':', 1)[1])
+                if 0 <= i < w.N:
+                    target = anchors[1][i]
+            except (ValueError, IndexError):
+                pass
+        return {
+            'name': rover.name, 'kind': rover.kind, 'x': round(rover.x, 2), 'y': round(rover.y, 2),
+            'heading': round(rover.heading, 4), 'load': round(rover.load, 2),
+            'velocity': round(rover.velocity, 3), 'mission_state': mission,
+            'moving': bool(rover.route) and not w.paused and not w.finished,
+            'circulating': mission == 'CIRCULATING',
+            'visual_origin': mapped_point((rover.x, rover.y)), 'visual_target': target,
+        }
 
     def state(self) -> bytes:
         """Small enough to poll: per house one temperature byte and a few flags; per city the money."""
         now = time.monotonic()
         if now - self._state[0] < 1.0:
             return self._state[1]
+        if not self._geometry:
+            self.geometry()
         cities = []
         for c in self.cities:
             w = c.w
             with w.lock:
                 cities.append({
-                    "id": c.key, "time": w.time_str(), "t_out": round(w.t_out, 1),
+                    "id": c.key, "time": w.time_str(), "sim_tick": w.t, "paused": w.paused, "t_out": round(w.t_out, 1),
                     "budget": round(float(w.colony_budget)), "power_kw": round(w.available_kw), "demand_kw": round(w.demand_kw),
                     "t_in": np.round(w.h_t_in).astype(int).tolist(),
                     "water": {"tank_m3": round(w.water_tank_m3, 2), "capacity_m3": w.cfg["water_tank_m3"]},
-                    "rovers": [{"name": r.name, "kind": r.kind, "x": round(r.x, 2), "y": round(r.y, 2), "heading": round(r.heading, 4), "load": round(r.load, 2)} for r in w.rovers + getattr(w, "traffic", [])],
+                    "rovers": [self._visual_rover(c, r) for r in w.rovers + getattr(w, "traffic", [])],
                     "flags": (w.h_power_ok.astype(int) + 2 * w.h_heater_on.astype(int) + 4 * w.h_ext.astype(int)).tolist(),
                 })
         body = json.dumps({"houses": self.houses, "cities": cities}).encode()
