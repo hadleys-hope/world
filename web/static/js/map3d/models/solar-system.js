@@ -1,5 +1,6 @@
 /** models/solar-system: procedural colony viewer. */
 import { state } from "../state.js";
+import { bodyPointToWorld, carryCameraFrame } from "../geometry/body-frame.js";
 import { createStar } from "./star.js";
 import {
   activeCentre,
@@ -19,6 +20,8 @@ export function buildSolarSystem() {
       radius: 4200,
       orbit: 27000,
       period: 2400,
+      spinPeriod: 2100,
+      obliquity: 0.06,
       phase: 0.4,
       color: 0xce8949,
       climate: "+310 °C / ACID CYCLONES",
@@ -29,6 +32,8 @@ export function buildSolarSystem() {
       radius: 3700,
       orbit: 48000,
       period: 5700,
+      spinPeriod: 2700,
+      obliquity: 0.19,
       phase: 2.5,
       color: 0xa55738,
       climate: "+85 °C / DUST STORMS",
@@ -39,6 +44,8 @@ export function buildSolarSystem() {
       radius: state.RP,
       orbit: 74000,
       period: 10800,
+      spinPeriod: 3000,
+      obliquity: 0.12,
       phase: 4.2,
       color: 0x8dabb9,
       climate: "−55 °C / FROZEN OCEAN",
@@ -49,17 +56,34 @@ export function buildSolarSystem() {
       radius: 12000,
       orbit: 101000,
       period: 17200,
+      spinPeriod: 2400,
+      obliquity: 0.28,
       phase: 5.8,
       color: 0x81bed2,
       climate: "+12 °C / OCEAN, FOREST",
       kind: 3,
     },
   ];
+  // Acheron predates the solar-system group. Move its surface roots together;
+  // stars, lights and camera-centred snow stay in inertial scene space.
+  const acheronRoots = state.scene.children.filter(
+    (o) => (o.isMesh && o !== state.weather?.tornado) || o === state.world,
+  );
   const star = createStar();
   state.scene.add(star);
   const bodies = specs.map((s, i) => {
     const body = new THREE.Group();
-    if (i === 2) return body;
+    body.name = s.name;
+    body.userData.spinAxis = new THREE.Vector3(
+      Math.sin(s.obliquity),
+      Math.cos(s.obliquity),
+      0,
+    );
+    if (i === 2) {
+      body.add(...acheronRoots);
+      state.scene.add(body);
+      return body;
+    }
     const geom = new THREE.SphereGeometry(s.radius, 128, 96),
       mat = new THREE.ShaderMaterial({
         uniforms: {
@@ -67,7 +91,7 @@ export function buildSolarSystem() {
           uKind: { value: s.kind },
           uLight: { value: new THREE.Vector3(1, 0.2, 0) },
         },
-        vertexShader: `varying vec3 vN;varying vec3 vP;void main(){vN=normal;vP=position;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}`,
+        vertexShader: `varying vec3 vN;varying vec3 vP;void main(){vN=normalize(mat3(modelMatrix)*normal);vP=position;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}`,
         fragmentShader: `uniform float uTime,uKind;uniform vec3 uLight;varying vec3 vN,vP;
  float hash(vec3 p){return fract(sin(dot(p,vec3(127.1,311.7,74.7)))*43758.5453);}
  float noise(vec3 p){vec3 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);return mix(mix(mix(hash(i),hash(i+vec3(1,0,0)),f.x),mix(hash(i+vec3(0,1,0)),hash(i+vec3(1,1,0)),f.x),f.y),mix(mix(hash(i+vec3(0,0,1)),hash(i+vec3(1,0,1)),f.x),mix(hash(i+vec3(0,1,1)),hash(i+vec3(1,1,1)),f.x),f.y),f.z);}
@@ -135,6 +159,7 @@ export function buildSolarSystem() {
     labels,
     epoch: 0,
     lastAt: performance.now(),
+    spinTime: 0,
     lastCentre: new THREE.Vector3(),
   };
   document
@@ -163,10 +188,22 @@ export function updateSolarSystem(now, dt) {
     }),
     home = positions[2];
   const before = activeCentre().clone();
+  const previousQuaternion = state.systemView
+    ? new THREE.Quaternion()
+    : ss.bodies[state.activeBody].quaternion.clone();
+  // Presentation rotation uses wall time, rather than accelerated simulation
+  // minutes. Returning from a background tab cannot fling the viewer around.
+  const elapsed = Math.max(0, Math.min(0.1, (now - ss.lastAt) / 1000));
+  if (!state.S?.paused) ss.spinTime += elapsed;
+  ss.lastAt = now;
   ss.star.position.copy(home).negate();
   ss.orbitGroup.position.copy(ss.star.position);
   ss.bodies.forEach((b, i) => {
     b.position.copy(positions[i]).sub(home);
+    b.quaternion.setFromAxisAngle(
+      b.userData.spinAxis,
+      (ss.spinTime / ss.specs[i].spinPeriod) * Math.PI * 2,
+    );
     if (b.userData.surface) {
       b.userData.surface.uniforms.uTime.value = time;
       b.userData.surface.uniforms.uLight.value
@@ -175,24 +212,27 @@ export function updateSolarSystem(now, dt) {
         .normalize();
     }
   });
-  if (state.activeBody !== 2 || state.systemView) {
-    const delta = activeCentre().clone().sub(before);
-    state.camera.position.add(delta);
-    state.controls.target.add(delta);
-    if (state.flyAnim) {
-      state.flyAnim.from.add(delta);
-      state.flyAnim.to.add(delta);
-      state.flyAnim.tfrom.add(delta);
-      state.flyAnim.tto.add(delta);
-    }
-  }
+  carryCameraFrame(
+    state,
+    before,
+    previousQuaternion,
+    activeCentre(),
+    state.systemView
+      ? new THREE.Quaternion()
+      : ss.bodies[state.activeBody].quaternion,
+  );
   ss.orbitGroup.visible = state.systemView || surfaceClearance() > state.RP * 2;
   state.world.visible = state.activeBody === 2 && !state.systemView;
   const detail =
     state.world.visible &&
-    state.camera.position.distanceTo(new THREE.Vector3(0, state.RP, 0)) < 6000;
+    state.camera.position.distanceTo(
+      bodyPointToWorld(2, new THREE.Vector3(0, state.RP, 0)),
+    ) < 6000;
   if (state.landscapePatch) state.landscapePatch.visible = detail;
   state.planetMat.uniforms.uDetail.value = detail ? 1 : 0;
+  state.planetMat.uniforms.uColony.value
+    .set(0, 1, 0)
+    .applyQuaternion(ss.bodies[2].quaternion);
   ss.labels.forEach((l, i) => {
     l.visible = state.systemView;
     l.position

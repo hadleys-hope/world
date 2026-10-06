@@ -1,3 +1,8 @@
+import {
+  bodyPointToWorld,
+  bodyDirectionToWorld,
+  worldPointToBody,
+} from "../../geometry/body-frame.js";
 import { dirAt } from "../klyaksa.js";
 /** Reuse the existing inspector and navigation controls; no new HUD layout. */
 import * as T from "three";
@@ -35,7 +40,7 @@ export function pickKlyaksa(ev, click) {
     state.selected = {
       kind: boat ? "boat" : "klyaksa-house",
       id: boat ? boat.id : hit.instanceId,
-      localPoint: hit.point.clone().sub(state.solarSystem.bodies[3].position),
+      localPoint: worldPointToBody(3, hit.point),
     };
     renderKlyaksaInfo();
   }
@@ -101,7 +106,7 @@ export function renderKlyaksaInfo() {
 export function focusKlyaksa() {
   if (!state.selected?.localPoint) return false;
   focusPoint(
-    state.selected.localPoint.clone().add(state.solarSystem.bodies[3].position),
+    bodyPointToWorld(3, state.selected.localPoint),
     state.selected.kind === "boat" ? 25 : 18,
   );
   return true;
@@ -123,16 +128,16 @@ export function visitKlyaksa(port = false, step = 1) {
     north = dirAt(x, y + 1, R)
       .sub(n)
       .normalize();
-  const p = n
-    .clone()
-    .multiplyScalar(R + (port ? 4 : R * 0.0035 + 12))
-    .add(state.solarSystem.bodies[3].position);
+  const p = n.clone().multiplyScalar(R + (port ? 4 : R * 0.0035 + 12));
   state.systemView = false;
   state.selected = null;
   document.getElementById("info").style.display = "none";
   focusPoint(
-    p,
+    bodyPointToWorld(3, p),
     port ? 240 : c.wall * 1.25,
-    n.clone().multiplyScalar(0.8).addScaledVector(north, -0.6),
+    bodyDirectionToWorld(
+      3,
+      n.clone().multiplyScalar(0.8).addScaledVector(north, -0.6),
+    ),
   );
 }

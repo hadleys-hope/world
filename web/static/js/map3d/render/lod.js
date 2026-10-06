@@ -1,3 +1,4 @@
+import { worldPointToBody } from "../geometry/body-frame.js";
 /** render/lod: procedural colony viewer. */
 import { state } from '../state.js';
 import { syncMedium } from '../models/habitat.js';
@@ -5,9 +6,10 @@ import { makeHouse } from '../models/houses.js';
 import * as THREE from 'three';
 export function updateDetail() {
   if (!state.housesMesh || ++state.detailFrame % 10 !== 0) return;
-  const near = state.houseShells.map((h, i) => [state.camera.position.distanceTo(h.base), i]).sort((a, b) => a[0] - b[0]);
+  const localCamera = worldPointToBody(2, state.camera.position);
+  const near = state.houseShells.map((h, i) => [localCamera.distanceTo(h.base), i]).sort((a, b) => a[0] - b[0]);
   const wanted = new Set(near.filter(x => x[0] < 480).slice(0, 32).map(x => x[1]));
-  if (state.selected?.kind === 'house' && state.camera.position.distanceTo(state.houseShells[state.selected.id].base) < 1000) wanted.add(state.selected.id);
+  if (state.selected?.kind === 'house' && localCamera.distanceTo(state.houseShells[state.selected.id].base) < 1000) wanted.add(state.selected.id);
   const zero = new THREE.Matrix4().makeScale(0, 0, 0);
   for (const [i, v] of state.houseDetails) {
     if (!wanted.has(i)) {

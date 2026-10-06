@@ -1,3 +1,4 @@
+import { worldDirectionToBody, bodyPointToWorld } from "../geometry/body-frame.js";
 /** render/frame: procedural colony viewer. */
 import { state } from "../state.js";
 import { activeCentre, surfaceClearance, updateCameraMotion } from "../camera.js";
@@ -159,8 +160,8 @@ export function frame() {
       tor.material.opacity += (0.35 - tor.material.opacity) * 0.02;
       const ang = t * 0.05;
       const [tx, ty] = [Math.cos(ang) * 1100 + 300, Math.sin(ang) * 900];
-      tor.position.copy(sph(tx, ty, 130));
-      tor.quaternion.copy(quatAt(tx, ty));
+      tor.position.copy(bodyPointToWorld(2, sph(tx, ty, 130)));
+      tor.quaternion.copy(state.solarSystem.bodies[2].quaternion).multiply(quatAt(tx, ty));
       tor.rotateY(t * 6);
     } else if (state.weather.tornado.visible) {
       const tor = state.weather.tornado;
@@ -309,12 +310,13 @@ function keepAboveGround() {
   _dir.divideScalar(dist || 1);
   let floor;
   if (state.activeBody === 2) {
-    const [x, y] = normalXY(_dir);
+    const [x, y] = normalXY(worldDirectionToBody(2, _dir));
     floor = state.RP + Math.max(surfaceHeight(x, y), -10) + 1.5;
   } else {
     const spec = state.solarSystem?.specs[state.activeBody];
     if (!spec) return;
-    floor = spec.radius * (1 + Math.max(0, bodyHeight(spec.kind, _dir.x, _dir.y, _dir.z))) + 6;
+    const local = worldDirectionToBody(state.activeBody, _dir);
+    floor = spec.radius * (1 + Math.max(0, bodyHeight(spec.kind, local.x, local.y, local.z))) + 1.5;
   }
   if (dist < floor) state.camera.position.copy(centre).addScaledVector(_dir, floor);
 }

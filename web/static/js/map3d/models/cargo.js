@@ -1,3 +1,4 @@
+import { bodyPointToWorld } from "../geometry/body-frame.js";
 /** models/cargo: procedural colony viewer. */
 import { state } from '../state.js';
 import { localGroup } from '../geometry/objects.js';
@@ -157,7 +158,7 @@ export function updateCargo(s) {
     const q = quatAt(r.x, r.y, -r.heading),
       p = sph(r.x - Math.sin(r.heading) * 2.2, r.y + Math.cos(r.heading) * 2.2, 1.08).add(new THREE.Vector3(-7 * .95, 1.04 * .95, 0).applyQuaternion(q));
     state.cargoYard.updateMatrixWorld(true);
-    target.copy(state.cargoYard.worldToLocal(p));
+    target.copy(state.cargoYard.worldToLocal(bodyPointToWorld(2, p)));
   }
   const xx = sx + (target.x - sx) * travel,
     zz = sz + (target.z - sz) * travel,

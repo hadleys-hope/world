@@ -53,7 +53,7 @@ export function buildAcheronLife(steps) {
       },
     });
     if (state.seaSphere) state.seaSphere.visible = false;
-    state.scene.add(water);
+    (state.solarSystem?.bodies[2] || state.scene).add(water);
     state.acheronWater = water;
   });
   // 2. hot springs and their steam

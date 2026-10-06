@@ -1,5 +1,5 @@
 /** render/ground: what the ground is made of, close up. The landscape around the colony keeps its lit,
- * shadow-receiving standard material; this adds world-space detail at four scales (0.5 m to 300 m), snow on
+ * shadow-receiving standard material; this adds planet-local detail at four scales (0.5 m to 300 m), snow on
  * the flats and bare rock on the slopes, wet dark ground at the waterline, and a lawn under the dome. No
  * texture to pixelate when you land: every pixel is computed where it is. */
 import { GLSL_NOISE, WATER_LEVEL } from "../geometry/noise.js";
@@ -9,20 +9,20 @@ export function detailGround(material, { radius, dome = 0 }) {
     shader.uniforms.uPR = { value: radius };
     shader.uniforms.uDome = { value: dome };
     shader.vertexShader = shader.vertexShader
-      .replace("#include <common>", "#include <common>\nvarying vec3 vGW;")
-      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvGW = (modelMatrix * vec4(transformed, 1.0)).xyz;");
+      .replace("#include <common>", "#include <common>\nvarying vec3 vGP;")
+      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvGP = transformed;");
     shader.fragmentShader = shader.fragmentShader
-      .replace("#include <common>", `#include <common>\nvarying vec3 vGW; uniform float uPR, uDome;\n${GLSL_NOISE}`)
+      .replace("#include <common>", `#include <common>\nvarying vec3 vGP; uniform float uPR, uDome;\n${GLSL_NOISE}`)
       .replace(
         "#include <color_fragment>",
         `#include <color_fragment>
         {
-          vec3 up = normalize(vGW);
-          float alt = length(vGW) - uPR;                                   // metres above the datum
+          vec3 up = normalize(vGP);
+          float alt = length(vGP) - uPR;                                   // metres above the datum
           float arc = acos(clamp(up.y, -1.0, 1.0)) * uPR;                  // distance from the colony centre
-          vec3 fn = normalize(cross(dFdx(vGW), dFdy(vGW)));
+          vec3 fn = normalize(cross(dFdx(vGP), dFdy(vGP)));
           float flatness = abs(dot(fn, up));
-          float n1 = n3(vGW * 1.9), n2 = n3(vGW * 0.31), n3v = n3(vGW * 0.045), n4 = n3(vGW * 0.004);
+          float n1 = n3(vGP * 1.9), n2 = n3(vGP * 0.31), n3v = n3(vGP * 0.045), n4 = n3(vGP * 0.004);
           float grain = 0.82 + 0.18 * n1 + 0.14 * (n2 - 0.5);
           vec3 snow = mix(vec3(0.80, 0.84, 0.90), vec3(0.93, 0.95, 0.98), n2) * (0.94 + 0.06 * n1);
           vec3 rock = mix(vec3(0.20, 0.19, 0.19), vec3(0.42, 0.40, 0.37), n3v) * (0.75 + 0.5 * n1);

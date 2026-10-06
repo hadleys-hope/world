@@ -3,6 +3,7 @@ import { startSailing } from "./models/urban/marine.js";
 /** camera: procedural colony viewer. */
 import { logicalKey } from "./keys.js";
 import { state } from "./state.js";
+import { bodyPointToWorld, bodyDirectionToWorld } from "./geometry/body-frame.js";
 import { startDriving, stopDriving, updateDriving } from "./driving.js";
 import { goHome, switchPlanet } from "./models/solar-system.js";
 import * as THREE from "three";
@@ -97,7 +98,9 @@ export function rotateCamera(dx, dy) {
     right = new THREE.Vector3(1, 0, 0).applyQuaternion(state.camera.quaternion),
     up =
       state.cameraMode === "orbit"
-        ? new THREE.Vector3(0, 1, 0)
+        ? (state.systemView
+          ? new THREE.Vector3(0, 1, 0)
+          : bodyDirectionToWorld(state.activeBody, new THREE.Vector3(0, 1, 0)))
         : state.camera.position.clone().sub(center).normalize();
   const scale =
     state.cameraMode === "orbit"
@@ -224,15 +227,15 @@ export function focusSelection() {
   if (!state.selected) return;
   if (state.selected.kind === "rover") {
     const rv = state.rovers[state.selected.extra || state.selected.id];
-    if (rv) focusPoint(rv.g.position, 12);
+    if (rv) focusPoint(bodyPointToWorld(2, rv.g.position), 12);
     return;
   }
   if (state.selected.kind === "pole") {
     const meter = state.cabinetMeters[state.selected.id];
     focusPoint(
-      meter.position,
+      bodyPointToWorld(2, meter.position),
       3,
-      new THREE.Vector3(0, 0.15, 1).applyQuaternion(meter.quaternion),
+      bodyDirectionToWorld(2, new THREE.Vector3(0, 0.15, 1).applyQuaternion(meter.quaternion)),
     );
     return;
   }
@@ -240,7 +243,7 @@ export function focusSelection() {
     const h = state.houseShells[state.selected.id],
       dim = state.DIM[state.G.houses.type[state.selected.id]];
     focusPoint(
-      h.base.clone().addScaledVector(h.base.clone().normalize(), dim[1] / 2),
+      bodyPointToWorld(2, h.base.clone().addScaledVector(h.base.clone().normalize(), dim[1] / 2)),
       Math.max(dim[0], dim[2]) * 1.5,
     );
     return;

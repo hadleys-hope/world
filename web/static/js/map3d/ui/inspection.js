@@ -1,3 +1,4 @@
+import { bodyPointToWorld, bodyDirectionToWorld } from "../geometry/body-frame.js";
 import { pickKlyaksa, renderKlyaksaInfo, focusKlyaksa } from "../models/urban/inspection.js";
 /** ui/inspection: procedural colony viewer. */
 import { state } from "../state.js";
@@ -25,11 +26,12 @@ export function flyTo(x, y, dist) {
     .clone()
     .add(n.multiplyScalar(dist * 0.85))
     .add(back.multiplyScalar(dist * 0.55));
+  state.camera.up.copy(bodyDirectionToWorld(2, p.clone().normalize()));
   state.flyAnim = {
     from: state.camera.position.clone(),
-    to: pos,
+    to: bodyPointToWorld(2, pos),
     tfrom: state.controls.target.clone(),
-    tto: p,
+    tto: bodyPointToWorld(2, p),
     t0: performance.now(),
   };
 }
@@ -532,14 +534,12 @@ export function initialize() {
         else if (f === "tower") flyTo(c.tower_pos[0], c.tower_pos[1], 320);
         else if (f === "mine") flyTo(c.mine_pos[0], c.mine_pos[1], 320);
         else if (f === "city") flyTo(0, 0, 1500);
-        else
-          state.flyAnim = {
-            from: state.camera.position.clone(),
-            to: new THREE.Vector3(1200, state.RP + 4200, 3800),
-            tfrom: state.controls.target.clone(),
-            tto: new THREE.Vector3(0, state.RP, 0),
-            t0: performance.now(),
-          };
+        else {
+          flyTo(0, 0, 5000);
+          if (state.flyAnim) state.flyAnim.to.copy(
+            bodyPointToWorld(2, new THREE.Vector3(1200, state.RP + 4200, 3800)),
+          );
+        }
       }),
   );
   state.ray = new THREE.Raycaster();

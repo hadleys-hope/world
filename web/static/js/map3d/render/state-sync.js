@@ -1,3 +1,4 @@
+import { worldPointToBody } from "../geometry/body-frame.js";
 /** render/state-sync: procedural colony viewer. */
 import { state } from "../state.js";
 import { build } from "../build.js";
@@ -547,7 +548,7 @@ export function onState(s, first) {
     }
     rv.lab.visible =
       !r.name.startsWith("transit") &&
-      state.camera.position.distanceTo(rv.g.position) < 140;
+      worldPointToBody(2, state.camera.position).distanceTo(rv.g.position) < 140;
     retext(
       rv.lab,
       `${r.name} ${r.state.toLowerCase().replace(/_/g, " ")}`,

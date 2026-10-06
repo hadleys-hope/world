@@ -1,3 +1,4 @@
+import { bodyPointToWorld, bodyDirectionToWorld } from "./geometry/body-frame.js";
 import { stopSailing } from "./models/urban/marine.js";
 /** driving: procedural colony viewer. */
 import { state } from "./state.js";
@@ -242,11 +243,15 @@ export function updateDriving(dt, now) {
       .clone()
       .add(behind)
       .addScaledVector(normal, Math.sin(d.camPitch) * d.camDistance + 1.4);
+  bodyPointToWorld(2, cam, cam);
+  bodyPointToWorld(2, target, target);
+  const worldNormal = bodyDirectionToWorld(2, normal);
+  const worldForward = bodyDirectionToWorld(2, forward);
   state.camera.position.lerp(cam, d.camReady ? 1 - Math.exp(-7 * dt) : 1);
-  state.camera.up.copy(normal);
+  state.camera.up.copy(worldNormal);
   state.controls.target
     .copy(target)
-    .addScaledVector(forward, Math.min(5, Math.abs(d.v) * 0.16));
+    .addScaledVector(worldForward, Math.min(5, Math.abs(d.v) * 0.16));
   state.camera.lookAt(state.controls.target);
   d.camReady = true;
   nearClip();
