@@ -1,5 +1,7 @@
 # Klyaksa: cities, waterfronts and local exploration
 
+> Historical notes for the first patch. The [second infrastructure series](klyaksa-infrastructure.md) supersedes its road layout, port/fleet counts and visual vehicle behavior.
+
 This patch is based on the supplied October archive. It changes the 3D renderer and adds read-only fields to the Klyaksa presentation API. Existing domain calculations, MQTT controllers, the authored HUD layout, Docker, Compose and deployment workflows are preserved.
 
 ## What to inspect

@@ -19,6 +19,7 @@ import {
   blockedBerth,
 } from "../web/static/js/map3d/models/urban/marine.js";
 import { syncCityVisuals } from "../web/static/js/map3d/models/urban/industry.js";
+import { klyaksaPatch } from "../web/static/js/map3d/models/worlds.js";
 const fixture = JSON.parse(
   fs.readFileSync(
     new URL("../test-results/visual-fixture.json", import.meta.url),
@@ -31,12 +32,23 @@ const R = 12000,
 state.klyaksaPlan = Promise.resolve(fixture.geometry);
 state.klyaksaPlanData = await klyaksaSites(R);
 state.klyaksaLod = [];
+// Production builds its terrain sampler before placing service and port roads.
+// Keep terrain outside the object-only draw budget, but use its actual triangles.
+const terrainMaterial = new T.MeshBasicMaterial({ side: T.DoubleSide });
+terrainMaterial.userData.hi = 0.05;
+klyaksaPatch({ radius: R }, terrainMaterial, {
+  uTime: env.uTime,
+  uSun: env.uLight,
+});
 buildKlyaksa(steps, body, R, env);
-const costs = [];
+const costs = [],
+  stepNames = [];
 while (steps.length) {
-  assert(costs.length < 1000, "Build queue must terminate");
+  assert(costs.length < 5000, "Build queue must terminate");
   const start = performance.now();
-  steps.shift()();
+  const step = steps.shift();
+  step();
+  stepNames.push(step.task || step.toString().slice(0, 100));
   costs.push(performance.now() - start);
 }
 syncCityVisuals(fixture.state, body, R);
@@ -66,8 +78,8 @@ for (const city of fixture.geometry.cities) {
   }
   offset += city.houses;
 }
-assert.equal(state.klyaksaPorts.length, 2);
-assert.equal(state.klyaksaBoats.length, 14);
+assert.equal(state.klyaksaPorts.length, 3);
+assert.equal(state.klyaksaBoats.length, 24);
 for (const boat of state.klyaksaBoats) {
   assert(
     !blockedBerth(boat.x, boat.y, boat),
@@ -182,13 +194,17 @@ console.log(
   JSON.stringify(
     {
       houses: expected,
-      ports: 2,
-      vessels: 14,
+      ports: state.klyaksaPorts.length,
+      vessels: state.klyaksaBoats.length,
       pickChecks: 18,
       meshes,
       views: reports,
       buildSteps: costs.length,
       maxBuildStepMs: Math.round(Math.max(...costs)),
+      slowSteps: costs
+        .map((ms, i) => ({ ms: Math.round(ms), step: stepNames[i] }))
+        .sort((a, b) => b.ms - a.ms)
+        .slice(0, 5),
     },
     null,
     2,

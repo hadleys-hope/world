@@ -361,6 +361,7 @@ export function* buildWaterfrontSteps(body, R, plan, env, cityPoint) {
       return m.finish();
     };
     for (let k = 0; k < 36; k++) {
+      if (Math.abs(-158 + k * 9) < 18) continue; // Keep the customs access throat clear.
       b.add("shipping-containers", container, -65, -158 + k * 9, 4);
       if (k % 4 === 0)
         b.add("shipping-containers", container, -65, -158 + k * 9, 6.7);
@@ -393,18 +394,20 @@ export function* buildWaterfrontSteps(body, R, plan, env, cityPoint) {
       b.add("crane", crane, -10, v, 4, 1.65, -a);
     yield; // Warehouses, containers and cranes are now staged.
     // Container terminal: tractor lanes, customs gate, workshop apron and quay-edge safety rails.
-    shortStrip(surface, [-44, -188], [-44, 188], 12, 4.08, 0x38454b);
-    shortStrip(surface, [-44, -188], [-44, 188], 0.18, 4.12, 0xead9a1);
+    shortStrip(surface, [-56, -188], [-56, 188], 12, 4.08, 0x38454b);
+    shortStrip(surface, [-56, -188], [-56, 188], 0.18, 4.12, 0xead9a1);
+    shortStrip(surface, [-80, 0], [-56, 0], 12, 4.09, 0x38454b);
     b.add(
       "port-gate",
       () =>
         new Model()
           .box(0, 2, 0, 7, 4, 5, palette.concrete)
           .box(0, 3, 2.55, 5, 1.1, 0.1, palette.glass)
-          .beam([-8, 2, 0], [8, 2, 0], 0.14, 0xdfba63)
+          .beam([0, 0, -7], [0, 2, -7], 0.14, palette.metal)
+          .beam([0, 2, -7], [0, 7, -10], 0.14, 0xdfba63)
           .finish(),
-      -62,
-      0,
+      -72,
+      14,
       4,
     );
     for (let v = -180; v <= 180; v += 30) {

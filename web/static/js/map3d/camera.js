@@ -2,6 +2,8 @@ import { focusKlyaksa, visitKlyaksa } from "./models/urban/inspection.js";
 import { startSailing } from "./models/urban/marine.js";
 /** camera: procedural colony viewer. */
 import { logicalKey } from "./keys.js";
+import { clippingNear } from "./geometry/view-precision.js";
+export { clippingNear } from "./geometry/view-precision.js";
 import { state } from "./state.js";
 import { bodyPointToWorld, bodyDirectionToWorld } from "./geometry/body-frame.js";
 import { startDriving, stopDriving, updateDriving } from "./driving.js";
@@ -34,8 +36,8 @@ export function surfaceClearance() {
 }
 
 export function nearClip() {
-  const clearance = surfaceClearance();
-  state.camera.near = Math.max(0.005, Math.min(15, clearance * 0.0006));
+  state.camera.near = clippingNear(surfaceClearance(),
+    state.camera.position.distanceTo(state.controls.target));
   state.camera.updateProjectionMatrix();
 }
 

@@ -1,7 +1,7 @@
 import { worldDirectionToBody, bodyPointToWorld } from "../geometry/body-frame.js";
 /** render/frame: procedural colony viewer. */
 import { state } from "../state.js";
-import { activeCentre, surfaceClearance, updateCameraMotion } from "../camera.js";
+import { activeCentre, surfaceClearance, clippingNear, updateCameraMotion } from "../camera.js";
 import { normalXY, surfaceHeight } from "../geometry/planet.js";
 import { bodyHeight } from "../geometry/noise.js";
 import { buildAcheronLife } from "../models/acheron.js";
@@ -53,13 +53,10 @@ export function frame() {
     buildOasis(state.lifeSteps);
     buildAcheronLife(state.lifeSteps);
     upgradeWorlds(state.lifeSteps);
-    const next = () => {
-      const step = state.lifeSteps.shift();
-      if (!step) return;
-      const t0 = performance.now();
-      step();
-      (state.lifeTimes ||= []).push(Math.round(performance.now() - t0));
-      (window.requestIdleCallback || ((f) => setTimeout(f, 50)))(next, { timeout: 1500 });
+    const next = (deadline) => {
+      const pending = drainBuildQueue(state.lifeSteps,
+        cost => (state.lifeTimes ||= []).push(Math.round(cost)), deadline);
+      if (pending) (window.requestIdleCallback || ((f) => setTimeout(f, 16)))(next, { timeout: 1500 });
     };
     setTimeout(next, 400);
   }
@@ -272,11 +269,8 @@ export function frame() {
   }
   state.sunTarget.position.copy(state.controls.target);
   const sd = state.camera.position.distanceTo(state.controls.target);
-  const desiredNear = Math.max(
-    0.005,
-    Math.min(15, surfaceClearance() * 0.0006),
-  );
-  if (Math.abs(state.camera.near - desiredNear) > 0.01) {
+  const desiredNear = clippingNear(surfaceClearance(), sd);
+  if (Math.abs(state.camera.near - desiredNear) > Math.max(0.0005, desiredNear * 0.02)) {
     state.camera.near = desiredNear;
     state.camera.updateProjectionMatrix();
   }
@@ -320,3 +314,4 @@ function keepAboveGround() {
   }
   if (dist < floor) state.camera.position.copy(centre).addScaledVector(_dir, floor);
 }
+import { drainBuildQueue } from "./build-queue.js";
