@@ -390,6 +390,7 @@ class World:
         d = self.__dict__.copy()
         d.pop("lock", None)
         d.pop("bridge", None)
+        d.pop("_elev_cache", None)   # a speed-up, rebuilt on demand; not worth saving
         return d
 
     def __setstate__(self, d):

@@ -126,6 +126,18 @@ def traffic_step(w):
             w.cargo["progress"] = 0
 
 
+def _elevation(w, x, y):
+    """Ground height at a rover's waypoint, remembered exactly: a rover heads for the same waypoint for many
+    ticks, and site_elevation (terrain plus coast) costs ~10 us a call. Same values as before, bit for bit."""
+    cache = w.__dict__.setdefault("_elev_cache", {})
+    h = cache.get((x, y))
+    if h is None:
+        if len(cache) > 50_000:
+            cache.clear()
+        h = cache[(x, y)] = site_elevation(x, y, w.cfg)
+    return h
+
+
 def rover_move(w: World, r: Rover):
     """Advance along the planned route. Returns True when the route is finished."""
     if r.wait > 0:
@@ -144,7 +156,7 @@ def rover_move(w: World, r: Rover):
     tx, ty = r.route[0]
     dx, dy = tx - r.x, ty - r.y
     d = math.hypot(dx, dy)
-    grade = abs(site_elevation(tx, ty, w.cfg) - site_elevation(r.x, r.y, w.cfg)) / max(
+    grade = abs(_elevation(w, tx, ty) - site_elevation(r.x, r.y, w.cfg)) / max(
         d, 1
     )
     target_speed = (

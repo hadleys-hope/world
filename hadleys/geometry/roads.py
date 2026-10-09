@@ -74,8 +74,23 @@ def _candidate_pairs(segments, cell=50.0, margin=0.02):
     return sorted(pairs)
 
 
+_LAYOUT_BY_ID = {}
+
+
 def colony_layout(c):
-    """One road/parcel plan shared by geometry, intersections and vehicle routes."""
+    """One road/parcel plan shared by geometry, intersections and vehicle routes.
+
+    Called for every rover on every tick, so the common case must be cheap: the same config object gives
+    back the same plan without rebuilding the cache key (a tuple of ~20 config values) each time."""
+    hit = _LAYOUT_BY_ID.get(id(c))
+    if hit is not None and hit[0] is c:
+        return hit[1]
+    plan = _colony_layout(c)
+    _LAYOUT_BY_ID[id(c)] = (c, plan)
+    return plan
+
+
+def _colony_layout(c):
     key = tuple(
         c[k] if not isinstance(c[k], (list, tuple)) else tuple(c[k])
         for k in (
