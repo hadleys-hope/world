@@ -29,7 +29,7 @@
     "3D view": "3D-вид", "2D view": "2D-вид", Bus: "Шина", Finance: "Финансы", Speed: "Скорость", Console: "Консоль", Resume: "Продолжить",
     Alerts: "Тревоги", "All controls": "Все клавиши", "Look around": "Осмотр", Fly: "Полёт", "Inspect and drive": "Осмотр и вождение",
     orbit: "орбита", "zoom in and out": "приблизить и отдалить", "whole solar system": "вся система", "jump to a planet": "перейти к планете",
-    "free flight on / off": "свободный полёт", move: "движение", "down / up": "вниз / вверх", "flight speed": "скорость полёта",
+    "free flight on / off": "свободный полёт", move: "движение", "roll": "крен", "level the horizon": "выровнять горизонт", "down / up": "вниз / вверх", "flight speed": "скорость полёта",
     "lock the mouse": "захватить мышь", "inspect what you point at": "осмотреть объект под курсором", "drive the selected rover": "вести выбранный ровер",
     "park and get out": "припарковаться и выйти", console: "консоль", "this sheet": "эта шпаргалка", fly: "полёт", zoom: "масштаб", inspect: "осмотр",
     "Where the money goes": "Куда идут деньги", "This month": "Этот месяц", "Last month": "Прошлый месяц",

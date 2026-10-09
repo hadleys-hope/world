@@ -182,6 +182,26 @@ export function updateCameraMotion(now) {
       move.normalize().multiplyScalar(state.flightSpeed);
       state.flyAnim = null;
     }
+    // Horizon hold: a straight flight over a round planet tilts the horizon, because "down" turns under you.
+    // Each frame the camera turns about its own forward axis towards the planet's up, a little (time constant
+    // 0.25 s), so the horizon stays level. Z/X roll by hand and switch the hold off; R switches it back on.
+    {
+      const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(state.camera.quaternion);
+      const rollKey = (state.cameraKeys.has("z") ? 1 : 0) - (state.cameraKeys.has("x") ? 1 : 0);
+      if (rollKey) {
+        state.horizonHold = false;
+        state.camera.quaternion.premultiply(new THREE.Quaternion().setFromAxisAngle(fwd, rollKey * 1.2 * dt)).normalize();
+      } else if (state.horizonHold !== false) {
+        const want = up.clone().sub(fwd.clone().multiplyScalar(up.dot(fwd)));
+        if (want.lengthSq() > 1e-6) {
+          want.normalize();
+          const cur = new THREE.Vector3(0, 1, 0).applyQuaternion(state.camera.quaternion);
+          const angle = Math.atan2(fwd.dot(cur.clone().cross(want)), cur.dot(want));
+          state.camera.quaternion.premultiply(new THREE.Quaternion().setFromAxisAngle(fwd, angle * (1 - Math.exp(-4 * dt)))).normalize();
+        }
+      }
+      state.camera.up.copy(new THREE.Vector3(0, 1, 0).applyQuaternion(state.camera.quaternion));
+    }
     state.flightVelocity.lerp(move, 1 - Math.exp(-18 * dt));
     const shift = state.flightVelocity.clone().multiplyScalar(dt);
     state.camera.position.add(shift);

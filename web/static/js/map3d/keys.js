@@ -1,7 +1,7 @@
 /** keys: shortcuts by physical key, so they work with any keyboard layout (Russian ЦФЫВ is still WASD). */
 const BY_CODE = {
   KeyW: "w", KeyA: "a", KeyS: "s", KeyD: "d", KeyQ: "q", KeyE: "e",
-  KeyF: "f", KeyL: "l", KeyM: "m", KeyC: "c", KeyH: "h",
+  KeyF: "f", KeyL: "l", KeyM: "m", KeyC: "c", KeyH: "h", KeyZ: "z", KeyX: "x", KeyR: "r",
 };
 
 export function logicalKey(e) {

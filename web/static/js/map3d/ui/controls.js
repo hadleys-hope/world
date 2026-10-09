@@ -301,6 +301,7 @@ export function initialize() {
     if (k === "m") {
       document.getElementById("panel-toggle").click();
     }
+    if (k === "r" && state.cameraMode === "flight") state.horizonHold = true;
     if (k === "c") {
       const box = document.querySelector('[data-l="cutaway"]');
       box.checked = !box.checked;
