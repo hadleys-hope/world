@@ -26,18 +26,40 @@
     const path = location.pathname.replace(/\/$/, '') || '/';
     const select = document.getElementById('city-select');
     if (select) {
+      // the native <select> pops up in the OS's colours (white on Linux); this menu is part of the bar
+      const box = document.createElement('div');
+      box.className = 'hh-cityp';
+      box.innerHTML = '<button type="button" class="hh-citybtn" aria-haspopup="listbox" aria-expanded="false"><span class="pl"></span><b>…</b><span class="n"></span><span class="chev" aria-hidden="true">▾</span></button><div class="hh-citymenu" role="listbox" hidden></div>';
+      select.replaceWith(box);
+      const btn = box.querySelector('button'), menu = box.querySelector('[role=listbox]');
+      const open = (on) => { menu.hidden = !on; btn.setAttribute('aria-expanded', String(on)); if (on) menu.querySelector('[aria-selected=true]')?.focus(); };
+      btn.onclick = () => open(menu.hidden);
+      document.addEventListener('click', (e) => { if (!box.contains(e.target)) open(false); });
+      box.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') { open(false); btn.focus(); }
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          const items = [...menu.querySelectorAll('[role=option]')], i = items.indexOf(document.activeElement);
+          items[(i + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length]?.focus();
+          e.preventDefault();
+        }
+      });
       fetch('/cities.json').then((r) => r.json()).then((cities) => {
         const planets = [...new Set(cities.map((c) => c.planet))];
-        select.innerHTML = planets.map((p) => `<optgroup label="${p}">` + cities.filter((c) => c.planet === p)
-          .map((c) => `<option value="${c.id}">${c.name} · ${c.houses}</option>`).join('') + '</optgroup>').join('');
-        select.value = city;
+        menu.innerHTML = planets.map((p) => `<div class="grp"><span class="pl ${p.toLowerCase()}"></span>${p}<span class="n">${cities.filter((c) => c.planet === p).reduce((a, c) => a + c.houses, 0)} houses</span></div>` +
+          cities.filter((c) => c.planet === p).map((c) => `<button type="button" role="option" data-id="${c.id}" aria-selected="${c.id === city}"><span>${c.name}</span><span class="n">${c.houses}</span></button>`).join('')).join('');
+        menu.querySelectorAll('[role=option]').forEach((o) => (o.onclick = () => { localStorage.setItem('hh_city', o.dataset.id); location.reload(); }));
         const cur = cities.find((c) => c.id === city) || cities[0];
         window.HH_CITY_NAME = cur ? cur.name : '';
+        btn.querySelector('b').textContent = cur.name;
+        btn.querySelector('.n').textContent = cur.houses;
+        btn.querySelector('.pl').className = 'pl ' + cur.planet.toLowerCase();
         const sub = document.getElementById('brand-sub');
         if (sub && cur) sub.textContent = cur.planet === 'Klyaksa' ? `KLYAKSA · ${cur.name.toUpperCase()}` : 'LV-426 · ACHERON';
-      }).catch(() => { select.hidden = true; });
-      select.onchange = () => { localStorage.setItem('hh_city', select.value); location.reload(); };
+      }).catch(() => { box.hidden = true; });
     }
+    // the bar may wrap to two rows; everything placed under it reads its real height from --hh-bar-bottom
+    const bar = document.getElementById('hh-bar');
+    if (bar) new ResizeObserver(() => document.documentElement.style.setProperty('--hh-bar-bottom', bar.getBoundingClientRect().bottom + 'px')).observe(bar);
     document.querySelectorAll('.hh-nav a').forEach((a) => {
       if (a.dataset.page === path) a.setAttribute('aria-current', 'page');
     });

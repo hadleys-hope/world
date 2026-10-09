@@ -7,7 +7,7 @@
 html { background: var(--hh-page); }
 body {
   font-family: var(--hh-font) !important; color: var(--hh-text); background: transparent !important;
-  padding: 88px 20px 20px !important; box-sizing: border-box;
+  padding: calc(var(--hh-bar-bottom, 72px) + 16px) 20px 20px !important; box-sizing: border-box;
 }
 body::before {
   content: ""; position: fixed; inset: -40px; z-index: -1;

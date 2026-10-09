@@ -10,14 +10,14 @@ body { font-family: var(--hh-font); }
 /* connection state: shown only while there is no colony to show */
 #banner { display: none; }
 body.offline #banner {
-  display: block; position: absolute; left: 50%; top: 92px; transform: translateX(-50%); z-index: 20;
+  display: block; position: absolute; left: 50%; top: calc(var(--hh-bar-bottom, 72px) + 20px); transform: translateX(-50%); z-index: 20;
   padding: 8px 16px; border-radius: 999px; background: var(--hh-glass); border: 1px solid var(--hh-line);
   color: var(--hh-text); font: 13px var(--hh-font); max-width: none; text-shadow: none;
 }
 
 /* controls strip, top left under the bar */
 #controls-strip {
-  position: absolute; left: 20px; top: 88px; z-index: 9; display: flex; align-items: center; gap: 12px;
+  position: absolute; left: 20px; top: calc(var(--hh-bar-bottom, 72px) + 16px); z-index: 9; display: flex; align-items: center; gap: 12px;
   padding: 6px 8px 6px 6px; font-size: 12px; color: var(--hh-text-2);
 }
 #controls-strip > span { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
@@ -34,7 +34,7 @@ body.offline #banner {
 
 /* every control, grouped by what you want to do */
 #help-sheet {
-  position: absolute; left: 20px; top: 138px; z-index: 12; width: min(780px, calc(100% - 40px)); box-sizing: border-box;
+  position: absolute; left: 20px; top: calc(var(--hh-bar-bottom, 72px) + 66px); z-index: 12; width: min(780px, calc(100% - 40px)); box-sizing: border-box;
   padding: 16px 20px 18px;
 }
 #help-sheet[hidden] { display: none; }
@@ -104,18 +104,18 @@ body:not(.panel-collapsed) #status-corner { display: none; }
 
 /* the console: a drawer on the right under the bar */
 #side {
-  right: 20px; top: 88px; bottom: 20px; width: 420px; border-radius: 16px; padding: 14px;
+  right: 20px; top: calc(var(--hh-bar-bottom, 72px) + 16px); bottom: 20px; width: 420px; border-radius: 16px; padding: 14px;
   background: var(--hh-glass); border: 1px solid var(--hh-line); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
   box-shadow: var(--hh-shadow); color: var(--hh-text); font-family: var(--hh-font); z-index: 10;
 }
 .panel-tabs { gap: 2px; padding: 4px; border-radius: 12px; background: var(--hh-chip); top: -14px; }
 .panel-tabs button { height: 36px; border-radius: 9px; font: 13px var(--hh-font); color: var(--hh-text-2); letter-spacing: 0; text-transform: none; }
 .panel-tabs button[aria-selected="true"] { background: var(--hh-acc-bg); color: var(--hh-acc-text); border-color: transparent; }
-#info { right: 20px; top: 138px; border-radius: 14px; border: 1px solid var(--hh-line); background: var(--hh-glass); color: var(--hh-text); font-family: var(--hh-font); }
+#info { right: 20px; top: calc(var(--hh-bar-bottom, 72px) + 66px); border-radius: 14px; border: 1px solid var(--hh-line); background: var(--hh-glass); color: var(--hh-text); font-family: var(--hh-font); }
 body:not(.panel-collapsed) #info { right: 456px; }
 #tip { border-radius: 10px; border: 1px solid var(--hh-line); background: var(--hh-glass-strong); color: var(--hh-text); font: 12px var(--hh-font); padding: 8px 12px; }
 #tip .tip-keys { display: flex; gap: 8px; align-items: center; margin-top: 6px; color: var(--hh-text-2); }
-#toast { top: 92px; left: 50%; transform: translateX(-50%); border-radius: 999px; background: var(--hh-glass); border: 1px solid var(--hh-line); font: 13px var(--hh-font); }
+#toast { top: calc(var(--hh-bar-bottom, 72px) + 20px); left: 50%; transform: translateX(-50%); border-radius: 999px; background: var(--hh-glass); border: 1px solid var(--hh-line); font: 13px var(--hh-font); }
 
 @media (max-width: 1100px) {
   #navigation-deck button { width: 76px; }

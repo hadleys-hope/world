@@ -38,7 +38,7 @@
   --hh-shadow: 0 10px 30px rgba(30, 40, 52, 0.12);
 }
 .hh-bar {
-  position: fixed; left: 20px; right: 20px; top: 16px; z-index: 60; height: 56px; box-sizing: border-box;
+  position: fixed; left: 20px; right: 20px; top: 16px; z-index: 60; min-height: 56px; box-sizing: border-box; padding-top: 6px !important; padding-bottom: 6px !important;
   display: flex; align-items: center; gap: 22px; padding: 0 12px 0 20px;
   background: var(--hh-glass); border: 1px solid var(--hh-line); border-radius: 16px;
   backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); box-shadow: var(--hh-shadow);
@@ -47,7 +47,7 @@
 .hh-brand { display: flex; flex-direction: column; gap: 2px; min-width: 140px; text-decoration: none; color: var(--hh-text); }
 .hh-brand b { font-size: 15px; font-weight: 600; letter-spacing: 0.22em; }
 .hh-brand span { font-family: var(--hh-mono); font-size: 10px; letter-spacing: 0.14em; color: var(--hh-dim); }
-.hh-nav { display: flex; gap: 2px; flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.hh-nav { display: flex; flex-wrap: wrap; gap: 2px; flex: 1; min-width: 0; }   /* tabs that do not fit go to a second row instead of disappearing */
 .hh-nav a { padding: 8px 12px; border-radius: 10px; text-decoration: none; color: var(--hh-text-2); white-space: nowrap; }
 .hh-nav a:hover { background: var(--hh-chip); color: var(--hh-text); }
 .hh-nav a[aria-current="page"] { background: var(--hh-acc-bg); color: var(--hh-acc-text); font-weight: 500; }
@@ -80,4 +80,21 @@ kbd, .hh-kbd {
   .hh-bar { height: auto; flex-wrap: wrap; padding: 8px 10px; gap: 8px; }
   .hh-nav { order: 3; flex-basis: 100%; }
 }
-.hh-city { height: 36px; border-radius: 10px; border: 1px solid var(--hh-line-strong); background: var(--hh-glass-strong); color: var(--hh-text); font: inherit; font-size: 13px; padding: 0 8px; max-width: 190px; }
+.hh-cityp { position: relative; flex-shrink: 0; }
+.hh-citybtn { display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 10px 0 12px; border-radius: 10px; border: 1px solid var(--hh-line-strong); background: var(--hh-glass-strong); color: var(--hh-text); font: inherit; font-size: 13px; cursor: pointer; }
+.hh-citybtn b { font-weight: 500; } .hh-citybtn .n, .hh-citymenu .n { font: 11px var(--hh-mono); color: var(--hh-dim); }
+.hh-citybtn .chev { color: var(--hh-dim); font-size: 11px; }
+.pl { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; background: #9fb6c9; box-shadow: inset -2px -2px 0 rgba(0,0,0,.25); }
+.pl.acheron { background: #b9cbd8; } .pl.klyaksa { background: #3f9a6e; }
+.hh-citymenu { position: absolute; right: 0; top: calc(100% + 8px); z-index: 80; min-width: 240px; padding: 6px; border-radius: 14px; background: var(--hh-glass-strong); border: 1px solid var(--hh-line-strong); box-shadow: var(--hh-shadow); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); }
+.hh-citymenu .grp { display: flex; align-items: center; gap: 8px; padding: 8px 10px 4px; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--hh-dim); }
+.hh-citymenu .grp .n { margin-left: auto; letter-spacing: 0; text-transform: none; }
+.hh-citymenu [role=option] { display: flex; width: 100%; justify-content: space-between; align-items: center; gap: 12px; padding: 8px 10px 8px 28px; border: 0; border-radius: 9px; background: transparent; color: var(--hh-text); font: inherit; font-size: 13px; cursor: pointer; text-align: left; }
+.hh-citymenu [role=option]:hover, .hh-citymenu [role=option]:focus-visible { background: var(--hh-chip); outline: none; }
+.hh-citymenu [role=option][aria-selected=true] { background: var(--hh-acc-bg); color: var(--hh-acc-text); }
+/* the menu sits over busy pages: opaque, and its options are list rows, not the pages' pill buttons */
+.hh-citymenu { background: #10151c !important; }
+[data-theme="light"] .hh-citymenu { background: #f6f7f9 !important; }
+.hh-citymenu [role=option] { border: 0 !important; border-radius: 9px !important; background: transparent !important; box-shadow: none !important; height: auto !important; min-height: 0 !important; padding: 8px 10px 8px 28px !important; }
+.hh-citymenu [role=option]:hover, .hh-citymenu [role=option]:focus-visible { background: var(--hh-chip) !important; }
+.hh-citymenu [role=option][aria-selected=true] { background: var(--hh-acc-bg) !important; color: var(--hh-acc-text) !important; }
