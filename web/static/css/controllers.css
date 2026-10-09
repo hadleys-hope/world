@@ -55,3 +55,4 @@ body > section.card, .bus-grid > section { margin-bottom: 14px; min-width: 0; }
 #houses-card #houses { max-height: 520px; background: transparent !important; border: 0 !important; backdrop-filter: none; }
 .grid { display: block; }
 #topic-card h2, #topic-card .tname { text-transform: none !important; letter-spacing: 0 !important; }
+#ht tbody tr { height: 21px; } #ht td { white-space: nowrap; overflow: hidden; }

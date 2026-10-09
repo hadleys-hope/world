@@ -28,7 +28,10 @@
       what: 'the state of the grid', fields: ['t', 'available_kw', 'demand_kw', 'shedding', 'reactor_mode', 'tariff_kwh'] },
     { id: 'tick', name: 'hh/tick', re: /^hh\/tick$/, from: 'world', to: ['watchers'], perTick: true, what: 'the simulation clock', fields: ['t', 'time'] },
   ];
-  let D = null, clock = { speed: 0, paused: true }, focus = 'sensors', lanes = [], packets = [], lastAt = 0, W = 0, H = 0, layoutKey = '';
+  let D = null, clock = { speed: 0, paused: true }, focus = 'sensors', lanes = [], packets = [], W = 0, H = 0, layoutKey = '';
+  const seenTopics = new Set();      // a batch topic, once seen, stays on the picture (no rebuild when the tail rolls)
+  let seenMsgs = new Set();          // tail entries already sent as packets
+  const MAX_PACKETS = 160, MAX_LABELS = 24;
 
   function rate(t) {
     if (!D || !D.mqtt.enabled || clock.paused) return 0;
@@ -40,11 +43,13 @@
     if (t.id === 'actuators') return D.tail.some((x) => /^hh\/batch/.test(x.topic)) ? 0 : m.in_per_s;
     return 0;
   }
-  const visible = () => TOPICS.filter((t) => !t.batch || D?.tail.some((x) => t.re.test(x.topic)));
+  const visible = () => {
+    for (const x of D?.tail || []) for (const t of TOPICS) if (t.batch && t.re.test(x.topic)) seenTopics.add(t.id);
+    return TOPICS.filter((t) => !t.batch || seenTopics.has(t.id));
+  };
 
   function layout() {
-    const stage = $('live-stage');
-    W = stage.clientWidth; H = stage.clientHeight;
+    if (!W || !H) return;                       // size comes from the ResizeObserver, never read in the loop
     const topics = visible();
     const key = topics.map((t) => t.id).join() + W + 'x' + H;
     if (key === layoutKey) return;
@@ -86,12 +91,17 @@
         path.setAttribute('stroke', tone);
         path.style.opacity = focus === t.id ? 0.55 : 0.14;
         svg.append(path);
-        lanes.push({ topic: t, part: j, path, len: path.getTotalLength(), tone, acc: Math.random() });
+        // sample the curve once; packets then move along the samples with no SVG queries per frame
+        const len = path.getTotalLength(), pts = new Float32Array(2 * 65);
+        for (let k = 0; k <= 64; k++) { const q = path.getPointAtLength((len * k) / 64); pts[2 * k] = q.x; pts[2 * k + 1] = q.y; }
+        lanes.push({ topic: t, part: j, path, len, pts, tone, acc: Math.random() });
       });
     });
   }
 
   function spawn(lane, bright, label) {
+    if (packets.length >= MAX_PACKETS) return;          // a busy bus shows as a full lane, not as a frozen page
+    if (label && packets.filter((p) => p.tag).length >= MAX_LABELS) label = null;
     const c = document.createElementNS(NS, 'circle');
     c.setAttribute('r', bright ? 4.5 : 2.4);
     c.setAttribute('fill', bright ? '#fff' : lane.tone);
@@ -126,7 +136,8 @@
         p.c.remove(); p.tag?.remove();
         return false;
       }
-      const pt = p.lane.path.getPointAtLength(p.t * p.lane.len);
+      const f = p.t * 64, k = Math.min(63, Math.floor(f)), u = f - k, a = p.lane.pts;
+      const pt = { x: a[2 * k] + (a[2 * k + 2] - a[2 * k]) * u, y: a[2 * k + 1] + (a[2 * k + 3] - a[2 * k + 1]) * u };
       p.c.setAttribute('cx', pt.x); p.c.setAttribute('cy', pt.y);
       p.c.style.opacity = p.lane.topic.id === focus || p.c.classList.contains('bright') ? 1 : 0.35;
       if (p.tag) { p.tag.setAttribute('x', pt.x + 7); p.tag.setAttribute('y', pt.y - 7); }
@@ -159,28 +170,34 @@
   }
   $('tail-all').onclick = () => { focus = ''; layoutKey = ''; layout(); tail(); $('topic-card').innerHTML = '<div class="dim">Click a topic in the picture above.</div>'; };
 
-  async function poll() {
+  let clockAt = 0;
+  async function onData(d) {
     try {
-      const [d, c] = await Promise.all([fetch('/bus.json').then((r) => r.json()), fetch('/clock.json').then((r) => r.json())]);
-      D = d; clock = c;
+      if (performance.now() - clockAt > 3000) { clock = await (await fetch('/clock.json')).json(); clockAt = performance.now(); }
+      D = d;
       layout();
+      const now = new Set(), fresh = [];
       for (const x of d.tail) {
-        if (x.at <= lastAt) continue;
+        const key = (x.at ?? '') + x.topic + x.body;
+        now.add(key);
+        if (!seenMsgs.has(key)) fresh.push(x);
+      }
+      const firstPoll = seenMsgs.size === 0;
+      seenMsgs = now;
+      for (const x of firstPoll ? [] : fresh.slice(-12)) {
         const t = TOPICS.find((y) => y.re.test(x.topic));
         const lane = lanes.find((l) => l.topic === t && l.part === 0);
         const id = (x.topic.match(/house\/(\d+)/) || [])[1];
         if (lane) spawn(lane, true, id ? '#' + id : x.topic.split('/').pop());
       }
-      lastAt = Math.max(lastAt, ...d.tail.map((x) => x.at), 0);
       document.querySelectorAll('[data-rate]').forEach((el) => {
         const r = rate(TOPICS.find((t) => t.id === el.dataset.rate));
         el.textContent = r ? (r < 10 ? r.toFixed(1) : Math.round(r)) + '/s' : '–';
       });
       details(); tail();
     } catch (e) { /* the picture keeps moving with what it has */ }
-    setTimeout(poll, 1000);
   }
-  window.addEventListener('resize', () => { layoutKey = ''; layout(); });
+  window.addEventListener('bus-data', (e) => onData(e.detail));   // controllers.js downloads /bus.json once a second
+  new ResizeObserver(([e]) => { W = e.contentRect.width; H = e.contentRect.height; layoutKey = ''; layout(); }).observe($('live-stage'));
   requestAnimationFrame(animate);
-  poll();
 })();
