@@ -29,9 +29,12 @@ def states(w):
     return Counter(m["state"] for m in w.crocs)
 
 
+CALM = {**CFG, "croc_raid_mean_days": 0}  # the calm flock alone; raids have their own tests below
+
+
 class Flock(unittest.TestCase):
     def setUp(self):
-        self.w = World()
+        self.w = World(CALM)
 
     def test_the_flock_roosts_on_dry_shore_at_night(self):
         w = self.w
@@ -100,7 +103,7 @@ class Flock(unittest.TestCase):
     def test_a_storm_or_a_shut_gate_keeps_them_on_the_shore(self):
         for name in ("storm", "lockdown"):
             with self.subTest(name):
-                w = World()
+                w = World(CALM)
                 if name == "storm":
                     w.storm_ticks = 10**6
                 else:
@@ -144,7 +147,7 @@ class Flock(unittest.TestCase):
 
     def test_the_incident_roll_calls_the_flock_without_extra_draws(self):
         """The wildlife incident is the existing roll; blaming a crocodile must not change the physics stream."""
-        a, b = World({**CFG, "p_animal": 1.0}), World({**CFG, "p_animal": 1.0, "flying_crocs": 0})
+        a, b = World({**CALM, "p_animal": 1.0}), World({**CALM, "p_animal": 1.0, "flying_crocs": 0})
         for w in (a, b):
             w.t = 11 * 60
         for m in a.crocs:
@@ -171,7 +174,7 @@ class Flock(unittest.TestCase):
         self.assertEqual(states(w), {"roost": 7}, "the call wears off and they go home in the dark")
 
     def test_the_physics_does_not_notice_the_flock(self):
-        a, b = World(), World({**CFG, "flying_crocs": 0})
+        a, b = World(CALM), World({**CALM, "flying_crocs": 0})
         self.assertEqual(b.crocs, [])
         for w in (a, b):
             w.t = 8 * 60  # the flock is on its way in
@@ -224,12 +227,122 @@ class Flock(unittest.TestCase):
         self.assertEqual(city.w.crocs, [])
 
     def test_other_colony_sizes(self):
-        w = World({**CFG, "houses_per_sector": 120, "houses_per_row": 20})
+        w = World({**CALM, "houses_per_sector": 120, "houses_per_row": 20})
         flock_only(w, 13 * 60)
         self.assertEqual(states(w)["roost"], 0)
         for m in w.crocs:
             self.assertLess(math.hypot(m["x"], m["y"]), w.cfg["wall_radius"])
             self.assertGreater(m["alt"], 20.0)
+
+
+class Raid(unittest.TestCase):
+    """A wild flock flies in, wrecks things through the ordinary incident system, and flies home."""
+
+    def raid_world(self):
+        w = World(CALM)
+        w.t = 10 * 60
+        return w
+
+    def run_raid(self, w, ticks=420):
+        wr, crossings, inside = w.cfg["wall_radius"], [], 0
+        for _ in range(ticks):
+            before = {m["id"]: math.hypot(m["x"], m["y"]) for m in w.crocs if m.get("raider")}
+            world_tick(w)
+            for m in w.crocs:
+                if m.get("raider"):
+                    r = math.hypot(m["x"], m["y"])
+                    inside = max(inside, sum(1 for k in w.crocs if k.get("raider") and math.hypot(k["x"], k["y"]) < wr))
+                    if before.get(m["id"], 0) >= wr > r:
+                        crossings.append((math.degrees(math.atan2(m["y"], m["x"])) % 360, m["z"]))
+        return crossings, inside
+
+    def croc_issues(self, w):
+        return Counter(i.kind for i in w.issues if i.cause == "flying crocodiles")
+
+    def test_a_raid_through_the_open_gate_wrecks_the_colony(self):
+        w = self.raid_world()
+        info = inject(w, "croc_raid")
+        self.assertIn("gathering", info["text"])
+        self.assertEqual(snapshot(w)["croc_raid"]["phase"], "gather")
+        crossings, inside = self.run_raid(w)
+        self.assertGreater(inside, 10, "they get in under the dome")
+        for angle, z in crossings:
+            self.assertAlmostEqual(angle, WEST_GATE * 60.0, delta=2.0, msg="only through the west gate")
+            self.assertLess(z, 12.0)
+        hits = self.croc_issues(w)
+        self.assertGreaterEqual(sum(hits.values()), 8)
+        self.assertGreater(hits["aeration_failure"], 0, "they foul the ventilation of houses")
+        self.assertTrue(any("flying crocodiles wrecked" in e[1] for log in w.h_log for e in log))
+        self.assertIsNone(w.croc_raid, "the raid is over")
+        self.assertEqual([m for m in w.crocs if m.get("raider")], [], "the wild flock went home")
+        self.assertEqual(len(w.crocs), 7)
+
+    def test_a_gate_shut_in_time_keeps_them_out_of_the_dome(self):
+        w = self.raid_world()
+        inject(w, "croc_raid")
+        inject(w, "croc_lock")
+        crossings, inside = self.run_raid(w)
+        self.assertEqual((crossings, inside), ([], 0))
+        hits = self.croc_issues(w)
+        self.assertTrue(hits, "they turn on what is outside")
+        self.assertLessEqual(set(hits), {"solar_damaged", "tower_line_broken"})
+        self.assertGreaterEqual(w.solar_health, 0.3 - 0.06, "droppings dim the panels, they do not destroy them")
+
+    def test_one_raid_at_a_time(self):
+        w = self.raid_world()
+        inject(w, "croc_raid")
+        self.assertIn("already", inject(w, "croc_raid")["text"])
+        self.assertEqual(sum(1 for m in w.crocs if m.get("raider")), CFG["croc_raid_size"])
+
+    def test_raids_come_by_themselves_only_by_day(self):
+        w = World({**CFG, "croc_raid_mean_days": 0.02})
+        starts = []
+        for _ in range(3 * 1440):
+            had = w.croc_raid is not None
+            w.t += 1
+            fauna_step(w)
+            if not had and w.croc_raid is not None:
+                starts.append(w.t // 60 % 24)
+        self.assertGreater(len(starts), 2)
+        self.assertTrue(all(7 <= h < 19 for h in starts), starts)
+
+    def test_the_bus_tells_the_houses(self):
+        """hh/env/weather carries croc_raid, so a house program can sense("croc_raid") and shut its vents."""
+        from unittest.mock import MagicMock, patch
+
+        from hadleys.integrations.mqtt import MqttBridge
+
+        def weather(w):
+            client = MagicMock()
+            with patch("paho.mqtt.client.Client", return_value=client):
+                bridge = MqttBridge(w, "localhost:1883")
+                client.is_connected.return_value = True
+                bridge.connected = True
+                bridge.publish()
+            sent = {call.args[0]: json.loads(call.args[1]) for call in client.publish.call_args_list}
+            return sent["hh/env/weather"]["croc_raid"]
+
+        w = self.raid_world()
+        self.assertEqual(weather(w), 0)
+        inject(w, "croc_raid")
+        self.assertEqual(weather(w), 1)
+
+    def test_save_and_load_mid_raid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            w = self.raid_world()
+            inject(w, "croc_raid")
+            for _ in range(80):
+                world_tick(w)
+            store = Store(directory)
+            store.save_world(w)
+            resumed = store.load_world()
+            for _ in range(150):
+                world_tick(w)
+                world_tick(resumed)
+            self.assertEqual(snapshot(resumed)["crocs"], snapshot(w)["crocs"])
+            self.assertEqual(snapshot(resumed)["croc_raid"], snapshot(w)["croc_raid"])
+            self.assertEqual(self.croc_issues(resumed), self.croc_issues(w))
+
 
 
 if __name__ == "__main__":

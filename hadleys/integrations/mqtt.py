@@ -144,6 +144,7 @@ class MqttBridge:
                     "t_out": round(w.t_out, 1),
                     "wind": round(w.wind, 1),
                     "storm": w.storm_ticks > 0,
+                    "croc_raid": int(bool(getattr(w, "croc_raid", None))),  # 1 from the warning until they are gone
                     "precip": w.precip,
                     "hour": round(hour, 2),
                     "night": w.is_night(),
