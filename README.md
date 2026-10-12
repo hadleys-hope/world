@@ -111,13 +111,17 @@ Map, left:
 - Poles with street lamps (glow when lit), power spans (moving dashes when energised), internet cable next to them, packets travelling from houses to the hub and the radio tower.
 - Ring road with a gate at every sector boundary (green open, red lockdown), waste bins at the ring, rovers: G garbage, S sludge hauler, E engineers, P plumber.
 - Red diamonds are xenomorphs, "!" markers are open issues.
+- Green darts are the flying crocodiles: native fauna that sleeps on the ocean shore, flies in through the
+  west gate after 07:00, soars under the dome, basks on the roofs of heated houses and flies home at 19:00.
+  A storm or a west-gate lockdown keeps the flock where it is; the wildlife that damages houses is one of them.
 
 Panel, right: time and speed, inject buttons, colony and sector budgets, power balance and
 load shedding level, reactor telemetry, per-sector table, open issues, event log, last monthly report.
 
 ## Inject
 
-`break span`, `fell pole`, `xenomorphs` (lockdown of a sector), `storm`, `cut trunk`
+`break span`, `fell pole`, `xenomorphs` (lockdown of a sector), `flying crocodiles` (the flock leaves the
+shore for the colony whatever the hour), `storm`, `cut trunk`
 (whole colony on UPS), `pump trip` (reactor RUNBACK, load shedding), `marines fire`
 (heat exchanger hit, SCRAM), `SCRAM`, `break road`, `+50k cr`.
 

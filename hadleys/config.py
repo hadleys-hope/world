@@ -57,6 +57,11 @@ CFG = {
     "medlab": (195.0, 244.0),
     "school": (315.0, 244.0),
     "walkers": 60,
+    # fauna: flying crocodiles roost on the ocean shore and soar over the houses by day (domains/fauna.py)
+    "flying_crocs": 7,  # size of the flock; 0 = none
+    "croc_bask_p": 0.004,  # per tick, a soaring crocodile comes down to bask on a heated roof
+    "dome_radius": 735.0,  # the glass dome the viewer draws over the colony (models/oasis.js):
+    "dome_height": 320.0,  # the flock keeps under it
     # environment (LV-426: minus 40..60, permanent dusk, storms)
     "t_mean": -45.0,
     "t_daily_amp": 8.0,

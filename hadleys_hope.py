@@ -27,6 +27,7 @@ from hadleys.domains.houses import (
 from hadleys.domains.water import water_step  # noqa: F401
 from hadleys.domains.internet import internet_step  # noqa: F401
 from hadleys.domains.people import walker_path_point, people_step  # noqa: F401
+from hadleys.domains.fauna import fauna_blame, fauna_call, fauna_init, fauna_step  # noqa: F401
 from hadleys.domains.security import (
     move_toward,
     street_path,

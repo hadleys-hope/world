@@ -50,6 +50,7 @@ STEPS = [
     "incidents_step",
     "roads_step",
     "people_step",
+    "fauna_step",
     "house_events",
     "pipes_audit",
     "finance_tick",

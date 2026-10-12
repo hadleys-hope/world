@@ -21,6 +21,7 @@
 | Роверы, грузовики, мусоровозы | `hadleys/domains/transport.py` |
 | Типы и состояния транспорта | `hadleys/enums.py`; данные — `hadleys/models.py` |
 | Интернет, люди, финансы, аварии, безопасность | Одноимённые файлы в `hadleys/domains/` |
+| Летающие крокодилы: поведение стаи | `hadleys/domains/fauna.py`; 3D-модель — `web/static/js/map3d/models/flying-crocs.js`; тесты — `tests/test_fauna.py` |
 | Деньги домохозяйств, счета, кредиты, банкротство | `hadleys/domains/households.py`; правила — `docs/FINANCE_RU.md` |
 | Профилирование и замеры до/после | `scripts/profile_run.py`, `scripts/bench_ticks.py`, `scripts/bench_mqtt.py`; результаты — `docs/PERF_RU.md` |
 | Баланс воды и стоков, счета объёмов | `hadleys/domains/hydraulics.py` (`water_balance`); описание — `docs/WATER_RU.md`; сценарий — `scripts/water_scenario.py` |

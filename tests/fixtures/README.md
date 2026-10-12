@@ -26,6 +26,6 @@ changes; do not regenerate merely to make a failing refactor test pass.
 - Same file, `month.events[*].text` of the month-close line only: "owners
   paid" became "owners billed". The figure is what the houses were billed;
   with household cash some of it can stay unpaid, so "paid" was wrong.
-- New API keys (`finance.households`, `houses.fin`, `houses.cash`,
+- New API keys (`crocs`, `finance.households`, `houses.fin`, `houses.cash`,
   `report.households`, `house.finance`) are removed by the normalisers in
   `tests/test_regression.py`, which also assert their golden-run values.

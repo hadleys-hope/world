@@ -76,7 +76,10 @@ class CityBusView:
 class City:
     def __init__(self, key, name, hps, per_row, at, offset, seed, saved=None):
         self.key, self.name, self.at, self.offset = key, name, at, offset
-        self.w = saved or World({**CFG, **CLIMATE, "seed": seed, "houses_per_sector": hps, "houses_per_row": per_row})
+        # the flying crocodiles are LV-426 fauna: none in the Klyaksa cities
+        self.w = saved or World(
+            {**CFG, **CLIMATE, "flying_crocs": 0, "seed": seed, "houses_per_sector": hps, "houses_per_row": per_row}
+        )
         self.w.speed = 20
         self.w.bridge = CityBusView(self)
 

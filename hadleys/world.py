@@ -11,6 +11,7 @@ import numpy as np
 import random
 import threading
 from hadleys.config import CFG, COSTS, colony_layout_cfg
+from hadleys.domains.fauna import fauna_init
 from hadleys.domains.households import households_init
 from hadleys.domains.hydraulics import UtilityNetwork, water_accounts
 from hadleys.domains.transport import make_traffic
@@ -380,6 +381,9 @@ class World:
 
         # ---- households: cash, bills, loans (domains/households.py) ----
         households_init(self)
+
+        # ---- fauna: the flock of flying crocodiles (domains/fauna.py) ----
+        fauna_init(self)
 
     # ---- pickling: drop the lock, recreate it on load ----
     def __getstate__(self):
