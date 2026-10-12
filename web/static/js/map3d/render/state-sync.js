@@ -271,7 +271,10 @@ export function onState(s, first) {
       ]);
     if (s.xenos.length)
       alerts.push([`${s.xenos.length} xenomorphs on the ground`, true]);
-    const overhead = (s.crocs || []).filter((k) => k.state !== "roost").length;
+    const raid = s.croc_raid;
+    if (raid && raid.phase === "gather") alerts.push([`Wild crocodiles gathering: raid in ${raid.left} min, shut the west gate`, true]);
+    else if (raid && raid.phase === "raid") alerts.push([`Crocodile raid: ${raid.hits} things wrecked${raid.blocked ? ", gate holds" : ""}`, true]);
+    const overhead = (s.crocs || []).filter((k) => k.state !== "roost" && !k.wild).length;
     if (overhead) alerts.push([`${overhead} flying crocodiles over the colony`, false]);
     s.sectors.forEach((x, i) => {
       if (x.lockdown > 0) alerts.push([`Lockdown sector ${i + 1}, ${x.lockdown} min left`, false]);

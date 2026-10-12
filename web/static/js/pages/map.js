@@ -4,7 +4,7 @@ const cv = document.getElementById('c'),
 let LAYER = 'colony',
   FOCUS = -1;
 const LEGEND = {
-  colony: [['#3a78c9', 'cold'], ['#f0a050', 'warm'], ['#e2574d', 'no power (frame)'], ['#5aa9ff', 'burst pipes (x)'], ['#9bd36a', 'flying crocodiles']],
+  colony: [['#3a78c9', 'cold'], ['#f0a050', 'warm'], ['#e2574d', 'no power (frame)'], ['#5aa9ff', 'burst pipes (x)'], ['#9bd36a', 'flying crocodiles'], ['#d9774a', 'crocodile raid']],
   water: [['#4aa3e0', 'supplied'], ['#55606c', 'no water'], ['#b9a7d6', 'burst pipe']],
   power: [['#e8c25a', 'grid'], ['#4f7fc4', 'on UPS'], ['#3a434d', 'no power']],
   network: [['#4fd1c5', 'online'], ['#3a434d', 'offline']],
@@ -467,11 +467,11 @@ function draw() {
   for (const m of S.marines) dot(m[0], m[1], 2.5, '#8be05a');
   // flying crocodiles: a dart along the heading, wings spread while in the air
   for (const k of S.crocs || []) {
-    const air = k.state !== 'roost' && k.state !== 'bask';
+    const air = !['roost', 'bask', 'attack', 'gather'].includes(k.state);
     ctx.save();
     ctx.translate(X(k.x), Y(k.y));
     ctx.rotate(k.heading);
-    ctx.fillStyle = '#9bd36a';
+    ctx.fillStyle = k.wild ? '#d9774a' : '#9bd36a';
     ctx.beginPath();
     ctx.moveTo(7, 0);
     ctx.lineTo(-5, air ? 6 : 2.5);

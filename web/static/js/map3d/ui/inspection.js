@@ -124,7 +124,7 @@ export function pick(ev, click) {
         : result.kind === "rover"
           ? `<b>${String(result.extra || result.id)}</b><div class="tip-keys">click, then <kbd>Enter</kbd> drive · <kbd>F</kbd> follow</div>`
           : result.kind === "croc"
-            ? `<b>Flying crocodile</b><br>${crocDoing((state.S.crocs || [])[result.extra])}<br>F / double-click: focus`
+            ? `<b>${(state.S.crocs || [])[result.extra]?.wild ? "Wild flying crocodile" : "Flying crocodile"}</b><br>${crocDoing((state.S.crocs || [])[result.extra])}<br>F / double-click: focus`
             : `<b>${result.kind} ${result.id}</b><br>F / double-click: focus`;
   tipHtml(tip, mx, my, html);
 }
@@ -138,6 +138,9 @@ function crocDoing(x) {
     dive: "coming down on house " + x.house,
     bask: "basking on the roof of house " + x.house,
     outbound: "flying home to the shore",
+    gather: "gathering on the cliffs for a raid",
+    raid: "raiding the colony",
+    attack: x.house > 0 ? "wrecking house " + x.house : "wrecking a power line or the solar field",
   }[x.state] || x.state;
 }
 

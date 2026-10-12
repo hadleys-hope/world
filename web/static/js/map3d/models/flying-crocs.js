@@ -5,9 +5,9 @@ import { clickable } from '../render/world.js';
 import { material } from './materials.js';
 import * as THREE from 'three';
 
-const MAX = 16; // pool cap; the simulation ships seven
+const MAX = 40; // pool cap: the colony's seven and a raid of two dozen
 const AWAY = new THREE.Vector3(0, -99999, 0); // hidden figures are parked here: the ray picker ignores `visible`
-const FLYING = { inbound: 1, soar: 1, dive: 1, outbound: 1 };
+const FLYING = { inbound: 1, soar: 1, dive: 1, outbound: 1, raid: 1 };
 let shapes = null;
 let wingTime = 0, lastNow = 0;
 
@@ -75,6 +75,10 @@ export function crocShapes() {
 /** Where every moving part should be for a state; `w` is wing-beat time in seconds, `k` the individual. */
 export function crocPose(what, w, k = 0) {
   const ph = k * 1.7;
+  if (what === 'attack') {
+    // on its target: wings half open for balance, jaws snapping, tail thrashing
+    return { flap: 0.6, sweep: 0.9, pitch: 0.25, bank: 0, jaw: 0.35 + 0.3 * Math.sin(w * 7 + ph), tail: 0.35 * Math.sin(w * 4 + ph) };
+  }
   if (!FLYING[what]) {
     // on the ground or on a roof: wings folded back along the body, a slow yawn while basking
     return {
@@ -98,6 +102,8 @@ function figure(k) {
   const s = crocShapes();
   const hide = material('croc-hide', 0x4c6a3a, { roughness: 0.9 });
   const skin = material('croc-wing', 0x6f8647, { roughness: 0.95, side: THREE.DoubleSide });
+  const wild = material('croc-wild', 0x5a3a2a, { roughness: 0.85 }); // the raiders: rust-brown sea-cliff crocodiles
+  const wildSkin = material('croc-wild-wing', 0x7a4a34, { roughness: 0.9, side: THREE.DoubleSide });
   const g = new THREE.Group(), rig = new THREE.Group();
   g.add(rig);
   rig.add(new THREE.Mesh(s.body, hide));
@@ -114,7 +120,10 @@ function figure(k) {
   g.visible = false;
   state.world.add(g);
   clickable(g, 'croc:' + k, 'croc', k);
-  return { g, rig, jaw, tail, wingR, wingL, from: null, to: null, q: null, t0: 0, id: null, state: 'roost', turn: 1 };
+  const meshes = [];
+  g.traverse((o) => o.isMesh && meshes.push(o));
+  const paint = (isWild) => meshes.forEach((o) => (o.material = o.material.side === THREE.DoubleSide ? (isWild ? wildSkin : skin) : isWild ? wild : hide));
+  return { g, rig, jaw, tail, wingR, wingL, paint, wild: false, from: null, to: null, q: null, t0: 0, id: null, state: 'roost', turn: 1 };
 }
 
 /** Per /state poll: one pooled figure per crocodile, with the next interpolation target. */
@@ -134,6 +143,7 @@ export function syncFlyingCrocs(s, now, first) {
     // a soaring crocodile leans into its circle: the heading runs clockwise or anticlockwise round the hub
     p.turn = Math.sin(c.heading - Math.atan2(c.y, c.x)) >= 0 ? 1 : -1;
     Object.assign(p, { to, q, t0: now, id: c.id, state: c.state });
+    if (!!c.wild !== p.wild) { p.wild = !!c.wild; p.paint(p.wild); p.g.scale.setScalar(p.wild ? 1.25 : 1); }
     p.g.visible = show;
   });
   for (let k = rows.length; k < pool.length; k++) {
