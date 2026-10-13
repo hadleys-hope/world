@@ -125,7 +125,7 @@ export function klyaksaPatch(spec, material, uniforms) {
   wg.setAttribute("aWarm", new THREE.Float32BufferAttribute(new Float32Array(depth.length), 1));
   wg.setIndex(widx);
   const water = new THREE.Mesh(wg, waterMaterial(uniforms, { tint: [0.03, 0.30, 0.42] }));
-  water.renderOrder = 2;
+  water.renderOrder = 3;   // over the coarse ocean where the two overlap
   return [land, water];
 }
 
@@ -200,7 +200,9 @@ function klyaksaLife(steps, body, spec, material) {
   steps.push(() => {
     body.add(buildWater({
       radius: R, res: 448, uniforms: env, tint: [0.03, 0.30, 0.42],
-      sample: (x, y, z) => (centre.angleTo(new THREE.Vector3(x, y, z)) < (PATCH * 0.97) / R ? { depth: -5 } : { depth: -bodyHeight(3, x, y, z) * R, liquid: 1, warm: 0 }),
+      // the coarse ocean stops well inside the fine patch, so the two waters overlap instead of leaving a
+      // stair-stepped gap between them (the black zigzag across the sea)
+      sample: (x, y, z) => (centre.angleTo(new THREE.Vector3(x, y, z)) < (PATCH * 0.85) / R ? { depth: -5 } : { depth: -bodyHeight(3, x, y, z) * R, liquid: 1, warm: 0 }),
     }));
   });
   steps.push(() => { for (const m of klyaksaPatch(spec, material, env)) body.add(m); });

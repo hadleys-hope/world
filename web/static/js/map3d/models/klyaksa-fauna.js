@@ -160,42 +160,77 @@ export function updateKlyaksaFauna(now) {
     toward(p.jaw, "x", pose.jaw); toward(p.tail, "y", pose.tail);
     toward(p.rig, "x", pose.pitch); p.rig.rotation.z += (pose.bank - p.rig.rotation.z) * ease;
   });
-  for (const t of tracerPool) if (t.visible) { t.material.opacity *= Math.exp(-dt * 6); if (t.material.opacity < 0.02) t.visible = false; }
+  updateShells(now);
   for (const dome of Object.values(state.klyaksaDomes || {})) {
     const f = dome.material.uniforms.uFlash;
     if (f.value > 0.001) f.value *= Math.exp(-dt * 5);
   }
 }
 
-// ПВО: when the city's air defence fired since the last poll, tracers from the dome's crown to the herd
-const tracerPool = [];
+// Air defence: four twin-barrel turrets on the shoulders of every dome; when the city fired since the last poll,
+// bright shells fly from them to the herd (each lives ~0.7 s), with a muzzle flash.
+const shells = [];
 const lastShots = {};
+let shellMesh = null, turretMesh = null;
+function turretPositions(c, R) {
+  const out = [], q = new THREE.Quaternion(), r = (c.wall + 45) * 0.62, h = (c.wall + 45) * 0.42 * Math.sqrt(1 - 0.62 * 0.62);
+  for (let k = 0; k < 4; k++) {
+    const a = k * Math.PI / 2 + Math.PI / 4, p = new THREE.Vector3();
+    place(c, Math.cos(a) * r, Math.sin(a) * r, h + 2, a, R, p, q);
+    out.push({ p, q: q.clone() });
+  }
+  return out;
+}
+function ensureTurrets(body, R) {
+  if (turretMesh || !state.klyaksaPlanData) return;
+  const cities = state.klyaksaPlanData.cities;
+  const g = new THREE.BoxGeometry(9, 4, 9).translate(0, 2, 0);
+  const barrel = new THREE.CylinderGeometry(0.5, 0.5, 12, 6).rotateX(Math.PI / 2).translate(1.6, 5, 5);
+  const barrel2 = barrel.clone().translate(-3.2, 0, 0);
+  const merged = new THREE.BufferGeometry();
+  const parts = [g, barrel, barrel2].map((x) => x.toNonIndexed());
+  merged.setAttribute("position", new THREE.Float32BufferAttribute(parts.flatMap((x) => [...x.attributes.position.array]), 3));
+  merged.computeVertexNormals();
+  turretMesh = new THREE.InstancedMesh(merged, material("aa-turret", 0x3d4248, { roughness: 0.6, metalness: 0.5 }), cities.length * 4);
+  const m4 = new THREE.Matrix4();
+  cities.forEach((c, i) => turretPositions(c, R).forEach((t, k) => turretMesh.setMatrixAt(i * 4 + k, m4.compose(t.p, t.q, new THREE.Vector3(1, 1, 1)))));
+  turretMesh.instanceMatrix.needsUpdate = true;
+  turretMesh.computeBoundingSphere();
+  body.add(turretMesh);
+  shellMesh = new THREE.InstancedMesh(new THREE.SphereGeometry(1.4, 6, 4), new THREE.MeshBasicMaterial({ color: 0xffe2a0 }), 160);
+  shellMesh.frustumCulled = false;
+  shellMesh.count = 0;
+  body.add(shellMesh);
+}
 function tracers(city, c, R, body, now) {
   const h = city.hazards;
   if (!h) return;
+  ensureTurrets(body, R);
   const fired = h.aa.shots - (lastShots[city.id] ?? h.aa.shots);
   lastShots[city.id] = h.aa.shots;
   if (fired <= 0) return;
-  const crown = new THREE.Vector3(), q = new THREE.Quaternion(), target = new THREE.Vector3();
-  place(c, 0, 0, (c.wall + 45) * 0.42 + 10, 0, R, crown, q);
+  const guns = turretPositions(c, R), q = new THREE.Quaternion();
   const alive = (h.migrants || []).filter((m) => m.state === "migrate");
-  for (let i = 0; i < Math.min(fired, 12) && alive.length; i++) {
-    const m = alive[i % alive.length];
-    place(c, m.x, m.y, m.z, 0, R, target, q);
-    let t = tracerPool.find((x) => !x.visible);
-    if (!t) {
-      t = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
-        new THREE.LineBasicMaterial({ color: 0xffd28a, transparent: true, opacity: 1 }));
-      t.frustumCulled = false;
-      body.add(t);
-      tracerPool.push(t);
-    }
-    t.geometry.attributes.position.setXYZ(0, crown.x, crown.y, crown.z);
-    t.geometry.attributes.position.setXYZ(1, target.x, target.y, target.z);
-    t.geometry.attributes.position.needsUpdate = true;
-    t.material.opacity = 1;
-    t.visible = true;
+  for (let i = 0; i < Math.min(fired * 3, 60) && alive.length; i++) {
+    const m = alive[i % alive.length], to = new THREE.Vector3();
+    place(c, m.x, m.y, m.z, 0, R, to, q);
+    const from = guns[i % 4].p.clone().addScaledVector(guns[i % 4].p.clone().normalize(), 6);
+    shells.push({ from, to, t0: now + i * 35, life: 700 });
   }
+}
+function updateShells(now) {
+  if (!shellMesh) return;
+  const m4 = new THREE.Matrix4(), p = new THREE.Vector3(), one = new THREE.Vector3(1, 1, 1), q = new THREE.Quaternion();
+  let n = 0;
+  for (let i = shells.length - 1; i >= 0; i--) {
+    const s = shells[i], u = (now - s.t0) / s.life;
+    if (u > 1) { shells.splice(i, 1); continue; }
+    if (u < 0 || n >= 160) continue;
+    p.lerpVectors(s.from, s.to, u);
+    shellMesh.setMatrixAt(n++, m4.compose(p, q, one.setScalar(u < 0.08 ? 3 : 1)));   // a muzzle flash, then the shell
+  }
+  shellMesh.count = n;
+  shellMesh.instanceMatrix.needsUpdate = true;
 }
 
 // The lair: where each city's flock sleeps, a ring of boulders round a dark mound with nests and old bones.

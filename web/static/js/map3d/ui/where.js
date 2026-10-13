@@ -13,6 +13,9 @@ const FACILITIES = [
 ];
 const REACH = 600; // a city's area reaches this far past its wall: crossing it hands over to the next city
 const title = (s) => s.charAt(0) + s.slice(1).toLowerCase();
+// English unless the interface is in Russian: ПВО and the rest only in the RU version
+const ru = () => window.hhI18n?.language === "ru";
+const L = (en, rus) => (ru() ? rus : en);
 let last = 0, shown = "";
 const _v = new THREE.Vector3();
 
@@ -35,9 +38,10 @@ function locate() {
       const d = Math.hypot(p[0] - x, p[1] - y);
       if (d < 320 && (!best || d < best.d)) best = { d, label };
     }
-    return { place: best ? best.label : r < c.wall_radius + REACH ? "Outskirts of Hadley's Hope" : "Wilderness", region: "LV-426" };
+    return { place: best ? best.label : r < c.wall_radius + REACH ? L("Outskirts of Hadley's Hope", "Окраины Хэдли") : L("Wilderness", "Дикие земли"), region: "LV-426" };
   }
   if (i === 3 && state.klyaksaPlanData) {
+    const plan = state.klyaksaPlanData;
     const dir = worldPointToBody(3, state.camera.position).normalize();
     let best = null;
     for (const c of state.klyaksaPlanData.cities) {
@@ -45,9 +49,23 @@ function locate() {
       if (d < c.wall + REACH && (!best || d < best.d)) best = { d, c };
     }
     if (best) return { place: best.c.name, region: "Klyaksa", city: best.c.id, inside: best.d < best.c.wall };
-    return { place: "Wilderness", region: "Klyaksa" };
+    const port = (state.klyaksaShipping?.ports || []).find((P) => dir.angleTo(dirAt(P.p.x, P.p.y, R)) * R < 700);
+    return { place: port ? L(`Port of ${plan.cities.find((c) => c.id === port.p.city)?.name || "Klyaksa"}`, `Порт ${plan.cities.find((c) => c.id === port.p.city)?.name || ""}`) : L("Wilderness", "Дикие земли"), region: L("Klyaksa", "Клякса") };
   }
   return { place: "Surface", region: name };
+}
+
+/** The Klyaksa city the camera is at, or the nearest one: where operator commands go on Klyaksa. */
+export function klyaksaCityHere() {
+  const plan = state.klyaksaPlanData;
+  if (!plan || state.activeBody !== 3) return null;
+  const R = state.solarSystem.specs[3].radius, dir = worldPointToBody(3, state.camera.position).normalize();
+  let best = null;
+  for (const c of plan.cities) {
+    const d = dir.angleTo(dirAt(c.at[0], c.at[1], R));
+    if (!best || d < best.d) best = { d, c };
+  }
+  return best?.c || null;
 }
 
 function hazardsLine(where) {
@@ -58,12 +76,12 @@ function hazardsLine(where) {
   el.hidden = false;
   const pct = (x) => `${Math.round(x * 100)}%`;
   el.innerHTML = [
-    `<span title="creatine mined; the fauna mutates with it">creatine <b>${h.creatine_t.toFixed(0)} t</b> · mutation ${h.mutation.toFixed(1)}</span>`,
-    `<span class="${h.aa.on ? "ok" : "bad"}" title="air defence">ПВО <b>${h.aa.on ? "on" : "OFF"}</b> · ${h.aa.ammo} shells · ${h.aa.kills} down</span>`,
-    h.migration ? `<span class="warn">herd overhead: ${h.migrants.filter((m) => m.state === "migrate").length}</span>` : "",
-    `<span class="${h.manure_t + h.dome_dirt > 10 ? "warn" : ""}">manure <b>${h.manure_t.toFixed(1)} t</b> · dome ${h.dome_dirt.toFixed(0)}% covered</span>`,
-    `<span class="${h.plankton > 25 ? "warn" : ""}">plankton <b>${h.plankton.toFixed(0)}%</b>${h.tide ? " · tide" : ""}</span>`,
-    `<span class="${h.drunk > 0.5 ? "warn" : ""}">drunk <b>${pct(h.drunk)}</b></span>`,
+    `<span>${L("creatine", "креатин")} <b>${h.creatine_t.toFixed(0)} ${L("t", "т")}</b> · ${L("mutation", "мутация")} ${h.mutation.toFixed(1)}</span>`,
+    `<span class="${h.aa.on ? "ok" : "bad"}">${L("Air defence", "ПВО")} <b>${h.aa.on ? L("on", "вкл") : L("OFF", "ВЫКЛ")}</b> · ${h.aa.ammo} ${L("shells", "снарядов")} · ${h.aa.kills} ${L("down", "сбито")}</span>`,
+    h.migration ? `<span class="warn">${L("herd overhead", "стадо над городом")}: ${h.migrants.filter((m) => m.state === "migrate").length}</span>` : "",
+    `<span class="${h.manure_t + h.dome_dirt > 10 ? "warn" : ""}">${L("manure", "навоз")} <b>${h.manure_t.toFixed(1)} ${L("t", "т")}</b> · ${L("dome", "купол")} ${h.dome_dirt.toFixed(0)}% ${L("covered", "в навозе")}</span>`,
+    `<span class="${h.plankton > 25 ? "warn" : ""}">${L("plankton", "планктон")} <b>${h.plankton.toFixed(0)}%</b>${h.tide ? L(" · tide", " · прилив") : ""}</span>`,
+    `<span class="${h.drunk > 0.5 ? "warn" : ""}">${L("drunk", "пьяны")} <b>${pct(h.drunk)}</b></span>`,
   ].filter(Boolean).join("");
 }
 
@@ -71,18 +89,19 @@ function bossBar(where) {
   const box = document.getElementById("boss");
   if (!box) return;
   const city = where.city && state.klyaksaState?.cities.find((c) => c.id === where.city);
-  const raid = city?.raid;
-  if (!raid) { box.hidden = true; return; }
-  const hp = city.dome_hp ?? 100;
+  const raid = city?.raid, herd = city?.hazards?.migration;
+  const hp = city?.dome_hp ?? 100;
+  if (!city || (!raid && !herd && hp >= 99.95)) { box.hidden = true; return; }
   box.hidden = false;
-  box.querySelector(".boss-name").textContent = `${where.place} dome`;
+  box.querySelector(".boss-name").textContent = L(`${where.place} dome`, `купол ${where.place}`);
   box.querySelector(".boss-hp").textContent = `${hp.toFixed(1)} %`;
   box.querySelector(".boss-fill").style.width = `${hp}%`;
   box.classList.toggle("low", hp < 30);
-  box.querySelector(".boss-info").textContent =
-    raid.phase === "gather" ? `Wild crocodiles gathering: ${raid.size} of them, here in ${raid.left} min`
-    : raid.phase === "raid" ? `Under attack by ${raid.size} crocodiles · ${raid.dome_hits} hits on the glass${raid.hits ? ` · ${raid.hits} things wrecked` : ""}`
-    : "The flock is flying off";
+  box.querySelector(".boss-info").textContent = !raid
+    ? herd ? L(`A migrating herd overhead · ${herd.kills} shot down`, `Над городом стадо · сбито ${herd.kills}`) : L("Repair crews at work", "Ремонт купола")
+    : raid.phase === "gather" ? L(`Wild crocodiles gathering: ${raid.size} of them, here in ${raid.left} min`, `Дикие крокодилы собираются: ${raid.size}, здесь через ${raid.left} мин`)
+    : raid.phase === "raid" ? L(`Under attack by ${raid.size} crocodiles · ${raid.dome_hits} hits on the glass${raid.hits ? ` · ${raid.hits} things wrecked` : ""}`, `Атака ${raid.size} крокодилов · ${raid.dome_hits} ударов по стеклу${raid.hits ? ` · разрушено ${raid.hits}` : ""}`)
+    : L("The flock is flying off", "Стая улетает");
 }
 
 export function updateWhere(now) {
