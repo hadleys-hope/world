@@ -255,7 +255,7 @@ class Raid(unittest.TestCase):
         w.t = 10 * 60
         return w
 
-    def run_raid(self, w, ticks=420):
+    def run_raid(self, w, ticks=640):   # gathering 30, raid 300, the flight home
         wr, crossings, inside = w.cfg["wall_radius"], [], 0
         for _ in range(ticks):
             before = {m["id"]: math.hypot(m["x"], m["y"]) for m in w.crocs if m.get("raider")}
@@ -357,6 +357,33 @@ class Raid(unittest.TestCase):
 
 
 
+class KlyaksaFlock(unittest.TestCase):
+    def test_the_flock_lives_round_the_dome_never_under_it(self):
+        from hadleys.klyaksa import City
+
+        w = City("k4", "Northfield", 125, 25, (-200, 2900), 3900, 11).w
+        w.cfg["croc_raid_mean_days"] = 0
+        w.t, seen, under = 6 * 60, set(), 0
+        for _ in range(16 * 60):
+            w.t += 1
+            fauna_step(w)
+            for m in w.crocs:
+                seen.add(m["state"])
+                under += m["z"] < dome_ceiling(w.cfg, math.hypot(m["x"], m["y"])) - 1.0
+        self.assertEqual(under, 0)
+        self.assertTrue({"inbound", "soar", "bask"} <= seen, seen)
+
+    def test_air_defence_shoots_raiders(self):
+        from hadleys.klyaksa import City
+
+        w = City("k4", "Northfield", 125, 25, (-200, 2900), 3900, 11).w
+        w.t = 10 * 60
+        inject(w, "croc_raid")
+        for _ in range(400):
+            world_tick(w)
+        self.assertGreater(w.aa["kills"], 0)
+
+
 class ArmouredDome(unittest.TestCase):
     """Klyaksa: a raid has to break the city's armoured dome before it gets at the houses."""
 
@@ -390,6 +417,7 @@ class ArmouredDome(unittest.TestCase):
 
     def test_the_dome_heals_between_raids(self):
         w = self.city()
+        w.cfg["croc_raid_mean_days"] = 0
         w.dome_hp, w.dome_breached = 10.0, True
         for _ in range(600):
             world_tick(w)

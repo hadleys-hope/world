@@ -71,7 +71,10 @@ def roost_site(c, shift=0.0):
 
 def dome_ceiling(c, r):
     """Height of the glass above the ground at distance r from the hub (the viewer's dome, models/oasis.js)."""
-    R = c["wall_radius"]  # the dome stands on the wall, its footing at the top of the posts
+    if c.get("dome_armor"):   # Klyaksa: exactly the dome the 3D view draws (urban/connections.js): wall + 45 m, 0.42 as high
+        R = c["wall_radius"] + 45.0
+        return 0.42 * R * math.sqrt(max(0.0, 1.0 - (r / R) ** 2)) if r < R else 0.0
+    R = c["wall_radius"]  # LV-426: the dome stands on the wall, its footing at the top of the posts
     return DOME_FOOT + c["dome_height"] * math.sqrt(max(0.0, 1.0 - (r / R) ** 2)) if r < R else 0.0
 
 
@@ -164,6 +167,9 @@ def fauna_step(w: World):
     for m in list(crocs):
         if m.get("raider"):
             _raider_step(w, m, g, gate_open, outside, inside)
+            continue
+        if c.get("dome_armor"):
+            _outside_flock_step(w, m, g, day)
             continue
         st = m["state"]
         if st == "roost":
@@ -302,6 +308,19 @@ def _raider_step(w, m, g, gate_open, outside, inside):
     raid = w.croc_raid
     c = w.cfg
     st = m["state"]
+    if st == "shot":   # air defence got it: it tumbles down, slides off the glass if it lands on it, and is gone
+        m["z"] -= 9.0
+        m["x"] += math.cos(m["heading"]) * 3
+        m["y"] += math.sin(m["heading"]) * 3
+        r = math.hypot(m["x"], m["y"])
+        floor = dome_ceiling(c, r) if c.get("dome_armor") else 0.0
+        if m["z"] < floor:
+            m["z"] = floor
+            m["x"] += m["x"] / (r or 1) * 6.0
+            m["y"] += m["y"] / (r or 1) * 6.0
+        if m["z"] <= 0:
+            w.crocs.remove(m)
+        return
     if st == "gather":
         m["timer"] -= 1
         if m["timer"] <= 0:
@@ -340,10 +359,10 @@ def _raider_step(w, m, g, gate_open, outside, inside):
         if t["kind"] == "dome":
             # climb outside the wall to the height of the spot first, then close in on the glass: never through it
             a = math.atan2(t["y"], t["x"])
-            if m["leg"] == 0:
-                if _around(m, (c["wall_radius"] + 60) * math.cos(a), (c["wall_radius"] + 60) * math.sin(a), t["z"], RAID, max(TRANSIT_Z, t["z"]), c):
+            if m["leg"] == 0:   # climb outside the dome to well above the spot, then dive at the glass
+                if _around(m, (c["wall_radius"] + 90) * math.cos(a), (c["wall_radius"] + 90) * math.sin(a), t["z"] + 60, RAID, max(TRANSIT_Z, t["z"] + 60), c):
                     m["leg"] = 1
-            elif _fly(m, t["x"], t["y"], t["z"], DIVE):
+            elif _fly(m, t["x"], t["y"], t["z"], DIVE * 1.5):
                 m["state"], m["timer"] = "attack", int(g.integers(6, 14))
             return
         moved = _fly(m, t["x"], t["y"], t["z"], DIVE, hold=m["alt"]) if r < c["wall_radius"] else _around(m, t["x"], t["y"], t["z"], RAID, TRANSIT_Z, c)
@@ -396,6 +415,59 @@ def _raider_step(w, m, g, gate_open, outside, inside):
                 w.crocs.remove(m)  # back on the cliffs: they leave the colony's books
 
 
+def _outside_flock_step(w, m, g, day):
+    """A Klyaksa city's flock: the dome is sealed, so they live round it. By day they fly out of the lair and circle
+    the dome, a few hundred metres out; now and then one lands on the glass to sun itself and takes off again; at dusk
+    they go home. They never pass under the glass."""
+    c, st = w.cfg, m["state"]
+    Rd = c["wall_radius"] + 45.0
+    orbit = Rd + 160.0 + 45.0 * (m["id"] % 7)
+    if st == "roost":
+        if day:
+            m["timer"] -= 1
+            if m["timer"] <= 0 or w.croc_call > 0:
+                m["state"], m["leg"] = "inbound", 0
+    elif st == "inbound":
+        a = math.atan2(m["y"], m["x"])
+        if not day:
+            m["state"] = "outbound"
+        elif _around(m, orbit * math.cos(a), orbit * math.sin(a), 70.0 + 18.0 * (m["id"] % 5), CRUISE, TRANSIT_Z, c):
+            m["state"], m["radius"], m["alt"] = "soar", orbit, 70.0 + 18.0 * (m["id"] % 5)
+    elif st == "soar":
+        if not day:
+            m["state"] = "outbound"
+            return
+        _soar(m)
+        if g.random() < c["croc_bask_p"]:   # lands on the glass
+            a = math.atan2(m["y"], m["x"]) + float(g.uniform(-0.3, 0.3))
+            r = Rd * float(g.uniform(0.55, 0.9))
+            m["perch"] = [r * math.cos(a), r * math.sin(a), dome_ceiling(c, r) + 3.0]
+            m["state"], m["leg"] = "dive", 0
+    elif st == "dive" and "perch" not in m:   # a dive left over from before the flock moved out of the dome
+        m["state"] = "soar"
+    elif st == "dive":
+        px, py, pz = m["perch"]
+        a = math.atan2(py, px)
+        if m["leg"] == 0:   # climb above the spot, outside the dome
+            if _fly(m, (Rd + 40) * math.cos(a), (Rd + 40) * math.sin(a), pz + 25.0, CRUISE):
+                m["leg"] = 1
+        elif _fly(m, px, py, pz, DIVE * 0.6):
+            m["state"], m["timer"] = "bask", int(g.integers(30, 120))
+    elif st == "bask":
+        m["timer"] -= 1
+        if m["timer"] <= 0 or not day:
+            m["state"], m["leg"] = "leave", 0
+    elif st == "leave":     # off the glass outwards at the height it sat, then back to the circle
+        a = math.atan2(m["y"], m["x"])
+        if _fly(m, (Rd + 60) * math.cos(a), (Rd + 60) * math.sin(a), m["z"] + 10.0, CRUISE):
+            m["state"] = "soar" if day else "outbound"
+    elif st == "outbound":
+        hx, hy = m["home"]
+        if _around(m, hx, hy, 0.0, CRUISE, TRANSIT_Z, c):
+            m["state"], m["leg"] = "roost", 0
+            m["timer"] = int(g.integers(0, 90))
+
+
 def _around(m, tx, ty, tz, speed, hold, c):
     """_fly, but a leg that would cut across an armoured dome goes round it: first to a point beside the dome
     on the near side of the chord, then on. Only for flights over open ground (both ends outside the wall)."""
@@ -407,10 +479,11 @@ def _around(m, tx, ty, tz, speed, hold, c):
         px, py = m["x"] + dx * u, m["y"] + dy * u
         d = math.hypot(px, py)
         if d < R:
-            if d < 1e-6:
-                px, py, d = -dy, dx, math.hypot(dx, dy)
-            k = (R + 40) / d
-            _fly(m, px * k, py * k, max(tz, TRANSIT_Z), speed, hold=hold)
+            # go round in short steps along the outside of the dome, on the side the chord passes
+            a = math.atan2(m["y"], m["x"])
+            turn = 1.0 if (m["x"] * dy - m["y"] * dx) > 0 else -1.0
+            k = R + 60.0
+            _fly(m, k * math.cos(a + turn * 0.12), k * math.sin(a + turn * 0.12), max(tz, TRANSIT_Z), speed, hold=hold)
             return False
     return _fly(m, tx, ty, tz, speed, hold=hold)
 
@@ -435,7 +508,7 @@ def raid_snapshot(w: World):
 def fauna_blame(w: World, house: int):
     """Wildlife has just damaged this house: the nearest crocodile in the air comes down on its roof."""
     crocs = getattr(w, "crocs", None)
-    if not crocs:
+    if not crocs or (w.cfg.get("dome_armor") and not getattr(w, "dome_breached", False)):
         return None
     hx, hy = float(w.h_x[house]), float(w.h_y[house])
     near = [m for m in crocs if m["state"] in AIRBORNE]

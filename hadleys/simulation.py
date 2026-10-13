@@ -88,7 +88,7 @@ def inject(w: World, cmd: str):
             "text": f"Xenomorphs outside sector {s + 1}",
         }
     elif cmd == "croc":
-        n = fauna_call(w)
+        n = fauna_call(w, 720 if w.cfg.get("dome_armor") else 240)   # Klyaksa: half a day round the dome
         w.log("WARN", f"[manual] flying crocodiles stirred: {n} leave the shore for the west gate")
         gate = polar(180.0, c["wall_radius"])
         return {"x": gate[0], "y": gate[1], "text": "Flying crocodiles are heading for the west gate"}
@@ -114,8 +114,8 @@ def inject(w: World, cmd: str):
         return {"x": 0, "y": 0, "text": "Plankton burned off" if getattr(w, "hazards_on", False) and plankton_burn(w) else "Nothing to burn"}
     elif cmd == "croc_lock":
         # shut the west gate against the flock: a lockdown of the sector the gate opens into
-        w.lockdown_ticks[WEST_GATE] = max(int(w.lockdown_ticks[WEST_GATE]), 240)
-        w.log("WARN", "[manual] west gate shut against the flying crocodiles for 4 hours")
+        w.lockdown_ticks[WEST_GATE] = max(int(w.lockdown_ticks[WEST_GATE]), 480)
+        w.log("WARN", "[manual] west gate shut against the flying crocodiles for 8 hours")
         gate = polar(180.0, c["wall_radius"])
         return {"x": gate[0], "y": gate[1], "text": "West gate shut against the flying crocodiles"}
     elif cmd == "storm":

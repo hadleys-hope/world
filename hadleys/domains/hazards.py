@@ -29,6 +29,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from hadleys.domains.fauna import dome_ceiling
+
 if TYPE_CHECKING:
     from hadleys.world import World
 
@@ -74,12 +76,14 @@ def migration_start(w: World, size=None):
     a = float(g.uniform(0, 2 * math.pi))
     start, R = (math.cos(a), math.sin(a)), c["wall_radius"] + 2600
     side = float(g.uniform(-0.3, 0.3)) * c["wall_radius"]
+    # they fly well over the dome: Klyaksa's armoured dome stands 0.42 of its radius tall
+    top = 0.42 * (c["wall_radius"] + 45.0) if c.get("dome_armor") else 300.0
     for k in range(n):
         off = (k - n / 2) * 22.0
         w.migrants.append({
             "x": start[0] * R - start[1] * (side + off) + float(g.uniform(-20, 20)),
             "y": start[1] * R + start[0] * (side + off) + float(g.uniform(-20, 20)),
-            "z": MIGRANT_Z + float(g.uniform(-30, 30)), "heading": a + math.pi, "state": "migrate", "id": 1000 + k,
+            "z": top + 150.0 + float(g.uniform(-30, 30)), "heading": a + math.pi, "state": "migrate", "id": 1000 + k,
         })
     w.migration = {"t0": w.t, "size": n, "kills": 0, "dropped": 0.0}
     w.log("WARN", f"A migrating herd of {n} crocodiles is heading over the city: air defence {'ready' if w.aa['on'] else 'OFF'}")
@@ -128,6 +132,12 @@ def hazards_step(w: World):
             m["z"] -= 9.0
             m["x"] += math.cos(m["heading"]) * 4
             m["y"] += math.sin(m["heading"]) * 4
+            r = math.hypot(m["x"], m["y"])
+            floor = dome_ceiling(c, r) if c.get("dome_armor") else 0.0
+            if m["z"] < floor:   # it hits the dome and slides off the glass
+                m["z"] = floor
+                m["x"] += m["x"] / (r or 1) * 7.0
+                m["y"] += m["y"] / (r or 1) * 7.0
             if m["z"] <= 0:
                 w.migrants.remove(m)
             continue
@@ -154,6 +164,21 @@ def hazards_step(w: World):
             w.manure[s] += tons * (0.5 if r < wr else 1.0)
         if r > wr + 2700 and math.cos(math.atan2(m["y"], m["x"]) - m["heading"]) > 0:
             w.migrants.remove(m)  # out of sight on the far side
+    # the same guns turn on a raid: raiders in range over the dome are shot down
+    raid = getattr(w, "croc_raid", None)
+    if raid and raid["phase"] == "raid" and w.aa["on"] and powered:
+        # four turrets: each tick they can engage four raiders, so a big raid still reaches the glass
+        targets = [m for m in w.crocs if m.get("raider") and m["state"] in ("raid", "attack") and m["z"] > 15 and math.hypot(m["x"], m["y"]) < AA_RANGE]
+        for m in targets[:4]:
+            if w.aa["ammo"] > 0:
+                w.aa["ammo"] -= 1
+                w.aa["shots"] += 1
+                w.colony_budget -= SHELL_COST
+                w.hazard_costs += SHELL_COST
+                if g.random() < AA_P * 0.6:
+                    m["state"] = "shot"
+                    w.aa["kills"] += 1
+                    raid["shot"] = raid.get("shot", 0) + 1
     if w.migration and not w.migrants:
         mg = w.migration
         w.log("INFO", f"The herd has passed: {mg['kills']} shot down, {mg['dropped']:.1f} t of manure dropped")
