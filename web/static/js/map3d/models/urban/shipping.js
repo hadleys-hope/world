@@ -6,9 +6,12 @@
 import { state } from "../../state.js";
 import { bodyHeight } from "../../geometry/noise.js";
 import { dirAt } from "../klyaksa.js";
+import { Surface } from "./streets.js";
 import * as T from "three";
 
 const SPEED = 24; // m/s for the big ships on screen (sped up), the small craft faster
+const LENGTH = { container: 160, bulk: 130, tanker: 140, ferry: 90, tug: 26, trawler: 32 };
+const APRON = 125; // the terminal apron reaches this far out from the quay; berths lie just beyond it
 const DWELL = 150; // s at the berth while the cranes work
 const _n = new T.Vector3(), _e = new T.Vector3(), _no = new T.Vector3(), _f = new T.Vector3(), _r = new T.Vector3();
 const _m = new T.Matrix4(), _q = new T.Quaternion(), _s = new T.Vector3(1, 1, 1);
@@ -87,6 +90,7 @@ const KINDS = {
   straddle: () => merge([part(B(0.6, 12, 0.6), 0x2b6fa8, -3.4, 6, -5), part(B(0.6, 12, 0.6), 0x2b6fa8, 3.4, 6, -5), part(B(0.6, 12, 0.6), 0x2b6fa8, -3.4, 6, 5), part(B(0.6, 12, 0.6), 0x2b6fa8, 3.4, 6, 5), part(B(7.4, 1.2, 11), 0x2b6fa8, 0, 12.4, 0), part(B(2, 2, 2.4), 0xf2f2ee, 3, 14, 4), part(B(2.4, 2.5, 9.8), 0xb5452f, 0, 7, 0)]),
   truck: () => merge([part(B(2.5, 3, 3), 0xd8d8d8, 0, 2.2, 7.5), part(B(2.5, 1, 13), 0x333333, 0, 1.1, 0), part(B(2.4, 2.6, 12), CONT[1], 0, 2.9, -1), part(C(0.5, 2.6).rotateZ(Math.PI / 2), 0x111111, 0, 0.5, 6), part(C(0.5, 2.6).rotateZ(Math.PI / 2), 0x111111, 0, 0.5, -5)]),
   van: () => merge([part(B(2.1, 2.4, 5.6), 0xf4f4f0, 0, 1.6, 0), part(B(1.9, 0.9, 1.2), 0x2b3b4b, 0, 2.2, 2.3), part(C(0.38, 2.2).rotateZ(Math.PI / 2), 0x111111, 0, 0.4, 1.8), part(C(0.38, 2.2).rotateZ(Math.PI / 2), 0x111111, 0, 0.4, -1.8)]),
+  lamp: () => merge([part(C(0.25, 16, 6), 0x50565b, 0, 8, 0), part(B(2.4, 0.5, 1.2), 0x50565b, 0, 16, 0.6), part(B(1.6, 0.35, 0.9), 0xfff2c8, 0, 15.7, 0.8)]),
   crane: () => merge([           // ship-to-shore gantry crane: four legs, the boom out over the water, the machinery house
     part(B(1.6, 46, 1.6), 0xd94f2a, -8, 23, -8), part(B(1.6, 46, 1.6), 0xd94f2a, 8, 23, -8), part(B(1.6, 46, 1.6), 0xd94f2a, -8, 23, 8), part(B(1.6, 46, 1.6), 0xd94f2a, 8, 23, 8),
     part(B(18, 1.8, 1.8), 0xd94f2a, 0, 30, -8), part(B(18, 1.8, 1.8), 0xd94f2a, 0, 30, 8),
@@ -152,11 +156,35 @@ export function buildShipping(body, R, env) {
         ships.push(s);
       }
   });
+  // the terminal apron: a deck on caissons from the quay out to the berths, so nothing stands in the water
+  for (const P of ports) {
+    const point = (u, v, h = 0) => dirAt(...P.xy(u, v), R).multiplyScalar(R + h);
+    const deck = new Surface(point), wall = new Surface(point);
+    for (let u = 0; u < APRON; u += 8)
+      for (let v = -200; v < 200; v += 8) deck.quad([[u, v, 4], [u + 8, v, 4], [u, v + 8, 4], [u + 8, v + 8, 4]], 0x8f9894);
+    for (let v = -200; v < 200; v += 8) wall.quad([[APRON, v, -6], [APRON, v, 4], [APRON, v + 8, -6], [APRON, v + 8, 4]], 0x6b7576);
+    for (let u = 0; u < APRON; u += 8) for (const v of [-200, 200]) wall.quad([[u, v, -6], [u, v, 4], [u + 8, v, -6], [u + 8, v, 4]], 0x6b7576);
+    body.add(deck.mesh({ paving: true }), wall.mesh());
+    for (const b of P.berths) b.at = P.xy(APRON + 28, b.v);
+  }
+  // lamps along the apron edge and down its middle: a pole, a head, and a glow that shows at night
+  const lampSpots = ports.flatMap((P) => [...Array(14)].flatMap((_, k) => [[P, APRON - 4, -195 + k * 30], [P, 60, -195 + k * 30]]));
+  const poleMesh = mesh("lamp", lampSpots.length);
+  const glow = new T.InstancedMesh(new T.SphereGeometry(5, 10, 8), new T.MeshBasicMaterial({ color: 0xffd9a0, transparent: true, opacity: 0.35, blending: T.AdditiveBlending, depthWrite: false }), lampSpots.length);
+  glow.frustumCulled = false;
+  body.add(glow);
+  lampSpots.forEach(([P, u, v], i) => {
+    const at = P.xy(u, v);
+    poleMesh.setMatrixAt(i, _m.compose(frameAt(R, at[0], at[1], P.a, 4), _q, _s));
+    glow.setMatrixAt(i, _m.compose(frameAt(R, at[0], at[1], P.a, 4 + 15.5), _q, _s));
+  });
+  poleMesh.instanceMatrix.needsUpdate = true;
+  glow.instanceMatrix.needsUpdate = true;
   // cranes at every berth, a trolley and a container each
   const cranes = ports.flatMap((P) => P.berths.map((b) => ({ P, b })));
   const craneMesh = mesh("crane", cranes.length), trolleyMesh = mesh("trolley", cranes.length), boxMesh = mesh("box", cranes.length + ports.length * 260);
   cranes.forEach(({ P, b }, i) => {
-    const at = P.xy(110, b.v), pos = frameAt(R, at[0], at[1], P.a, 3.7);
+    const at = P.xy(APRON - 15, b.v), pos = frameAt(R, at[0], at[1], P.a, 4);
     craneMesh.setMatrixAt(i, _m.compose(pos, _q, _s));
   });
   craneMesh.instanceMatrix.needsUpdate = true;
@@ -166,7 +194,7 @@ export function buildShipping(body, R, env) {
   for (const P of ports)
     for (let k = 0; k < 260; k++) {
       const row = k % 13, col = Math.floor(k / 13) % 10, tier = Math.floor(k / 130);
-      const at = P.xy(18 + row * 4.6, -66 + col * 14), pos = frameAt(R, at[0], at[1], P.a + Math.PI / 2, 3.7 + tier * 2.7);
+      const at = P.xy(14 + row * 4.6, -66 + col * 14), pos = frameAt(R, at[0], at[1], P.a + Math.PI / 2, 4 + tier * 2.7);
       boxMesh.setMatrixAt(bi, _m.compose(pos, _q, _s));
       const c = new T.Color(CONT[(k * 5 + tier) % CONT.length]);
       tint.set([c.r, c.g, c.b], bi * 3);
@@ -183,7 +211,14 @@ export function buildShipping(body, R, env) {
     for (const [kind, n] of Object.entries(VEH))
       for (let k = 0; k < n; k++) vehicles.push({ kind, idx: pi * n + k, P, road, t: k / n, speed: kind === "truck" || kind === "van" ? 0.012 + 0.004 * (k % 3) : 0.03 + 0.01 * (k % 2) });
   });
-  return { ports, routes, ships, meshes, cranes, craneMesh, trolleyMesh, boxMesh, vehicles, vmesh, R, clock: 0 };
+  // every ship anchors at its own spot round its port's anchorage, never on top of another
+  ships.forEach((s, i) => {
+    const k = i % 19, ring = 1 + Math.floor(k / 8), a = (k % 8) * (Math.PI / 4) + ring * 0.4;
+    s.anchor = [s.home.off[0] + Math.cos(a) * 260 * ring, s.home.off[1] + Math.sin(a) * 260 * ring];
+    [s.x, s.y] = s.anchor;
+    s.hp = 100; s.sink = 0; s.len = LENGTH[s.kind];
+  });
+  return { ports, routes, ships, meshes, cranes, craneMesh, trolleyMesh, boxMesh, vehicles, vmesh, glow, R, clock: 0 };
 }
 
 function steer(s, tx, ty, dt, speed) {
@@ -211,12 +246,62 @@ function plan(sh, s) {
   s.path = [s.home.off, ...sea.slice(1)];
 }
 
+function collide(sh, dt) {
+  const ships = sh.ships.filter((s) => s.sink < 1);
+  for (let i = 0; i < ships.length; i++)
+    for (let j = i + 1; j < ships.length; j++) {
+      const a = ships[i], b = ships[j], dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 0.01;
+      const min = (a.len + b.len) * 0.32 + 12;               // hull radii, with a margin
+      if (d >= min) continue;
+      const push = (min - d) * 0.5, ux = dx / d, uy = dy / d;
+      a.x -= ux * push; a.y -= uy * push; b.x += ux * push; b.y += uy * push;
+      if (min - d > 8) { a.hp -= 6 * dt; b.hp -= 6 * dt; }   // a real collision scrapes both hulls
+    }
+  // the boat you drive: it bounces off a ship and both take damage by the speed of the hit
+  const mine = state.drive?.marine && state.drive.boat;
+  if (mine)
+    for (const s of ships) {
+      const dx = mine.x - s.x, dy = mine.y - s.y, d = Math.hypot(dx, dy), min = s.len * 0.32 + (mine.kind === "ship" ? 50 : 8);
+      if (d < min) {
+        const hit = Math.min(60, Math.abs(mine.speed || 0) * 4 + 5);
+        s.hp -= hit; mine.speed = -(mine.speed || 0) * 0.3;
+        mine.x = s.x + (dx / (d || 1)) * min; mine.y = s.y + (dy / (d || 1)) * min;
+        state.toast?.(`You rammed a ${s.kind}: ${Math.max(0, s.hp).toFixed(0)}% hull left`);
+      }
+    }
+  // wild crocodiles that pass low over a ship tear at it
+  const plan = state.klyaksaPlanData, cities = state.klyaksaState?.cities || [];
+  if (plan)
+    for (const city of cities) {
+      const c = plan.cities.find((x) => x.id === city.id);
+      if (!c) continue;
+      for (const m of city.crocs || []) {
+        if (!m.wild || m.z > 70) continue;
+        const X = c.at[0] + m.x, Y = c.at[1] + m.y;
+        for (const s of ships) if (Math.hypot(s.x - X, s.y - Y) < s.len * 0.5 + 30) s.hp -= 4 * dt;
+      }
+    }
+}
+
 export function updateShipping(sh, dt) {
   if (!sh) return;
   sh.clock += dt;
   const R = sh.R;
+  collide(sh, dt);
+  sh.glow.material.opacity = 0.05 + 0.4 * (state.klyaksaNight ?? 0);
   for (const s of sh.ships) {
     const speed = s.kind === "tug" ? 9 : s.kind === "trawler" ? 7 : s.kind === "ferry" ? SPEED * 1.2 : SPEED;
+    if (s.hp <= 0 || s.sink > 0) {
+      // sinking: down by the bow, listing, under in 25 s; a replacement then sails in from the anchorage
+      if (s.sink === 0 && s.berth) { s.berth.busy = null; s.berth = null; }
+      if (s.sink === 0 && s.approach) { s.approach.busy = null; s.approach = null; }
+      s.sink += dt / 25;
+      if (s.sink >= 1.6) { s.sink = 0; s.hp = 100; [s.x, s.y] = s.anchor; s.path = []; s.dest = null; s.wait = 10; }
+      const pos = frameAt(R, s.x, s.y, s.heading, -Math.min(1, s.sink) * 22);
+      _q.multiply(new T.Quaternion().setFromEuler(new T.Euler(Math.min(1, s.sink) * 0.35, 0, Math.min(1, s.sink) * 0.5)));
+      sh.meshes[s.kind].setMatrixAt(s.idx, _m.compose(pos, _q, _s));
+      continue;
+    }
     if (s.wait > 0) { s.wait -= dt; }
     else if (s.berth) {                                  // done at the berth: leave for the anchorage
       s.berth.busy = null; s.berth = null; s.home = s.dest || s.home; plan(sh, s);
@@ -225,9 +310,9 @@ export function updateShipping(sh, dt) {
         const free = s.dest.berths.find((b) => !b.busy);
         if (free && !s.approach) { free.busy = s; s.approach = free; s.path = [free.at]; }
         else if (s.approach) { s.berth = s.approach; s.approach = null; s.wait = s.kind === "ferry" ? 40 : DWELL; s.heading = s.dest.a + Math.PI / 2; }
-        else s.wait = 30;                                  // all berths taken: wait at anchor
+        else { s.wait = 30; s.path = [s.anchor]; }          // all berths taken: back to its own anchor spot
       } else plan(sh, s);
-    } else if (steer(s, s.path[0][0], s.path[0][1], dt, speed)) s.path.shift();
+    } else if (steer(s, s.path[0][0], s.path[0][1], dt, speed * (0.4 + 0.6 * s.hp / 100))) s.path.shift();
     const pos = frameAt(R, s.x, s.y, s.heading, 0.2 + Math.sin(sh.clock * 1.3 + s.phase) * 0.15);
     sh.meshes[s.kind].setMatrixAt(s.idx, _m.compose(pos, _q, _s));
   }
