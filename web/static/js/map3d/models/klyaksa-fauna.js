@@ -138,6 +138,63 @@ export function syncKlyaksaFauna(s, body, R, now) {
   for (; k < pool.length; k++) { pool[k].g.visible = false; pool[k].live = false; }
 }
 
+// Ship hunters: while a port city is raided, a pack breaks off and goes for the ships of its port (urban/shipping.js):
+// it closes in, circles low and dives at a ship until it sinks, then takes the next; when the raid ends it flies off.
+const hunters = new Map();
+function hunt(now, dt) {
+  const sh = state.klyaksaShipping, plan = state.klyaksaPlanData, R = state.solarSystem?.specs?.[3]?.radius;
+  if (!sh || !plan || !R) return;
+  const body = state.solarSystem.bodies[3];
+  for (const city of state.klyaksaState?.cities || []) {
+    const c = plan.cities.find((x) => x.id === city.id), port = sh.ports.find((P) => P.p.city === city.id);
+    if (!c || !port) continue;
+    let pack = hunters.get(city.id);
+    const raiding = city.raid && city.raid.phase === "raid";
+    if (raiding && !pack) {
+      pack = [...Array(5)].map((_, k) => {
+        const f = figure(body);
+        f.paint(true); f.wild = true; f.g.scale.setScalar(3); f.live = true; f.g.visible = true; f.hunter = true;
+        const start = [c.at[0] + Math.cos(k) * (c.wall + 200), c.at[1] + Math.sin(k) * (c.wall + 200)];
+        return { f, x: start[0], y: start[1], z: 120, heading: 0, prey: null, leaving: 0 };
+      });
+      hunters.set(city.id, pack);
+    }
+    if (!pack) continue;
+    for (const h of pack) {
+      if (!raiding) h.leaving += dt;
+      if (!raiding || h.leaving > 0) {                       // off to sea and gone
+        h.x += Math.cos(port.a) * 40 * dt; h.y += Math.sin(port.a) * 40 * dt; h.z += 15 * dt;
+      } else {
+        if (!h.prey || h.prey.sink > 0) {
+          const live = sh.ships.filter((s) => s.sink === 0 && s.home === port);
+          h.prey = live.sort((p, q) => Math.hypot(p.x - h.x, p.y - h.y) - Math.hypot(q.x - h.x, q.y - h.y))[0] || null;
+        }
+        if (h.prey) {
+          const p = h.prey, d = Math.hypot(p.x - h.x, p.y - h.y), t = now / 1000 + h.f.g.id;
+          const tx = p.x + Math.cos(t * 0.8) * (d < 80 ? 35 : 0), ty = p.y + Math.sin(t * 0.8) * (d < 80 ? 35 : 0);
+          const want = Math.atan2(ty - h.y, tx - h.x), step = Math.min(d, 35 * dt);
+          h.heading += Math.atan2(Math.sin(want - h.heading), Math.cos(want - h.heading)) * Math.min(1, dt * 2);
+          h.x += Math.cos(h.heading) * step; h.y += Math.sin(h.heading) * step;
+          // circling at 60 m, then diving at the deck and tearing at it
+          const dive = d < 80 ? 0.5 + 0.5 * Math.sin(t * 1.3) : 0;
+          h.z += ((d < 80 ? 60 - dive * 52 : 90) - h.z) * Math.min(1, dt * 1.5);
+          if (d < p.len * 0.5 + 20 && h.z < 25) p.hp -= 0.8 * dt;   // a pack of five takes about half a minute over a ship
+        }
+      }
+      const pos = new THREE.Vector3(), q = new THREE.Quaternion();
+      place(c, h.x - c.at[0], h.y - c.at[1], h.z, h.heading, R, pos, q);
+      h.f.g.position.lerp(pos, Math.min(1, dt * 6));
+      h.f.g.quaternion.slerp(q, Math.min(1, dt * 4));
+      const pose = crocPose(h.z < 30 ? "dive" : "soar", now / 1000, 3);
+      h.f.wingR.rotation.z = pose.flap; h.f.wingL.rotation.z = -pose.flap; h.f.jaw.rotation.x = h.z < 30 ? 0.5 : 0.05;
+    }
+    if (!raiding && pack.every((h) => h.leaving > 25)) {
+      for (const h of pack) { h.f.g.visible = false; body.remove(h.f.g); }
+      hunters.delete(city.id);
+    }
+  }
+}
+
 /** Per frame: glide between polls, move wings, jaw and tail; dome flashes fade. */
 export function updateKlyaksaFauna(now) {
   const dt = Math.min(0.1, Math.max(0, (now - (lastNow || now)) / 1000));
@@ -172,6 +229,7 @@ export function updateKlyaksaFauna(now) {
     toward(p.rig, "x", pose.pitch); p.rig.rotation.z += (pose.bank - p.rig.rotation.z) * ease;
   });
   updateShells(now, dt);
+  hunt(now, dt);
   for (const dome of Object.values(state.klyaksaDomes || {})) {
     const f = dome.material.uniforms.uFlash;
     if (f.value > 0.001) f.value *= Math.exp(-dt * 5);

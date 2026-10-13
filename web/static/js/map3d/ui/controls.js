@@ -206,9 +206,13 @@ export function initialize() {
     v === "port" ? visitKlyaksa(true) : visitKlyaksa(false, v === "prev" ? -1 : 1);
   }));
   document.getElementById("reset").onclick = () => {
-    if (confirm("Abandon this colony and found a new one? History is kept.")) {
-      state.post({ cmd: "reset" });
+    // on Klyaksa the button founds Klyaksa anew (all its cities); elsewhere LV-426's colony
+    const klyaksa = state.activeBody === 3;
+    const ask = klyaksa ? "Found Klyaksa anew? All six cities are rebuilt from scratch." : "Abandon this colony and found a new one? History is kept.";
+    if (confirm(ask)) {
+      state.post({ cmd: "reset", ...(klyaksa ? { city: klyaksaCityHere()?.id || "k1" } : {}) });
       state.selected = null;
+      if (klyaksa) toast("Klyaksa founded anew");
     }
   };
   state.speedEl = document.getElementById("speed");

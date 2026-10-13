@@ -82,6 +82,7 @@ function hazardsLine(where) {
     `<span class="${h.manure_t + h.dome_dirt > 10 ? "warn" : ""}">${L("manure", "навоз")} <b>${h.manure_t.toFixed(1)} ${L("t", "т")}</b> · ${L("dome", "купол")} ${h.dome_dirt.toFixed(0)}% ${L("covered", "в навозе")}</span>`,
     `<span class="${h.plankton > 25 ? "warn" : ""}">${L("plankton", "планктон")} <b>${h.plankton.toFixed(0)}%</b>${h.tide ? L(" · tide", " · прилив") : ""}</span>`,
     `<span class="${h.drunk > 0.5 ? "warn" : ""}">${L("drunk", "пьяны")} <b>${pct(h.drunk)}</b></span>`,
+    h.repairs || h.dome_repair ? `<span>${L("repairs", "ремонт")} <b>${h.repairs}</b> · ${L("dome", "купол")} ${Math.round(h.dome_repair / 1000)}k cr</span>` : "",
   ].filter(Boolean).join("");
 }
 
