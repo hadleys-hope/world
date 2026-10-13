@@ -6,6 +6,8 @@ import { resize } from "../render/frame.js";
 import { applyLayers, onState } from "../render/state-sync.js";
 import { flyTo, renderInfo } from "./inspection.js";
 import { renderSide } from "./telemetry.js";
+import { klyaksaCityHere } from "./where.js";
+import { visitKlyaksa } from "../models/urban/inspection.js";
 
 export async function checkToken() {
   const r = await (
@@ -22,6 +24,7 @@ export async function checkToken() {
   state.tokenState.className = r.ok ? "ok" : "warn";
 }
 
+state.toast = (t) => toast(t);
 export function toast(text) {
   const t = document.getElementById("toast");
   t.textContent = text;
@@ -155,12 +158,15 @@ export function initialize() {
   document.querySelectorAll("button[data-i]").forEach(
     (b) =>
       (b.onclick = async () => {
+        // on Klyaksa the command goes to the city you are at (or the nearest one), not to LV-426
+        const city = state.activeBody === 3 ? klyaksaCityHere() : null;
         const r = await fetch("/cmd", {
           method: "POST",
           body: JSON.stringify({
             cmd: "inject",
             value: b.dataset.i,
             token: state.ADMIN,
+            ...(city ? { city: city.id } : {}),
           }),
         });
         if (r.status === 403) {
@@ -168,10 +174,14 @@ export function initialize() {
           return;
         }
         const info = await r.json();
-        toast(info.text || b.dataset.i);
-        if (info.x !== undefined && state.G) flyTo(info.x, info.y, 420);
+        toast((city ? `${city.name}: ` : "") + (info.text || b.dataset.i));
+        if (!city && state.activeBody === 2 && info.x !== undefined && state.G) flyTo(info.x, info.y, 420);
       }),
   );
+  document.querySelectorAll("[data-klyaksa]").forEach((b) => (b.onclick = () => {
+    const v = b.dataset.klyaksa;
+    v === "port" ? visitKlyaksa(true) : visitKlyaksa(false, v === "prev" ? -1 : 1);
+  }));
   document.getElementById("reset").onclick = () => {
     if (confirm("Abandon this colony and found a new one? History is kept.")) {
       state.post({ cmd: "reset" });

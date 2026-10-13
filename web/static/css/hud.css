@@ -149,3 +149,8 @@ body:not(.panel-collapsed) #info { right: 456px; }
   padding: 8px 14px; border-radius: 12px; font-size: 12px; pointer-events: none; max-width: min(900px, 90vw); }
 #hazards span { white-space: nowrap; color: var(--hh-text-2); } #hazards b { color: var(--hh-text); }
 #hazards .ok b { color: var(--hh-ok); } #hazards .bad b, #hazards .bad { color: var(--hh-bad, #e2574d); } #hazards .warn, #hazards .warn b { color: var(--hh-warn, #e0b04a); }
+
+/* the console: readable type, labels that wrap instead of running out of their buttons */
+#side .ops-actions button, #panel-places button, #layers .chk { font-size: 14px !important; line-height: 1.25; white-space: normal; overflow-wrap: anywhere; min-height: 40px; height: auto !important; padding: 8px 10px !important; }
+#side .muted-copy, #side summary, #side p { font-size: 13px !important; }
+#side .section-kicker { font-size: 11px !important; }

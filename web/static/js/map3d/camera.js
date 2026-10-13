@@ -294,8 +294,12 @@ export function initialize() {
   state.systemView = false;
   state.drive = null;
   state.orbitalCamera = { yaw: 0, pitch: 0 };
+  // only text entry swallows the keys: after dragging the speed slider or picking from a select the camera keeps
+  // WASD, +/- and the rest (the focused slider used to eat them until a planet was clicked)
   state.typing = (e) =>
-    e.target.closest("input,textarea,select,[contenteditable=true]");
+    e.target.closest('input:not([type=range]):not([type=checkbox]):not([type=radio]):not([type=button]),textarea,[contenteditable=true]');
+  document.addEventListener("change", (e) => e.target.matches?.("input[type=range],select") && e.target.blur());
+  document.addEventListener("pointerup", (e) => e.target.matches?.("input[type=range]") && setTimeout(() => e.target.blur(), 0));
   window.addEventListener("keydown", (e) => {
     if (state.typing(e) || e.ctrlKey || e.metaKey || e.altKey) return;
     const key = logicalKey(e);
@@ -313,6 +317,8 @@ export function initialize() {
     }
     if (key === "shift") {
       e.preventDefault();
+      // a Shift that arrives right after the window got focus belongs to the shortcut that switched to it
+      if (performance.now() - (state.focusedAt || 0) < 400) return;
       if (!e.repeat && !state.drive)
         setCameraMode(state.cameraMode === "flight" ? "orbit" : "flight");
       return;
@@ -385,9 +391,14 @@ export function initialize() {
       state.drive.brake = 1;
     }
   };
-  window.addEventListener("blur", state.clearInput);
+  window.addEventListener("blur", () => { state.keptMode = state.cameraMode; state.clearInput(); });
+  window.addEventListener("focus", () => {
+    state.focusedAt = performance.now();
+    if (state.keptMode && !state.drive && state.cameraMode !== state.keptMode) setCameraMode(state.keptMode);
+  });
   document.addEventListener("visibilitychange", () => {
-    if (document.hidden) state.clearInput();
+    if (document.hidden) { state.keptMode = state.cameraMode; state.clearInput(); }
+    else if (state.keptMode && !state.drive && state.cameraMode !== state.keptMode) setCameraMode(state.keptMode);
   });
   state.renderer.domElement.addEventListener("contextmenu", (e) =>
     e.preventDefault(),
