@@ -7,6 +7,9 @@ import { applyLayers, onState } from "../render/state-sync.js";
 import { flyTo, renderInfo } from "./inspection.js";
 import { renderSide } from "./telemetry.js";
 import { klyaksaCityHere } from "./where.js";
+import { focusPoint } from "../camera.js";
+import { bodyPointToWorld } from "../geometry/body-frame.js";
+import { dirAt } from "../models/klyaksa.js";
 import { visitKlyaksa } from "../models/urban/inspection.js";
 
 export async function checkToken() {
@@ -25,6 +28,25 @@ export async function checkToken() {
 }
 
 state.toast = (t) => toast(t);
+
+/** Take the camera to where a Klyaksa event happens: the lair for the flock, the dome's flank for a raid,
+ * high over the dome for a migrating herd, the seaward side for the plankton. */
+function showKlyaksaEvent(city, cmd) {
+  const R = state.solarSystem.specs[3].radius, Rd = city.wall + 45, Hd = Rd * 0.42;
+  const lair = city.lair || [Rd * 2, 0], la = Math.atan2(lair[1], lair[0]);
+  const spots = {
+    croc: [[lair[0], lair[1], 30], 520],
+    croc_raid: [[Math.cos(la) * Rd * 0.8, Math.sin(la) * Rd * 0.8, Hd * 0.6], 900],
+    migration: [[0, 0, Hd + 150], 1600],
+    aa_toggle: [[Math.cos(la) * Rd * 0.62, Math.sin(la) * Rd * 0.62, Hd * 0.8], 260],
+    plankton: [[-Rd, 0, 0], 700], burn: [[-Rd, 0, 0], 700],
+  };
+  const spot = spots[cmd];
+  if (!spot) return;
+  const [[x, y, h], dist] = spot;
+  const local = dirAt(city.at[0] + x, city.at[1] + y, R).multiplyScalar(R * 1.0035 + h);
+  focusPoint(bodyPointToWorld(3, local), dist);
+}
 export function toast(text) {
   const t = document.getElementById("toast");
   t.textContent = text;
@@ -175,6 +197,7 @@ export function initialize() {
         }
         const info = await r.json();
         toast((city ? `${city.name}: ` : "") + (info.text || b.dataset.i));
+        if (city) showKlyaksaEvent(city, b.dataset.i);
         if (!city && state.activeBody === 2 && info.x !== undefined && state.G) flyTo(info.x, info.y, 420);
       }),
   );

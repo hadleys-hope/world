@@ -11,6 +11,7 @@ import * as THREE from "three";
 const MAX = 160;
 const pool = [];
 let wingTime = 0, lastNow = 0;
+const _qFace = new THREE.Quaternion(), _mFace = new THREE.Matrix4();
 const _up = new THREE.Vector3(), _e = new THREE.Vector3(), _n = new THREE.Vector3(), _f = new THREE.Vector3(), _x = new THREE.Vector3();
 
 // Scales: a pattern in the figure's own space, so they stay put on the hide; pale belly, dark ridged back.
@@ -147,7 +148,17 @@ export function updateKlyaksaFauna(now) {
     if (!p.live) return;
     const u = Math.min(1, (now - p.t0) / 2000);
     p.g.position.lerpVectors(p.from, p.to, u);
-    p.g.quaternion.slerp(p.q, ease);
+    // a flying crocodile faces where it is going: its nose follows its real path between polls, not a heading jump
+    const flying = p.state !== "roost" && p.state !== "bask" && p.state !== "attack" && p.state !== "gather";
+    _f.subVectors(p.to, p.from);
+    if (flying && _f.lengthSq() > 4) {
+      _up.copy(p.g.position).normalize();
+      _f.addScaledVector(_up, -_f.dot(_up)).normalize();
+      _x.crossVectors(_up, _f).normalize();
+      _f.crossVectors(_x, _up);
+      _qFace.setFromRotationMatrix(_mFace.makeBasis(_x, _up, _f));
+      p.g.quaternion.slerp(_qFace, ease);
+    } else p.g.quaternion.slerp(p.q, ease);
     const pose = crocPose(p.state === "migrate" ? "soar" : p.state === "falling" ? "dive" : p.state, wingTime * (p.climb > 1 ? 1.8 : 1), k);
     // physics of flight: nose follows the climb, the body banks into the turn, a glide folds the wings back
     const pitch = THREE.MathUtils.clamp(-p.climb * 0.05, -0.6, 0.5), bank = THREE.MathUtils.clamp(p.turn * 3, -0.7, 0.7);
@@ -160,77 +171,114 @@ export function updateKlyaksaFauna(now) {
     toward(p.jaw, "x", pose.jaw); toward(p.tail, "y", pose.tail);
     toward(p.rig, "x", pose.pitch); p.rig.rotation.z += (pose.bank - p.rig.rotation.z) * ease;
   });
-  updateShells(now);
+  updateShells(now, dt);
   for (const dome of Object.values(state.klyaksaDomes || {})) {
     const f = dome.material.uniforms.uFlash;
     if (f.value > 0.001) f.value *= Math.exp(-dt * 5);
   }
 }
 
-// Air defence: four twin-barrel turrets on the shoulders of every dome; when the city fired since the last poll,
-// bright shells fly from them to the herd (each lives ~0.7 s), with a muzzle flash.
+// Air defence: four turrets on the shoulders of every dome. Each sits in an armoured mount let into the glass (a
+// collar ring and a drum), turns on its mount (yaw) and raises a rack of twelve launch rails (pitch), like a rocket
+// launcher. Before each salvo its rails charge, glowing orange like a railgun; then bolts streak to the target.
+const turrets = [];
 const shells = [];
 const lastShots = {};
-let shellMesh = null, turretMesh = null;
-function turretPositions(c, R) {
-  const out = [], q = new THREE.Quaternion(), r = (c.wall + 45) * 0.62, h = (c.wall + 45) * 0.42 * Math.sqrt(1 - 0.62 * 0.62);
-  for (let k = 0; k < 4; k++) {
-    const a = k * Math.PI / 2 + Math.PI / 4, p = new THREE.Vector3();
-    place(c, Math.cos(a) * r, Math.sin(a) * r, h + 2, a, R, p, q);
-    out.push({ p, q: q.clone() });
-  }
-  return out;
+let boltMesh = null;
+const _a = new THREE.Vector3(), _b = new THREE.Vector3(), _q2 = new THREE.Quaternion(), _m2 = new THREE.Matrix4();
+function domeSpot(c, R, k) {
+  const Rd = c.wall + 45, Hd = Rd * 0.42, rr = Rd * 0.62, a = k * Math.PI / 2 + Math.PI / 4;
+  const p = new THREE.Vector3(), q = new THREE.Quaternion();
+  place(c, Math.cos(a) * rr, Math.sin(a) * rr, Hd * Math.sqrt(1 - 0.62 * 0.62), a, R, p, q);
+  return { p, q, a };
+}
+function buildTurret(body, c, R, k) {
+  const { p, q } = domeSpot(c, R, k);
+  const armour = material("aa-armour", 0x2e3338, { roughness: 0.45, metalness: 0.75 }), trim = material("aa-trim", 0xc8a23a, { roughness: 0.4, metalness: 0.6 });
+  const mount = new THREE.Group();
+  mount.position.copy(p); mount.quaternion.copy(q);
+  // the mount let into the glass: a heavy collar ring flush with the dome, an armoured drum on it
+  mount.add(Object.assign(new THREE.Mesh(new THREE.TorusGeometry(10, 1.6, 10, 32).rotateX(Math.PI / 2), armour), {}));
+  mount.add(Object.assign(new THREE.Mesh(new THREE.CylinderGeometry(8.5, 9.5, 6, 24).translate(0, 2, 0), armour), {}));
+  mount.add(Object.assign(new THREE.Mesh(new THREE.CylinderGeometry(9.6, 9.6, 0.6, 24).translate(0, 5.2, 0), trim), {}));
+  const yaw = new THREE.Group();
+  yaw.position.y = 5.5;
+  mount.add(yaw);
+  yaw.add(new THREE.Mesh(new THREE.BoxGeometry(10, 5, 9).translate(0, 2.5, -1), armour));            // the turret body
+  for (const s of [-1, 1]) yaw.add(new THREE.Mesh(new THREE.BoxGeometry(1.2, 7, 4).translate(s * 5.6, 4.5, 0), armour)); // trunnion cheeks
+  const pitch = new THREE.Group();
+  pitch.position.set(0, 6.5, 0);
+  yaw.add(pitch);
+  const rails = [], glow = new THREE.MeshBasicMaterial({ color: 0xff8a1e, transparent: true, opacity: 0.0, blending: THREE.AdditiveBlending, depthWrite: false });
+  for (let row = 0; row < 3; row++)
+    for (let col = 0; col < 4; col++) {
+      const x = (col - 1.5) * 2.2, y = (row - 1) * 2.0;
+      pitch.add(new THREE.Mesh(new THREE.BoxGeometry(1.2, 1.2, 16).translate(x, y, 6), armour));         // a launch rail
+      const line = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.35, 15.5).translate(x, y + 0.7, 6), glow); // its charge strip
+      pitch.add(line);
+      rails.push(new THREE.Vector3(x, y, 14.5));
+    }
+  pitch.add(new THREE.Mesh(new THREE.BoxGeometry(10.2, 7, 1.2).translate(0, 0, -2), trim));               // the rack's back plate
+  body.add(mount);
+  return { city: c.id, mount, yaw, pitch, glow, rails, charge: 0, aimYaw: 0, aimPitch: 0.6, target: null };
 }
 function ensureTurrets(body, R) {
-  if (turretMesh || !state.klyaksaPlanData) return;
-  const cities = state.klyaksaPlanData.cities;
-  const g = new THREE.BoxGeometry(9, 4, 9).translate(0, 2, 0);
-  const barrel = new THREE.CylinderGeometry(0.5, 0.5, 12, 6).rotateX(Math.PI / 2).translate(1.6, 5, 5);
-  const barrel2 = barrel.clone().translate(-3.2, 0, 0);
-  const merged = new THREE.BufferGeometry();
-  const parts = [g, barrel, barrel2].map((x) => x.toNonIndexed());
-  merged.setAttribute("position", new THREE.Float32BufferAttribute(parts.flatMap((x) => [...x.attributes.position.array]), 3));
-  merged.computeVertexNormals();
-  turretMesh = new THREE.InstancedMesh(merged, material("aa-turret", 0x3d4248, { roughness: 0.6, metalness: 0.5 }), cities.length * 4);
-  const m4 = new THREE.Matrix4();
-  cities.forEach((c, i) => turretPositions(c, R).forEach((t, k) => turretMesh.setMatrixAt(i * 4 + k, m4.compose(t.p, t.q, new THREE.Vector3(1, 1, 1)))));
-  turretMesh.instanceMatrix.needsUpdate = true;
-  turretMesh.computeBoundingSphere();
-  body.add(turretMesh);
-  shellMesh = new THREE.InstancedMesh(new THREE.SphereGeometry(1.4, 6, 4), new THREE.MeshBasicMaterial({ color: 0xffe2a0 }), 160);
-  shellMesh.frustumCulled = false;
-  shellMesh.count = 0;
-  body.add(shellMesh);
+  if (turrets.length || !state.klyaksaPlanData) return;
+  for (const c of state.klyaksaPlanData.cities) for (let k = 0; k < 4; k++) turrets.push(buildTurret(body, c, R, k));
+  boltMesh = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.5, 0.5, 26, 6).rotateX(Math.PI / 2),
+    new THREE.MeshBasicMaterial({ color: 0xffb04a, transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending, depthWrite: false }), 240);
+  boltMesh.frustumCulled = false;
+  boltMesh.count = 0;
+  body.add(boltMesh);
 }
 function tracers(city, c, R, body, now) {
   const h = city.hazards;
   if (!h) return;
   ensureTurrets(body, R);
+  // what the turrets aim at: the herd overhead, or raiders at the dome
+  const targets = [...(h.migrants || []).filter((m) => m.state === "migrate"), ...(city.crocs || []).filter((m) => m.wild && (m.state === "raid" || m.state === "attack"))];
+  const mine = turrets.filter((t) => t.city === city.id);
+  mine.forEach((t, i) => {
+    const m = targets.length ? targets[i % targets.length] : null;
+    t.target = m ? (() => { const v = new THREE.Vector3(), q = new THREE.Quaternion(); place(c, m.x, m.y, m.z, 0, R, v, q); return v; })() : null;
+  });
   const fired = h.aa.shots - (lastShots[city.id] ?? h.aa.shots);
   lastShots[city.id] = h.aa.shots;
-  if (fired <= 0) return;
-  const guns = turretPositions(c, R), q = new THREE.Quaternion();
-  const alive = (h.migrants || []).filter((m) => m.state === "migrate");
-  for (let i = 0; i < Math.min(fired * 3, 60) && alive.length; i++) {
-    const m = alive[i % alive.length], to = new THREE.Vector3();
-    place(c, m.x, m.y, m.z, 0, R, to, q);
-    const from = guns[i % 4].p.clone().addScaledVector(guns[i % 4].p.clone().normalize(), 6);
-    shells.push({ from, to, t0: now + i * 35, life: 700 });
-  }
+  if (fired <= 0 || !targets.length) return;
+  mine.forEach((t, i) => {
+    if (!t.target) return;
+    t.charge = 1;                                             // rails glow, then the salvo leaves
+    for (let k = 0; k < 3; k++) shells.push({ t, rail: (i * 3 + k) % 12, to: t.target.clone(), t0: now + 350 + k * 120, life: 600 });
+  });
 }
-function updateShells(now) {
-  if (!shellMesh) return;
-  const m4 = new THREE.Matrix4(), p = new THREE.Vector3(), one = new THREE.Vector3(1, 1, 1), q = new THREE.Quaternion();
+function updateShells(now, dt) {
+  for (const t of turrets) {
+    // turn and raise the rack towards the target, slowly like a heavy mount
+    if (t.target) {
+      t.mount.worldToLocal(_a.copy(t.target).applyMatrix4(t.mount.parent.matrixWorld));
+      t.aimYaw = Math.atan2(_a.x, _a.z);
+      t.aimPitch = Math.atan2(_a.y - 12, Math.hypot(_a.x, _a.z));
+    }
+    const k = 1 - Math.exp(-dt * 2.5);
+    t.yaw.rotation.y += Math.atan2(Math.sin(t.aimYaw - t.yaw.rotation.y), Math.cos(t.aimYaw - t.yaw.rotation.y)) * k;
+    t.pitch.rotation.x += (-THREE.MathUtils.clamp(t.aimPitch, 0.1, 1.35) - t.pitch.rotation.x) * k;
+    t.glow.opacity = Math.max(t.glow.opacity * Math.exp(-dt * 1.6), t.charge * 0.95);
+    t.charge = Math.max(0, t.charge - dt * 2);
+  }
+  if (!boltMesh) return;
   let n = 0;
   for (let i = shells.length - 1; i >= 0; i--) {
     const s = shells[i], u = (now - s.t0) / s.life;
     if (u > 1) { shells.splice(i, 1); continue; }
-    if (u < 0 || n >= 160) continue;
-    p.lerpVectors(s.from, s.to, u);
-    shellMesh.setMatrixAt(n++, m4.compose(p, q, one.setScalar(u < 0.08 ? 3 : 1)));   // a muzzle flash, then the shell
+    if (u < 0 || n >= 240) continue;
+    s.t.pitch.localToWorld(_a.copy(s.t.rails[s.rail]));
+    s.t.mount.parent.worldToLocal(_a);
+    _b.lerpVectors(_a, s.to, u);
+    _q2.setFromUnitVectors(new THREE.Vector3(0, 0, 1), s.to.clone().sub(_a).normalize());
+    boltMesh.setMatrixAt(n++, _m2.compose(_b, _q2, new THREE.Vector3(1, 1, u < 0.1 ? 0.4 : 1)));
   }
-  shellMesh.count = n;
-  shellMesh.instanceMatrix.needsUpdate = true;
+  boltMesh.count = n;
+  boltMesh.instanceMatrix.needsUpdate = true;
 }
 
 // The lair: where each city's flock sleeps, a ring of boulders round a dark mound with nests and old bones.

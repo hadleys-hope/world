@@ -67,9 +67,37 @@ export function buildPrivateCars(body, R, plan) {
   const pair = (gs) => { const out = new T.BufferGeometry(); out.setAttribute("position", new T.Float32BufferAttribute(gs.flatMap((g) => [...g.toNonIndexed().attributes.position.array]), 3)); return out; };
   const head = body3(pair(lamps(2.48, 0.62)), new T.MeshBasicMaterial({ color: 0xfff4d6 }), cars.length);
   const tail = body3(pair(lamps(-2.48, 0.62)), new T.MeshBasicMaterial({ color: 0xff2a1a }), cars.length);
-  const beamGeo = new T.ConeGeometry(3.2, 18, 12, 1, true).rotateX(-Math.PI / 2).translate(0, 0.7, 11.5);
-  const beams = body3(beamGeo, new T.MeshBasicMaterial({ color: 0xfff0c8, transparent: true, opacity: 0.12, blending: T.AdditiveBlending, depthWrite: false, side: T.DoubleSide }), cars.length);
-  return { R, cars, batches, byStyle, head, tail, beams };
+  // the beam: two cones from the lamps, brightest at the glass and fading with distance and towards the edge;
+  // the pool: an ellipse of light on the road ahead, strongest a few metres out
+  const beamShader = (pool) => new T.ShaderMaterial({
+    transparent: true, depthWrite: false, blending: T.AdditiveBlending, side: T.DoubleSide,
+    uniforms: { uNight: { value: 0 } },
+    vertexShader: `varying vec3 vL; void main() { vL = position; vec4 p = vec4(position, 1.0);
+      #ifdef USE_INSTANCING
+      p = instanceMatrix * p;
+      #endif
+      gl_Position = projectionMatrix * modelViewMatrix * p; }`,
+    fragmentShader: pool
+      ? `uniform float uNight; varying vec3 vL; void main() { vec2 q = vec2(vL.x / 4.2, (vL.z - 10.0) / 9.0); float d = dot(q, q);
+           float a = (1.0 - smoothstep(0.0, 1.0, d)) * smoothstep(2.0, 6.0, vL.z) * 0.55 * uNight; gl_FragColor = vec4(vec3(1.0, 0.93, 0.78) * a, a); }`
+      : `uniform float uNight; varying vec3 vL; void main() { float along = clamp((vL.z - 2.4) / 22.0, 0.0, 1.0); float w = 0.35 + along * 3.2;
+           float side = min(abs(vL.x - 0.62), abs(vL.x + 0.62)) / w; float a = pow(1.0 - along, 1.6) * (1.0 - smoothstep(0.2, 1.0, side)) * 0.22 * uNight;
+           gl_FragColor = vec4(vec3(1.0, 0.95, 0.82) * a, a); }`,
+  });
+  const beamGeo = new T.BufferGeometry();
+  {
+    const pos = [];
+    for (const sx of [-0.62, 0.62]) for (let k = 0; k < 12; k++) {          // a cone per lamp, as 12 thin wedges
+      const a0 = (k / 12) * Math.PI * 2, a1 = ((k + 1) / 12) * Math.PI * 2, r0 = 0.25, r1 = 3.6, z0 = 2.4, z1 = 24;
+      const P0 = [sx + Math.cos(a0) * r0, 0.72 + Math.sin(a0) * r0 * 0.6, z0], P1 = [sx + Math.cos(a1) * r0, 0.72 + Math.sin(a1) * r0 * 0.6, z0];
+      const Q0 = [sx + Math.cos(a0) * r1, 0.72 + Math.sin(a0) * r1 * 0.35 - 0.5, z1], Q1 = [sx + Math.cos(a1) * r1, 0.72 + Math.sin(a1) * r1 * 0.35 - 0.5, z1];
+      pos.push(...P0, ...Q0, ...P1, ...P1, ...Q0, ...Q1);
+    }
+    beamGeo.setAttribute("position", new T.Float32BufferAttribute(pos, 3));
+  }
+  const beams = body3(beamGeo, beamShader(false), cars.length);
+  const pools = body3(new T.PlaneGeometry(9, 20, 1, 1).rotateX(-Math.PI / 2).translate(0, 0.08, 10), beamShader(true), cars.length);
+  return { R, cars, batches, byStyle, head, tail, beams, pools };
 }
 
 function at(road, s) {
@@ -82,8 +110,8 @@ function at(road, s) {
 export function updatePrivateCars(pc, dt) {
   if (!pc) return;
   const night = state.klyaksaNight ?? 0, R = pc.R;
-  pc.beams.visible = night > 0.2;
-  pc.beams.material.opacity = 0.14 * night;
+  pc.beams.visible = pc.pools.visible = night > 0.05;
+  pc.beams.material.uniforms.uNight.value = pc.pools.material.uniforms.uNight.value = night;
   pc.head.material.color.setScalar(0.55 + 0.45 * night).multiply(new T.Color(0xfff4d6));
   pc.cars.forEach((car, i) => {
     car.s += car.dir * car.speed * dt;
@@ -101,7 +129,7 @@ export function updatePrivateCars(pc, dt) {
     const pos = frame(R, x, y, heading, lift);
     _m.compose(pos, _q, _one);
     pc.batches[car.style].setMatrixAt(car.slot, _m);
-    pc.head.setMatrixAt(i, _m); pc.tail.setMatrixAt(i, _m); pc.beams.setMatrixAt(i, _m);
+    pc.head.setMatrixAt(i, _m); pc.tail.setMatrixAt(i, _m); pc.beams.setMatrixAt(i, _m); pc.pools.setMatrixAt(i, _m);
   });
-  for (const m of [...pc.batches, pc.head, pc.tail, pc.beams]) m.instanceMatrix.needsUpdate = true;
+  for (const m of [...pc.batches, pc.head, pc.tail, pc.beams, pc.pools]) m.instanceMatrix.needsUpdate = true;
 }
