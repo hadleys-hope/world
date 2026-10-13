@@ -15,6 +15,7 @@ import {
 } from "./urban/geography.js";
 import { buildWaterfrontSteps, updateMarine } from "./urban/marine.js";
 import { syncKlyaksaFauna, updateKlyaksaFauna } from "./klyaksa-fauna.js";
+import { buildPrivateCars, updatePrivateCars } from "./urban/private-cars.js";
 /** models/klyaksa: the new colony on Klyaksa. A branching chain of glass domes, each a city with the structure
  * of Hadley's Hope (rows of houses, roads, the towers of the hub), linked by glass corridors; forests, meadows
  * and flowers in the valleys around them; gardens inside. Plans come from /klyaksa/geometry.json once, the
@@ -444,6 +445,13 @@ export function updateKlyaksa(now) {
   const body = state.solarSystem.bodies[3];
   updateCityVehicles(now);
   updateKlyaksaFauna(now);
+  const dtCars = Math.min(0.1, Math.max(0, (now - (state.klyaksaCarClock || now)) / 1000));
+  state.klyaksaCarClock = now;
+  if (!state.klyaksaCars && state.klyaksaPlanData && state.klyaksaShipping !== undefined) {
+    state.klyaksaCars = buildPrivateCars(body, state.solarSystem.specs[3].radius, state.klyaksaPlanData);
+    state.klyaksaCentreLocal = dirAt(0, 0, state.solarSystem.specs[3].radius);
+  }
+  updatePrivateCars(state.klyaksaCars, dtCars);
   if (state.klyaksaFrame === undefined || ++state.klyaksaFrame % 12 === 0) {
     const cam = worldPointToBody(3, state.camera.position);
     for (const g of lod) g.userData.update(cam);
@@ -480,6 +488,7 @@ export function updateKlyaksa(now) {
         }
       tint.needsUpdate = true;
       state.klyaksaState = s;
+      state.klyaksaPolledAt = performance.now();
       syncCityVisuals(s, body, state.solarSystem.specs[3].radius);
       syncKlyaksaFauna(s, body, state.solarSystem.specs[3].radius, performance.now());
     })

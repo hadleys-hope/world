@@ -204,6 +204,19 @@ export function updateSolarSystem(now, dt) {
       b.userData.spinAxis,
       (ss.spinTime / ss.specs[i].spinPeriod) * Math.PI * 2,
     );
+    const kc = i === 3 && state.klyaksaState?.cities?.[0];
+    if (kc && state.klyaksaCentreLocal) {
+      // Klyaksa turns with its colony's clock: noon in Meridian faces the star, midnight faces away
+      const speed = state.S?.speed || 20, ticks = kc.sim_tick + (kc.paused ? 0 : ((now - (state.klyaksaPolledAt || now)) / 1000) * speed);
+      const hour = (ticks % 1440) / 60, a = b.userData.spinAxis;
+      const sun = positions[i].clone().negate().normalize();
+      const flat = (v) => v.clone().addScaledVector(a, -v.dot(a)).normalize();
+      const cp = flat(state.klyaksaCentreLocal), sp = flat(sun);
+      const noon = Math.atan2(a.dot(cp.clone().cross(sp)), cp.dot(sp));
+      b.quaternion.setFromAxisAngle(a, noon + ((hour - 12) / 24) * Math.PI * 2);
+      const up = state.klyaksaCentreLocal.clone().applyQuaternion(b.quaternion);
+      state.klyaksaNight = Math.min(1, Math.max(0, (0.12 - up.dot(sun)) / 0.3));
+    }
     if (b.userData.surface) {
       b.userData.surface.uniforms.uTime.value = time;
       b.userData.surface.uniforms.uLight.value

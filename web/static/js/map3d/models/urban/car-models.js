@@ -27,14 +27,18 @@ export function carStyle(k) {
   shape.lineTo(0.5 * L, 0.32);
   shape.closePath();
   const body = new T.ExtrudeGeometry(shape, { depth: W, bevelEnabled: true, bevelSize: 0.06, bevelThickness: 0.06, bevelSegments: 1 })
-    .translate(0, 0, -W / 2).rotateY(Math.PI / 2).toNonIndexed();
+    .translate(0, 0, -W / 2).rotateY(Math.PI / 2);   // ExtrudeGeometry is already non-indexed
   const parts = [[body, 0xffffff]];
   // the glasshouse: a darker band just under the roof line
   const roofTop = Math.max(...prof.map((p) => p[1]));
   parts.push([new T.BoxGeometry(W * 0.86, (roofTop - 0.95) * 0.55, L * 0.32).translate(0, roofTop - (roofTop - 0.95) * 0.35, -L * 0.03), 0x1d2731]);
   for (const sx of [-1, 1]) for (const sz of [-1, 1])
     parts.push([new T.CylinderGeometry(0.34, 0.34, 0.26, 12).rotateZ(Math.PI / 2).translate(sx * (W / 2 - 0.05), 0.34, sz * L * 0.32), 0x151515]);
-  parts.push([new T.BoxGeometry(W * 0.7, 0.12, 0.05).translate(0, 0.72, L / 2 + 0.06), 0xfff6d8], [new T.BoxGeometry(W * 0.7, 0.12, 0.05).translate(0, 0.78, -L / 2 - 0.06), 0xc0201a]);
+  for (const sx of [-1, 1]) for (const sz of [-1, 1])
+    parts.push([new T.CylinderGeometry(0.22, 0.22, 0.28, 10).rotateZ(Math.PI / 2).translate(sx * (W / 2 - 0.03), 0.34, sz * L * 0.32), 0xb8bcc2]); // rims
+  parts.push([new T.BoxGeometry(W * 0.42, 0.04, L * 0.16).translate(0, roofTop + 0.04, -L * 0.04), 0x0f1418]);            // sunroof
+  for (const sx of [-1, 1]) parts.push([new T.BoxGeometry(0.22, 0.14, 0.12).translate(sx * (W / 2 + 0.09), 1.0, L * 0.12), 0x1a1a1a]); // mirrors
+  parts.push([new T.BoxGeometry(W * 0.5, 0.22, 0.05).translate(0, 0.55, L / 2 + 0.05), 0x111111]);                         // grille
   const pos = [], nor = [], col = [];
   for (const [g0, color] of parts) {
     const g = g0.index ? g0.toNonIndexed() : g0;
