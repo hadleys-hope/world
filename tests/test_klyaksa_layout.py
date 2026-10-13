@@ -26,7 +26,8 @@ class PresentationPlanTests(unittest.TestCase):
 
     def test_every_city_has_reserved_services_and_connected_gates(self):
         for c in self.geometry['cities']:
-            self.assertGreaterEqual(len(c['parks']), 10)
+            # Meridian's blocks are fewer (canal, port, wider streets): its green runs along the water instead
+            self.assertGreaterEqual(len(c['parks']), 6 if c['river']['enabled'] else 10)
             self.assertEqual({p['sector'] for p in c['sector_services']}, set(range(6)))
             kinds = {p['kind'] for p in c['parcels']}
             self.assertTrue({'bank', 'bigtech', 'government', 'hospital', 'fire', 'library',

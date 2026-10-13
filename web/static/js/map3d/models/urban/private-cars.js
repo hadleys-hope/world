@@ -34,7 +34,8 @@ export function buildPrivateCars(body, R, plan) {
       const cum = [0];
       for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
       if (cum.at(-1) < 20) continue;
-      const r = { pts, cum, len: cum.at(-1), width: road.width || 10, next: [[], []], city: c, plan: road };
+      const lanes = road.lanes || ((road.width || 10) >= 15 ? 4 : 2), park = road.parking ? 2.4 : 0;
+      const r = { pts, cum, len: cum.at(-1), width: road.width || 10, next: [[], []], city: c, plan: road, lanes, oneway: !!road.oneway, park, driveHalf: (road.width || 10) / 2 - park - 0.45 };
       roads.push(r); mine.push(r);
     }
     // junctions: road ends within 6 m of each other connect
@@ -45,11 +46,11 @@ export function buildPrivateCars(body, R, plan) {
       if (!ends.has(k)) ends.set(k, []);
       ends.get(k).push([r, end]);
     }
-    for (const r of mine) for (const end of [0, 1]) r.next[end] = (ends.get(key(end ? r.pts.at(-1) : r.pts[0])) || []).filter(([o]) => o !== r);
+    for (const r of mine) for (const end of [0, 1]) r.next[end] = (ends.get(key(end ? r.pts.at(-1) : r.pts[0])) || []).filter(([o, e]) => o !== r && !(o.oneway && e === 1));
     const n = Math.min(260, Math.round(c.houses / 6));
     for (let k = 0; k < n && mine.length; k++) {
       const r = mine[Math.floor(rnd() * mine.length)];
-      cars.push({ road: r, s: rnd() * r.len, dir: rnd() < 0.5 ? 1 : -1, speed: 9 + rnd() * 8, style: Math.floor(rnd() * STYLES.length), paint: Math.floor(rnd() * PAINT.length) });
+      cars.push({ road: r, s: rnd() * r.len, dir: r.oneway || rnd() < 0.5 ? 1 : -1, lane: Math.floor(rnd() * 2), speed: 9 + rnd() * 8, style: Math.floor(rnd() * STYLES.length), paint: Math.floor(rnd() * PAINT.length) });
     }
   }
   // one batch per body style, painted per car; one batch each for headlamps, tail-lamps and the beams
@@ -97,7 +98,31 @@ export function buildPrivateCars(body, R, plan) {
   }
   const beams = body3(beamGeo, beamShader(false), cars.length);
   const pools = body3(new T.PlaneGeometry(9, 20, 1, 1).rotateX(-Math.PI / 2).translate(0, 0.08, 10), beamShader(true), cars.length);
-  return { R, cars, batches, byStyle, head, tail, beams, pools };
+  const parked = STYLES.map(() => []);
+  let total = 0;
+  for (const r of roads) {
+    if (!r.park) continue;
+    for (const side of r.oneway ? [-1, 1] : [-1, 1])
+      for (let s = 14; s < r.len - 14 && total < 2600; s += 6.4) {
+        if (rnd() < 0.35) continue;
+        const [x0, y0, h0] = at(r, s), off = side * (r.driveHalf + r.park / 2);
+        parked[Math.floor(rnd() * STYLES.length)].push([x0 + Math.sin(h0) * off, y0 - Math.cos(h0) * off, h0 + (rnd() < 0.5 ? 0 : Math.PI), Math.floor(rnd() * PAINT.length)]);
+        total++;
+      }
+  }
+  parked.forEach((list, k) => {
+    if (!list.length) return;
+    const g = carStyle(k);
+    g.setAttribute("color", g.getAttribute("aCol"));
+    const m = new T.InstancedMesh(g, new T.MeshStandardMaterial({ vertexColors: true, roughness: 0.35, metalness: 0.55 }), list.length);
+    list.forEach(([x, y, h, p], i) => { m.setMatrixAt(i, _m.compose(frame(R, x, y, h, 0), _q, _one)); m.setColorAt(i, new T.Color(PAINT[p])); });
+    m.instanceMatrix.needsUpdate = true;
+    m.computeBoundingSphere();
+    body.add(m);
+  });
+  const roadsByCity = new Map();
+  for (const r of roads) roadsByCity.set(r.city.id, [...(roadsByCity.get(r.city.id) || []), r]);
+  return { R, cars, batches, byStyle, head, tail, beams, pools, parked: total, roadsByCity };
 }
 
 function at(road, s) {
@@ -120,10 +145,15 @@ export function updatePrivateCars(pc, dt) {
       if (options.length) {
         const [r, e] = options[Math.floor(Math.random() * options.length)];
         car.road = r; car.dir = e === 0 ? 1 : -1; car.s = e === 0 ? 0 : r.len;
-      } else { car.dir = -car.dir; car.s = Math.max(0, Math.min(car.road.len, car.s)); }
+      } else if (car.road.oneway || !car.road.next[end].length) {
+        // a dead end, or a one-way street with nowhere to go: the car turns off out of sight and another drives in
+        const pool = pc.roadsByCity.get(car.road.city.id).filter((r) => !r.oneway);
+        car.road = pool[Math.floor(Math.random() * pool.length)]; car.dir = 1; car.s = 0;
+      } else { car.dir = -car.dir; car.s = Math.max(0, Math.min(car.road.len, car.s)); }   // waits for a raised bridge, then turns
     }
     const [x0, y0, h0] = at(car.road, car.s), heading = car.dir > 0 ? h0 : h0 + Math.PI;
-    const lane = Math.min(car.road.width / 4, 2.6);                      // keep right
+    const rd = car.road, perDir = rd.oneway ? 1 : Math.max(1, rd.lanes / 2), lw = (rd.oneway ? 2 * rd.driveHalf : rd.driveHalf) / perDir;
+    const lane = rd.oneway ? 0 : lw * ((car.lane % perDir) + 0.5);           // keep right, in its own lane
     const x = x0 + Math.sin(heading) * lane, y = y0 - Math.cos(heading) * lane;
     const lift = roadElevation(car.road.city, car.road.plan, x - car.road.city.at[0], y - car.road.city.at[1]) || 0;   // up onto the bridges
     const pos = frame(R, x, y, heading, lift);

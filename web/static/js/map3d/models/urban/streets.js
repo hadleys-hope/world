@@ -175,6 +175,11 @@ export function roadCrossesRiver(c, r) {
 /** Kept on each graph edge so traffic, markings and utility underpasses share a deck height. */
 export function roadElevation(c, r, x, y) {
   if (!roadCrossesRiver(c, r)) return 0;
+  if (c.waterways) {
+    const a = r.points[0], b = r.points.at(-1), dx = b[0] - a[0], dy = b[1] - a[1];
+    const t = Math.max(0, Math.min(1, ((x - a[0]) * dx + (y - a[1]) * dy) / (dx * dx + dy * dy || 1)));
+    return (r.id.includes("cable") ? 6 : 2.5) * Math.sin(Math.PI * t);   // 0 at both embankments, no step
+  }
   const a = r.points[0],
     b = r.points.at(-1),
     delta = (px, py) => py + c.at[1] - riverCentre(px + c.at[0]),
@@ -287,7 +292,11 @@ export function* buildDistrict(c, body, R, globalPoint, env) {
     const gapA = endpointGap(edge.a),
       gapB = endpointGap(edge.b),
       cycle = r.width >= 12 && r.kind !== "service",
-      width = r.width;
+      width = r.width,
+      lanes = r.lanes || (r.width >= 15 ? 4 : 2),
+      park = r.parking ? 2.4 : 0,
+      driveHalf = width / 2 - park - 0.45,
+      bascule = c.waterways && r.id.startsWith("bridge-bascule");
     let distance = 0,
       nextFurniture = 28;
     for (let j = 1; j < r.points.length; j++) {
@@ -307,6 +316,10 @@ export function* buildDistrict(c, body, R, globalPoint, env) {
           d = distance + ((k + 0.5) * L) / pieces;
         if (d < gapA || edge.length - d < gapB) continue;
         const midpoint = [(a[0] + z[0]) / 2, (a[1] + z[1]) / 2];
+        // over the water a bascule bridge's deck is its leaves (urban/meridian.js), which lift
+        if (bascule && riverContains(c.at[0] + midpoint[0], c.at[1] + midpoint[1], 6)) continue;
+        if (lanes === 4) for (const o of [-0.18, 0.18]) asphalt.strip(a, z, 0.12, 0.28, 0xf0e6c8, o);   // the double centre line
+        if (park) for (const side of [-1, 1]) asphalt.strip(a, z, 0.1, 0.275, 0xd8d6c4, side * driveHalf);  // the parking bays' edge
         if (
           accesses.some(
             (p) => Math.hypot(p.x - midpoint[0], p.y - midpoint[1]) < 6,
@@ -333,14 +346,11 @@ export function* buildDistrict(c, body, R, globalPoint, env) {
         }
       }
       for (let d = Math.ceil(distance / 9) * 9; d < distance + L; d += 9) {
-        if (d < gapA || edge.length - d < gapB) continue;
-        asphalt.strip(
-          at(Math.max(0, (d - distance) / L)),
-          at(Math.min(1, (d + 4 - distance) / L)),
-          0.17,
-          0.28,
-          0xe1debe,
-        );
+        if (d < gapA || edge.length - d < gapB || r.oneway) continue;
+        const p0 = at(Math.max(0, (d - distance) / L)), p1 = at(Math.min(1, (d + 4 - distance) / L));
+        if (bascule && riverContains(c.at[0] + p0[0], c.at[1] + p0[1], 6)) continue;
+        if (lanes === 4) for (const o of [-driveHalf / 2, driveHalf / 2]) asphalt.strip(p0, p1, 0.15, 0.28, 0xe1debe, o);  // lane lines
+        else asphalt.strip(p0, p1, 0.17, 0.28, 0xe1debe);                                                               // centre dashes
       }
       while (nextFurniture < distance + L) {
         const p = at((nextFurniture - distance) / L),

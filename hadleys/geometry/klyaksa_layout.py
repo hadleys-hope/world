@@ -51,8 +51,15 @@ def meridian_network(R, add_road, nodes, node_by_id):
     """Nodes and roads of Meridian; returns the quads (block centres) and the waterways for the 3D view."""
     made = []
 
-    def _road(*a, **k):
-        r = add_road(*a, **k)
+    CLASS = {'avenue': (18, 4, False, False), 'embankment': (18, 4, False, False), 'street': (13, 2, False, True),
+             'lane': (8, 1, True, True), 'port': (14, 2, False, False)}
+
+    def _road(ident, a, b, points, width=11, kind='street', service=False, cls=None):
+        """Every Meridian street has a class: its width, lanes, one-way or not, and whether cars park along it."""
+        cls = cls or ('avenue' if kind == 'avenue' else 'embankment' if kind == 'embankment' else 'street')
+        w, lanes, oneway, parking = CLASS[cls]
+        r = add_road(ident, a, b, points, w, 'avenue' if lanes == 4 else kind if kind != 'avenue' else 'street', service)
+        r.update({'lanes': lanes, 'oneway': oneway, 'parking': parking, 'class': cls})
         made.append(r)
         return r
 
@@ -119,7 +126,10 @@ def meridian_network(R, add_road, nodes, node_by_id):
                 pts = [(x, y * side if side < 0 else y) for x, y in pts] if side > 0 else [(x, cy - (y - cy)) for x, y in pts]
                 if not any(in_port(x, y) for x, y in pts) and all(inside(x, y) for x, y in pts):
                     pts[0], pts[-1] = (node_by_id[a]['x'], node_by_id[a]['y']), (node_by_id[b]['x'], node_by_id[b]['y'])
-                    _road(f'ring-{a}-{b}', a, b, pts, 15 if k in (2, 6) else 11, 'avenue' if k in (2, 6) else 'street')
+                    inner_lane = k < (2 if side > 0 else 1)
+                    if inner_lane and k % 2:
+                        a, b, pts = b, a, pts[::-1]          # every other lane runs the other way round
+                    _road(f'ring-{a}-{b}', a, b, pts, kind='avenue' if k in (2, 6) else 'street', cls='lane' if inner_lane else None)
             inner = k + 1 < (4 if side > 0 else 3)   # fewer radial streets near the square: bigger inner blocks
             c = grid.get((k + 1, j)) if not (inner and j % 2) else None
             if c:   # spoke
@@ -172,9 +182,9 @@ def meridian_network(R, add_road, nodes, node_by_id):
     # the port: a ring road round the basin and its yards, joined to the south rings
     pw, pe = embank[-1][PORT[0]], embank[-1][PORT[2]]
     sw, se = node('port-sw', PORT[0], PORT[1]), node('port-se', PORT[2], PORT[1])
-    _road('port-west', pw, sw, line((PORT[0], river_centre(PORT[0]) - EMB), (PORT[0], PORT[1])), 15, 'avenue')
-    _road('port-south', sw, se, line((PORT[0], PORT[1]), (PORT[2], PORT[1])), 15, 'avenue')
-    _road('port-east', se, pe, line((PORT[2], PORT[1]), (PORT[2], river_centre(PORT[2]) - EMB)), 15, 'avenue')
+    _road('port-west', pw, sw, line((PORT[0], river_centre(PORT[0]) - EMB), (PORT[0], PORT[1])), cls='port')
+    _road('port-south', sw, se, line((PORT[0], PORT[1]), (PORT[2], PORT[1])), cls='port')
+    _road('port-east', se, pe, line((PORT[2], PORT[1]), (PORT[2], river_centre(PORT[2]) - EMB)), cls='port')
     for ident in [n['id'] for n in nodes if n['id'].startswith('ms')]:
         n = node_by_id[ident]
         for corner in (sw, se):

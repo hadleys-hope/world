@@ -7,7 +7,7 @@ import { state } from "../../state.js";
 import { PLATEAU } from "../../geometry/noise.js";
 import { dirAt } from "../klyaksa.js";
 import { waterMaterial } from "../waters.js";
-import { Surface } from "./streets.js";
+import { roadElevation, Surface } from "./streets.js";
 import { bridgeLift, riverBounds, riverCentre, riverLevel, riverWidth } from "./geography.js";
 import { KINDS, poseAt } from "./shipping.js";
 import * as T from "three";
@@ -107,7 +107,8 @@ export function buildMeridian(body, R, plan, env) {
     const [nx, ny] = b.n, [sx, sy] = b.s, len = Math.hypot(nx - sx, ny - sy), heading = Math.atan2(ny - sy, nx - sx);
     const ux = (nx - sx) / len, uy = (ny - sy) / len, vx = -uy, vy = ux, width = 18;
     const at = (t, off = 0) => [sx + ux * len * t + vx * off, sy + uy * len * t + vy * off];
-    const lift = (t) => bridgeLift(at(t)[1], at(t)[0]);
+    // the deck follows the road's own height (streets.roadElevation): level with both embankments, arched over the water
+    const road = roadOf(b.id), lift = (t) => (road ? roadElevation(c, road, ...at(t)) : 0);
     if (b.kind === "cable") {
       // the deck rides the road's own lift; one or two A-pylons, stays fanned to both edges, LED strips at night
       const deck = new Surface(P);
@@ -144,32 +145,42 @@ export function buildMeridian(body, R, plan, env) {
       body.add(led);
       bridges.push({ ...b, len });
     } else {
-      // bascule: two leaves hinged at the river's banks; towers with counterweights; lights and barriers
-      const half = riverWidth(0) + 4, mid = 0.5, hingeT = [mid - half / len, mid + half / len];
+      // bascule: two leaves hinged at the river's walls meet over the middle of the channel; a stone tower with a
+      // pyramid roof over each hinge; a girder, an asphalt top with lane lines and railings on each leaf
+      const delta = (t) => at(t)[1] - riverCentre(at(t)[0]);
+      const solve = (target) => { let lo = 0, hi = 1; const up = delta(1) > delta(0); for (let i = 0; i < 40; i++) { const m = (lo + hi) / 2; ((delta(m) < target) === up) ? (lo = m) : (hi = m); } return (lo + hi) / 2; };
+      const edgeW = riverWidth(0) + 2, mid = solve(0), hingeT = [solve(-edgeW), solve(edgeW)].sort((p, q) => p - q);
       const leaves = [];
-      hingeT.forEach((th, li) => {
-        const sign = li === 0 ? 1 : -1;     // each leaf reaches from its hinge towards the middle
+      const girder = new T.MeshStandardMaterial({ color: 0x7a2e24, roughness: 0.55, metalness: 0.45 }), top = new T.MeshStandardMaterial({ color: 0x2c3034, roughness: 0.85 });
+      const paint = new T.MeshBasicMaterial({ color: 0xe9e4cf }), rail = new T.MeshStandardMaterial({ color: 0xc9cdd1, roughness: 0.4, metalness: 0.6 });
+      const stoneMat = new T.MeshStandardMaterial({ color: 0xb9ae9a, roughness: 0.9 }), roofMat = new T.MeshStandardMaterial({ color: 0x3d4a45, roughness: 0.7 });
+      hingeT.forEach((th) => {
         const g = new T.Group();
-        g.position.copy(P(...at(th), lift(th) - 0.4));
-        const up = g.position.clone().normalize(), fwd = new T.Vector3().subVectors(P(...at(mid), lift(mid)), g.position).normalize();
+        g.position.copy(P(...at(th), lift(th) - 0.05));
+        const up = g.position.clone().normalize(), fwd = new T.Vector3().subVectors(P(...at(mid), lift(mid)), g.position);
+        const reach = fwd.length();
         fwd.addScaledVector(up, -fwd.dot(up)).normalize();
         const right = new T.Vector3().crossVectors(up, fwd).normalize();
         g.quaternion.setFromRotationMatrix(new T.Matrix4().makeBasis(right, up, fwd));
-        const leaf = new T.Mesh(new T.BoxGeometry(width, 1.4, half).translate(0, -0.7, half / 2), deckMat);
-        const rail = new T.Mesh(new T.BoxGeometry(width + 0.6, 1.2, half).translate(0, 0.6, half / 2), new T.MeshStandardMaterial({ color: 0xb03a2e, roughness: 0.6, wireframe: true }));
-        g.add(leaf, rail);
+        g.add(new T.Mesh(new T.BoxGeometry(width, 1.8, reach).translate(0, -1.0, reach / 2), girder));
+        g.add(new T.Mesh(new T.BoxGeometry(width - 0.2, 0.2, reach).translate(0, 0.0, reach / 2), top));
+        for (const o of [-width / 4, width / 4]) for (let z = 2; z < reach - 2; z += 9) g.add(new T.Mesh(new T.BoxGeometry(0.15, 0.04, 4).translate(o, 0.12, z + 2), paint));
+        for (const o of [-0.18, 0.18]) g.add(new T.Mesh(new T.BoxGeometry(0.12, 0.04, reach).translate(o, 0.12, reach / 2), paint));
+        for (const s of [-1, 1]) g.add(new T.Mesh(new T.BoxGeometry(0.25, 1.1, reach).translate(s * (width / 2 - 0.2), 0.6, reach / 2), rail));
         body.add(g);
-        // the tower over the hinge: stone, a lit window band
-        const tower = new T.Mesh(new T.BoxGeometry(width + 6, 22, 10), new T.MeshStandardMaterial({ color: 0x9a8f80, roughness: 0.9 }));
-        tower.position.copy(P(...at(th - sign * 6 / len), lift(th) + 9));
+        const back = th < mid ? -1 : 1, tp = th + back * (6 / len);
+        const tower = new T.Group();
+        tower.position.copy(P(...at(tp), lift(tp)));
         tower.quaternion.copy(g.quaternion);
+        tower.add(new T.Mesh(new T.BoxGeometry(5, 14, 7).translate(-(width / 2 + 3), 7, 0), stoneMat), new T.Mesh(new T.BoxGeometry(5, 14, 7).translate(width / 2 + 3, 7, 0), stoneMat));
+        tower.add(new T.Mesh(new T.ConeGeometry(4.4, 5, 4).rotateY(Math.PI / 4).translate(-(width / 2 + 3), 16.5, 0), roofMat), new T.Mesh(new T.ConeGeometry(4.4, 5, 4).rotateY(Math.PI / 4).translate(width / 2 + 3, 16.5, 0), roofMat));
         body.add(tower);
         leaves.push({ g, base: g.quaternion.clone(), right });
       });
       const lightMats = [0, 1].map(() => new T.MeshBasicMaterial({ color: 0x29d36a }));
-      for (const [t, s] of [[0.12, 1], [0.88, -1]]) {
-        const lamp = new T.Mesh(new T.SphereGeometry(0.8, 8, 6), lightMats[0]);
-        lamp.position.copy(P(...at(t, width / 2 + 2), lift(t) + 5));
+      for (const [t, s] of [[hingeT[0] - 14 / len, 1], [hingeT[1] + 14 / len, -1]]) {
+        const lamp = new T.Mesh(new T.SphereGeometry(0.6, 8, 6), lightMats[0]);
+        lamp.position.copy(P(...at(t, width / 2 + 1.5), lift(t) + 4));
         body.add(lamp);
       }
       bridges.push({ ...b, len, leaves, open: 0, stop: false, red: 0, lightMats, at, lift, road: roadOf(b.id)?.id || "bridge-" + b.id });
