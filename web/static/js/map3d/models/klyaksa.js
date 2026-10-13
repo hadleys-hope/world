@@ -11,8 +11,7 @@ import {
 import {
   enableCityRiver,
   configureCityRiver,
-  riverContains,
-} from "./urban/geography.js";
+  riverContains, setWaterways } from "./urban/geography.js";
 import { buildWaterfrontSteps, updateMarine } from "./urban/marine.js";
 import { syncKlyaksaFauna, updateKlyaksaFauna } from "./klyaksa-fauna.js";
 import { buildPrivateCars, updatePrivateCars } from "./urban/private-cars.js";
@@ -70,6 +69,7 @@ export async function klyaksaSites(R) {
   const plan = await state.klyaksaPlan;
   if (!plan) return null;
   enableCityRiver(R);
+  setWaterways(plan.cities.find((c) => c.waterways)?.waterways);
   const sites = plan.cities.flatMap((c) => [
     { dir: dirAt(...c.at, R).toArray(), r: (c.wall + 160) / R },
     ...Object.entries(c.facilities || {}).map(([kind, [x, y]]) => ({

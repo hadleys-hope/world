@@ -88,7 +88,7 @@ export function updatePrivateCars(pc, dt) {
   pc.cars.forEach((car, i) => {
     car.s += car.dir * car.speed * dt;
     if (car.s < 0 || car.s > car.road.len) {
-      const end = car.s > car.road.len ? 1 : 0, options = car.road.next[end];
+      const end = car.s > car.road.len ? 1 : 0, options = car.road.next[end].filter(([r]) => !state.meridianStops?.has(r.plan.id));
       if (options.length) {
         const [r, e] = options[Math.floor(Math.random() * options.length)];
         car.road = r; car.dir = e === 0 ? 1 : -1; car.s = e === 0 ? 0 : r.len;

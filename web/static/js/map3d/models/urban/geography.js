@@ -85,9 +85,27 @@ export function riverDepth(x, lateral = 0) {
   const shoal = x < -1200 ? 2.4 * Math.exp(-(((x + 1540) / 85) ** 2)) : 0;
   return Math.max(2, 10 - shoal - 5.5 * Math.pow(Math.abs(lateral), 6));
 }
+// Meridian's canal and port basin (plan.waterways), carved like the river: a bed with walls to the bank
+let ways = null;
+export function setWaterways(w) {
+  ways = w || null;
+}
+export function wayWater(x, y, margin = 0) {
+  if (!ways) return false;
+  const [x0, y0, x1, y1] = ways.basin;
+  if (x > x0 - margin && x < x1 + margin && y > y0 - margin && y < y1 + margin) return true;
+  const c = ways.canal, hw = ways.canal_half_width + margin;
+  for (let i = 1; i < c.length; i++) {
+    const [ax, ay] = c[i - 1], [bx, by] = c[i], dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy || 1;
+    const t = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / L2));
+    if (Math.hypot(x - ax - dx * t, y - ay - dy * t) < hw) return true;
+  }
+  return false;
+}
 export function riverHeight(nx, ny, nz, h) {
   if (!enabled) return h;
   const [x, y] = planPosition(nx, ny, nz);
+  if (ways && wayWater(x, y, 3)) return (riverLevel(0) - (wayWater(x, y) ? 4 : 0.5)) / radius;
   if (x < RIVER_SOURCE || x > mouth) return h;
   const width = riverWidth(x),
     d = Math.abs(y - riverCentre(x)),

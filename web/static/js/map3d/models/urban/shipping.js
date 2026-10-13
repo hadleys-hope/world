@@ -48,7 +48,7 @@ function hull(length, beam, depth, color, bow = 0.16) {
   parts.push(part(B(beam * 1.01, depth * 0.25, length * (1 - bow)), 0x2b2b2b, 0, depth * 0.12, -length * bow / 2)); // boot top
   return parts;
 }
-const KINDS = {
+export const KINDS = {
   container: () => {          // 160 m: stacks of containers forward, the tall bridge aft (needs bridges to open)
     const p = hull(160, 26, 12, 0x24384d);
     for (let row = 0; row < 14; row++) for (let tier = 0; tier < 4; tier++) for (let col = 0; col < 3; col++)
@@ -100,7 +100,7 @@ const KINDS = {
 };
 
 // ---------- placement on the planet ----------
-function frameAt(R, x, y, heading, h) {
+export function frameAt(R, x, y, heading, h) {
   _n.copy(dirAt(x, y, R));
   _e.copy(dirAt(x + 1, y, R)).sub(_n).normalize();
   _no.copy(dirAt(x, y + 1, R)).sub(_n).normalize();
@@ -109,6 +109,11 @@ function frameAt(R, x, y, heading, h) {
   _f.crossVectors(_r, _n);
   _q.setFromRotationMatrix(_m.makeBasis(_r, _n, _f));
   return _n.multiplyScalar(R + h);
+}
+/** The full pose (position and turn) of something standing at (x, y) facing `heading`, h metres above R. */
+export function poseAt(R, x, y, heading, h, scale = 1) {
+  const p = frameAt(R, x, y, heading, h).clone();
+  return new T.Matrix4().compose(p, _q.clone(), new T.Vector3(scale, scale, scale));
 }
 const wet = (R, x, y) => { const n = dirAt(x, y, R); return bodyHeight(3, n.x, n.y, n.z) * R < -4; };
 

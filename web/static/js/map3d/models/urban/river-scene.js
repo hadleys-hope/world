@@ -44,7 +44,7 @@ function bridgeGeometry(width = 18, span = 112, tower = 47, drop = 42) {
   return m.finish();
 }
 export function riverCrossings(city) {
-  if (city.id !== "k1") return [];
+  if (city.id !== "k1" || city.waterways) return [];   // Meridian's designed bridges: urban/meridian.js
   const result = [];
   for (const road of city.roads || [])
     for (let i = 1; i < road.points.length; i++) {

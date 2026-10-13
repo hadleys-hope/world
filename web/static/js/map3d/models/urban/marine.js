@@ -12,6 +12,7 @@ import {
 /** Klyaksa waterfronts and local exploration vessels. No server-domain updates or synthetic telemetry. */
 import * as T from "three";
 import { buildShipping, updateShipping } from "./shipping.js";
+import { buildMeridian, updateMeridian } from "./meridian.js";
 import { state } from "../../state.js";
 import { bodyHeight, PLATEAU } from "../../geometry/noise.js";
 import { dirAt } from "../klyaksa.js";
@@ -583,6 +584,9 @@ export function* buildWaterfrontSteps(body, R, plan, env, cityPoint) {
   // the sea trade between these ports (urban/shipping.js): fleets, cranes, the yard and its vehicles
   state.klyaksaShipping = buildShipping(body, R, env);
   yield;
+  // Meridian's waterfront: canal, river port, its bridges, stages, boats, estuary (urban/meridian.js)
+  state.meridianWaterfront = buildMeridian(body, R, plan, env);
+  yield;
   yield* buildRiverSceneSteps(body, R, plan, env);
 }
 
@@ -722,6 +726,7 @@ export function updateMarine(now) {
   const dtShip = Math.min(0.1, Math.max(0, (now - (state.klyaksaShipClock || now)) / 1000));
   state.klyaksaShipClock = now;
   if (state.activeBody === 3) updateShipping(state.klyaksaShipping, dtShip);
+  if (state.activeBody === 3) updateMeridian(state.meridianWaterfront, dtShip);
   if (!state.klyaksaBoats || state.activeBody !== 3) return;
   const dt = Math.min(
     0.05,
