@@ -379,7 +379,8 @@ export function* buildDistrict(c, body, R, globalPoint, env) {
         u = [dx / L, dy / L],
         n = [-u[1], u[0]],
         half = edge.road.width / 2,
-        stop = radius + 3.5;
+        zebraAt = radius + 2.6,           // the crossing, right at the junction
+        stop = zebraAt + 3.2;             // the stop line comes first for an arriving car: before the crossing
       const deck = (xx, yy, h) =>
           point(xx, yy, h + roadElevation(c, edge.road, xx, yy)),
         paint = allRoads;
@@ -393,7 +394,7 @@ export function* buildDistrict(c, body, R, globalPoint, env) {
         0.285,
         0xefe6ce,
       );
-      const zebra = stop + 4.5;
+      const zebra = zebraAt;
       for (let lane = -half + 0.5; lane < half - 0.2; lane += 1.05) {
         const Z = [
           x + u[0] * zebra + n[0] * lane,
@@ -436,21 +437,48 @@ export function* buildDistrict(c, body, R, globalPoint, env) {
           0.3,
           1,
         );
-      approaches.push({ u, n, half });
+      approaches.push({ u, n, half, angle: Math.atan2(u[1], u[0]) });
     }
+    // corners: the sidewalk, its curb and the kerb line turn round each corner on a curve, from one street to
+    // the next, so pavements join instead of stopping short of the junction
+    const gap = Math.max(...node.edges.map((e) => e.road.width)) * 0.75 + 3;
+    const around = [...approaches].sort((p, q) => p.angle - q.angle);
+    if (around.length > 2)
+      for (let k = 0; k < around.length; k++) {
+        const A = around[k], Z = around[(k + 1) % around.length];
+        let turn = Z.angle - A.angle;
+        if (turn <= 0) turn += Math.PI * 2;
+        if (turn > Math.PI * 0.95) continue;              // no corner across a straight-through gap
+        for (const [off, w, h, color] of [[1.1, 2.2, 0.46, 0xa9aaa1], [-0.45, 0.16, 0.27, 0xe1debe]]) {
+          const pA = [x + A.u[0] * gap + A.n[0] * (A.half + off), y + A.u[1] * gap + A.n[1] * (A.half + off)];
+          const pZ = [x + Z.u[0] * gap - Z.n[0] * (Z.half + off), y + Z.u[1] * gap - Z.n[1] * (Z.half + off)];
+          // the corner point where the two kerb lines meet is the curve's control point
+          const oA = [x + A.n[0] * (A.half + off), y + A.n[1] * (A.half + off)], oZ = [x - Z.n[0] * (Z.half + off), y - Z.n[1] * (Z.half + off)];
+          const det = A.u[0] * -Z.u[1] + A.u[1] * Z.u[0];
+          const s = Math.abs(det) < 1e-6 ? gap : ((oZ[0] - oA[0]) * -Z.u[1] + (oZ[1] - oA[1]) * Z.u[0]) / det;
+          const ctl = [oA[0] + A.u[0] * Math.min(gap, Math.max(0, s)), oA[1] + A.u[1] * Math.min(gap, Math.max(0, s))];
+          let prev = pA;
+          for (let i = 1; i <= 10; i++) {
+            const t = i / 10, q = [(1 - t) ** 2 * pA[0] + 2 * (1 - t) * t * ctl[0] + t * t * pZ[0], (1 - t) ** 2 * pA[1] + 2 * (1 - t) * t * ctl[1] + t * t * pZ[1]];
+            (off > 0 ? allWalks : junctionSurface).strip(prev, q, w, h, color);
+            prev = q;
+          }
+        }
+      }
     for (let a = 0; a < approaches.length; a++)
       for (let z = a + 1; z < approaches.length; z++) {
         const A = approaches[a],
           Z = approaches[z],
           dot = A.u[0] * Z.u[0] + A.u[1] * Z.u[1];
         if (dot < -0.8) continue;
+        // right-hand traffic: from the arriving lane of A (its +n side) into the leaving lane of Z (its -n side)
         const from = [
-            x + A.u[0] * (radius + 2) + A.n[0] * A.half * 0.48,
-            y + A.u[1] * (radius + 2) + A.n[1] * A.half * 0.48,
+            x + A.u[0] * (radius + 0.4) + A.n[0] * A.half * 0.48,
+            y + A.u[1] * (radius + 0.4) + A.n[1] * A.half * 0.48,
           ],
           to = [
-            x + Z.u[0] * (radius + 2) - Z.n[0] * Z.half * 0.48,
-            y + Z.u[1] * (radius + 2) - Z.n[1] * Z.half * 0.48,
+            x + Z.u[0] * (radius + 0.4) - Z.n[0] * Z.half * 0.48,
+            y + Z.u[1] * (radius + 0.4) - Z.n[1] * Z.half * 0.48,
           ];
         curveDashes(junctionSurface, from, [x, y], to, 0.29);
       }
