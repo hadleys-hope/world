@@ -11,6 +11,7 @@ import {
 } from "../../geometry/body-frame.js";
 /** Klyaksa waterfronts and local exploration vessels. No server-domain updates or synthetic telemetry. */
 import * as T from "three";
+import { buildShipping, updateShipping } from "./shipping.js";
 import { state } from "../../state.js";
 import { bodyHeight, PLATEAU } from "../../geometry/noise.js";
 import { dirAt } from "../klyaksa.js";
@@ -579,6 +580,9 @@ export function* buildWaterfrontSteps(body, R, plan, env, cityPoint) {
   }
   state.klyaksaBoats = ships;
   yield;
+  // the sea trade between these ports (urban/shipping.js): fleets, cranes, the yard and its vehicles
+  state.klyaksaShipping = buildShipping(body, R, env);
+  yield;
   yield* buildRiverSceneSteps(body, R, plan, env);
 }
 
@@ -715,6 +719,9 @@ export function stepBoat(b, input, dt) {
   } else b.speed *= Math.exp(-12 * dt);
 }
 export function updateMarine(now) {
+  const dtShip = Math.min(0.1, Math.max(0, (now - (state.klyaksaShipClock || now)) / 1000));
+  state.klyaksaShipClock = now;
+  if (state.activeBody === 3) updateShipping(state.klyaksaShipping, dtShip);
   if (!state.klyaksaBoats || state.activeBody !== 3) return;
   const dt = Math.min(
     0.05,
