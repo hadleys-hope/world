@@ -29,7 +29,8 @@ def states(w):
     return Counter(m["state"] for m in w.crocs)
 
 
-CALM = {**CFG, "croc_raid_mean_days": 0}  # the calm flock alone; raids have their own tests below
+FLOCK = {**CFG, "flying_crocs": 7}  # LV-426 has no crocodiles (they are Klyaksa's); the tests give it a flock
+CALM = {**FLOCK, "croc_raid_mean_days": 0}  # the calm flock alone; raids have their own tests below
 
 
 class Flock(unittest.TestCase):
@@ -38,7 +39,7 @@ class Flock(unittest.TestCase):
 
     def test_the_flock_roosts_on_dry_shore_at_night(self):
         w = self.w
-        self.assertEqual(len(w.crocs), CFG["flying_crocs"])
+        self.assertEqual(len(w.crocs), FLOCK["flying_crocs"])
         self.assertEqual(states(w), {"roost": 7})
         for m in w.crocs:
             self.assertGreater(site_elevation(m["x"], m["y"], w.cfg), w.cfg["ocean_level_m"])
@@ -220,11 +221,22 @@ class Flock(unittest.TestCase):
         self.assertEqual(snapshot(w)["crocs"], [])
         self.assertIsNone(fauna_blame(w, 3))
 
-    def test_klyaksa_cities_have_no_crocodiles(self):
+    def test_lv426_has_no_crocodiles_and_klyaksa_has_the_flock(self):
         from hadleys.klyaksa import City
 
+        self.assertEqual(World().crocs, [])
         city = City("k6", "Ridge", 35, 7, (-4300, -3700), 0, 7)
-        self.assertEqual(city.w.crocs, [])
+        self.assertEqual(len(city.w.crocs), 7)
+        self.assertEqual(city.w.dome_hp, 100.0)
+
+    def test_an_old_lv426_save_loses_its_flock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            w = World(dict(FLOCK))
+            self.assertEqual(len(w.crocs), 7)
+            del w.fauna_on_klyaksa  # saved before the flock moved to Klyaksa
+            Store(directory).save_world(w)
+            resumed = Store(directory).load_world()
+            self.assertEqual((resumed.crocs, resumed.cfg["flying_crocs"]), ([], 0))
 
     def test_other_colony_sizes(self):
         w = World({**CALM, "houses_per_sector": 120, "houses_per_row": 20})
@@ -292,10 +304,10 @@ class Raid(unittest.TestCase):
         w = self.raid_world()
         inject(w, "croc_raid")
         self.assertIn("already", inject(w, "croc_raid")["text"])
-        self.assertEqual(sum(1 for m in w.crocs if m.get("raider")), CFG["croc_raid_size"])
+        self.assertEqual(sum(1 for m in w.crocs if m.get("raider")), FLOCK["croc_raid_size"])
 
     def test_raids_come_by_themselves_only_by_day(self):
-        w = World({**CFG, "croc_raid_mean_days": 0.02})
+        w = World({**FLOCK, "croc_raid_mean_days": 0.02})
         starts = []
         for _ in range(3 * 1440):
             had = w.croc_raid is not None
@@ -343,6 +355,46 @@ class Raid(unittest.TestCase):
             self.assertEqual(snapshot(resumed)["croc_raid"], snapshot(w)["croc_raid"])
             self.assertEqual(self.croc_issues(resumed), self.croc_issues(w))
 
+
+
+class ArmouredDome(unittest.TestCase):
+    """Klyaksa: a raid has to break the city's armoured dome before it gets at the houses."""
+
+    def city(self):
+        from hadleys.klyaksa import City
+
+        c = City("k4", "Northfield", 125, 25, (-200, 2900), 3900, 11)
+        c.w.t = 10 * 60
+        return c.w
+
+    def test_the_raid_claws_at_the_dome_and_stays_outside(self):
+        w = self.city()
+        inject(w, "croc_raid")
+        wr, low, inside = w.cfg["wall_radius"], 100.0, 0
+        for _ in range(420):
+            world_tick(w)
+            low = min(low, w.dome_hp)
+            inside = max(inside, sum(1 for m in w.crocs if m.get("raider") and m["z"] < dome_ceiling(w.cfg, math.hypot(m["x"], m["y"])) - 1.0))
+        self.assertLess(low, 95.0, "the dome takes damage")
+        self.assertGreater(low, 0.0, "and holds: it is armoured")
+        self.assertEqual(inside, 0, "no crocodile gets under an unbroken dome")
+        self.assertFalse(any(i.cause == "flying crocodiles" and i.kind in ("aeration_failure", "house_wiring") for i in w.issues))
+
+    def test_a_breach_lets_them_in(self):
+        w = self.city()
+        w.dome_hp = 0.5
+        inject(w, "croc_raid")
+        for _ in range(420):
+            world_tick(w)
+        self.assertTrue(any(i.cause == "flying crocodiles" and i.kind in ("aeration_failure", "house_wiring", "cable_broken", "lamp_broken") for i in w.issues))
+
+    def test_the_dome_heals_between_raids(self):
+        w = self.city()
+        w.dome_hp, w.dome_breached = 10.0, True
+        for _ in range(600):
+            world_tick(w)
+        self.assertGreater(w.dome_hp, 25.0)
+        self.assertFalse(w.dome_breached)
 
 
 if __name__ == "__main__":

@@ -50,6 +50,10 @@ CAUSE = "flying crocodiles"
 # what the raiders go for inside the dome, with weights; damage_target kinds with their severities
 INSIDE = (("aeration", 0.45, 1.0), ("span", 0.2, 0.45), ("net_span", 0.12, 1.0), ("lamp", 0.13, 1.0), ("house", 0.1, 1.0))
 OUTSIDE = (("solar", 0.75, 0.06), ("tower_line", 0.25, 1.0))
+# Klyaksa's armoured domes: a raid has to break the dome before it gets at the city
+DOME_HIT = 0.6  # health points (of 100) a crocodile knocks off the armoured glass with one good hit
+DOME_REGEN = 0.03  # points per tick the dome crews restore between raids (about a day from empty)
+DOME_BREACH_UNTIL = 25.0  # a breached dome lets them in until it is repaired back to this
 
 
 def roost_site(c, shift=0.0):
@@ -79,6 +83,9 @@ def fauna_init(w: World):
     w.croc_call = 0  # ticks the operator's call still overrides the hour
     w.fauna_rng = None
     w.croc_raid = None  # the current raid: phase gather | raid | retreat, counts; None between raids
+    w.dome_hp = 100.0  # the armoured dome's health (Klyaksa); LV-426 keeps the number but nothing hits it
+    w.dome_breached = False
+    w.fauna_on_klyaksa = True  # saved after the flock moved to Klyaksa (Store.migrate strips older LV-426 flocks)
     if n <= 0:
         return
     # a private stream: the world's rng drives the physics and must not be touched
@@ -237,6 +244,11 @@ def raid_start(w: World, size=None):
 def _raid_clock(w, day, g):
     raid = getattr(w, "croc_raid", None)
     c = w.cfg
+    if c.get("dome_armor") and raid is None:
+        w.dome_hp = min(100.0, getattr(w, "dome_hp", 100.0) + DOME_REGEN)
+        if w.dome_breached and w.dome_hp >= DOME_BREACH_UNTIL:
+            w.dome_breached = False
+            w.log("INFO", "The dome is sealed again")
     if raid is None:
         mean = float(c.get("croc_raid_mean_days", 0))
         # one raid every `mean` days on average, counted over the twelve daylight hours
@@ -256,9 +268,16 @@ def _pick_target(w, m, g, can_enter):
     """Something to land on: inside the dome if the way in is open, otherwise the solar field or the tower line."""
     c = w.cfg
     table = INSIDE if can_enter else OUTSIDE
+    if not can_enter and c.get("dome_armor"):
+        table = (("dome", 0.8, DOME_HIT),) + tuple((k, p * 0.2, s) for k, p, s in OUTSIDE)
     weights = np.array([t[1] for t in table])
     kind, _, severity = table[int(g.choice(len(table), p=weights / weights.sum()))]
-    if kind in ("aeration", "house"):
+    if kind == "dome":
+        # a spot on the glass on the side they come from, low enough to claw at
+        a = math.atan2(m["y"], m["x"]) + float(g.uniform(-0.5, 0.5))
+        r = c["wall_radius"] * float(g.uniform(0.82, 0.97))
+        x, y, z, i = r * math.cos(a), r * math.sin(a), dome_ceiling(c, r) + 3.0, None
+    elif kind in ("aeration", "house"):
         i = int(g.integers(0, w.N))
         x, y, z = float(w.h_x[i]), float(w.h_y[i]), ROOF[int(w.h_type[i])]
     elif kind in ("span", "net_span", "lamp"):
@@ -268,9 +287,12 @@ def _pick_target(w, m, g, can_enter):
     elif kind == "solar":
         sx, sy = c["solar_pos"]
         x, y, z, i = sx + float(g.uniform(-60, 60)), sy + float(g.uniform(-40, 40)), 2.0, None
-    else:
-        x, y, z, i = c["tower_junction"][0], c["tower_pos"][1] / 2, POLE_Z, None
+    else:  # the comms tower outside the wall: perched on it, they tear its line
+        x, y, z, i = c["tower_pos"][0], c["tower_pos"][1], POLE_Z * 3, None
+    # one sitting on the glass leaves it outwards before going anywhere else, so it never flies through the dome
+    m["leave_glass"] = bool(m.get("outside")) and math.hypot(m["x"], m["y"]) < c["wall_radius"]
     m["target"] = {"kind": kind, "arg": i, "severity": severity, "x": x, "y": y, "z": z, "inside": kind in ("aeration", "house", "span", "net_span", "lamp")}
+    m["outside"] = kind == "dome"  # on the glass, not under it
     m["house"] = i if kind in ("aeration", "house") else -1
     m["leg"] = 0
 
@@ -286,25 +308,45 @@ def _raider_step(w, m, g, gate_open, outside, inside):
             _pick_target(w, m, g, gate_open)
     elif st == "raid":
         if raid is None or raid["phase"] == "retreat":
-            m["state"], m["leg"] = "outbound", 0 if math.hypot(m["x"], m["y"]) < c["wall_radius"] else 2
+            _go_home(m, c)
+            return
+        if m.get("leave_glass"):
+            a = math.atan2(m["y"], m["x"])
+            if _fly(m, (c["wall_radius"] + 60) * math.cos(a), (c["wall_radius"] + 60) * math.sin(a), m["z"], RAID):
+                m["leave_glass"] = False
             return
         t = m["target"]
         r = math.hypot(m["x"], m["y"])
+        armoured = c.get("dome_armor")
+        way_in = w.dome_breached if armoured else gate_open
+        if t["inside"] and r >= c["wall_radius"] and armoured and not way_in:
+            _pick_target(w, m, g, False)  # the dome is whole again: back to clawing at it
+            return
         if t["inside"] and r >= c["wall_radius"]:
-            if not gate_open:  # the west gate is shut in their faces: they turn on what is outside
+            if not gate_open and not armoured:  # the west gate is shut in their faces: they turn on what is outside
                 if not raid["blocked"]:
                     raid["blocked"] = True
                     w.log("WARN", "The west gate is shut: the crocodiles turn on the solar field and the comms line")
                 _pick_target(w, m, g, False)
                 return
             if m["leg"] == 0:
-                if _fly(m, outside[0], outside[1], GATE_Z, RAID, hold=TRANSIT_Z):
+                if _around(m, outside[0], outside[1], GATE_Z, RAID, TRANSIT_Z, c):
                     m["leg"] = 1
                 return
             if _fly(m, inside[0], inside[1], GATE_Z, LOW):
                 m["leg"] = 2
             return
-        if _fly(m, t["x"], t["y"], t["z"], DIVE if r < c["wall_radius"] else RAID, hold=m["alt"] if r < c["wall_radius"] else TRANSIT_Z):
+        if t["kind"] == "dome":
+            # climb outside the wall to the height of the spot first, then close in on the glass: never through it
+            a = math.atan2(t["y"], t["x"])
+            if m["leg"] == 0:
+                if _around(m, (c["wall_radius"] + 60) * math.cos(a), (c["wall_radius"] + 60) * math.sin(a), t["z"], RAID, max(TRANSIT_Z, t["z"]), c):
+                    m["leg"] = 1
+            elif _fly(m, t["x"], t["y"], t["z"], DIVE):
+                m["state"], m["timer"] = "attack", int(g.integers(6, 14))
+            return
+        moved = _fly(m, t["x"], t["y"], t["z"], DIVE, hold=m["alt"]) if r < c["wall_radius"] else _around(m, t["x"], t["y"], t["z"], RAID, TRANSIT_Z, c)
+        if moved:
             m["state"], m["timer"] = "attack", int(g.integers(8, 20))
     elif st == "attack":
         m["timer"] -= 1
@@ -314,16 +356,30 @@ def _raider_step(w, m, g, gate_open, outside, inside):
 
         t = m["target"]
         fouled = t["kind"] == "solar" and w.solar_health <= 0.35  # droppings dim the panels, they do not destroy them
-        if not fouled and g.random() < c.get("croc_raid_hit_p", 0.6):
+        if t["kind"] == "dome":
+            if g.random() < c.get("croc_raid_hit_p", 0.6):
+                w.dome_hp = max(0.0, w.dome_hp - t["severity"])
+                raid["dome_hits"] = raid.get("dome_hits", 0) + 1
+                if w.dome_hp <= 0 and not w.dome_breached:
+                    w.dome_breached = True
+                    w.log("ALARM", "The armoured dome is breached: the crocodiles are getting in")
+        elif not fouled and g.random() < c.get("croc_raid_hit_p", 0.6):
             damage_target(w, t["kind"] if t["arg"] is None else f"{t['kind']}:{t['arg']}", CAUSE, t["severity"])
             raid["hits"] += 1
             if t["kind"] in ("aeration", "house"):
                 w.h_log[t["arg"]].appendleft((w.t, "flying crocodiles wrecked the " + ("ventilation" if t["kind"] == "aeration" else "wiring")))
         if raid["phase"] == "raid":
             m["state"] = "raid"
-            _pick_target(w, m, g, gate_open or math.hypot(m["x"], m["y"]) < c["wall_radius"])  # already inside: no gate to pass
+            inside = math.hypot(m["x"], m["y"]) < c["wall_radius"] and not m.get("outside")
+            way_in = w.dome_breached if c.get("dome_armor") else gate_open
+            _pick_target(w, m, g, way_in or inside)  # already inside: no gate to pass
         else:
-            m["state"], m["leg"] = "outbound", 0 if math.hypot(m["x"], m["y"]) < c["wall_radius"] else 2
+            _go_home(m, c)
+    elif st == "outbound" and m["leg"] == 3:
+        # off the glass first: straight out past the wall at the height it is at, then home over open ground
+        a = math.atan2(m["y"], m["x"])
+        if _fly(m, (c["wall_radius"] + 60) * math.cos(a), (c["wall_radius"] + 60) * math.sin(a), m["z"], RAID):
+            m["leg"] = 2
     elif st == "outbound":
         if m["leg"] == 0:
             if not gate_open:  # shut in under the dome: they wait for the gate, circling
@@ -335,8 +391,35 @@ def _raider_step(w, m, g, gate_open, outside, inside):
                 m["leg"] = 2
         else:
             hx, hy = m["home"]
-            if _fly(m, hx, hy, 0.0, CRUISE, hold=TRANSIT_Z):
+            if _around(m, hx, hy, 0.0, CRUISE, TRANSIT_Z, c):
                 w.crocs.remove(m)  # back on the cliffs: they leave the colony's books
+
+
+def _around(m, tx, ty, tz, speed, hold, c):
+    """_fly, but a leg that would cut across an armoured dome goes round it: first to a point beside the dome
+    on the near side of the chord, then on. Only for flights over open ground (both ends outside the wall)."""
+    R = c["wall_radius"] + 50
+    if c.get("dome_armor") and math.hypot(m["x"], m["y"]) >= R - 10 and math.hypot(tx, ty) >= R - 10:
+        dx, dy = tx - m["x"], ty - m["y"]
+        L2 = dx * dx + dy * dy or 1.0
+        u = max(0.0, min(1.0, -(m["x"] * dx + m["y"] * dy) / L2))
+        px, py = m["x"] + dx * u, m["y"] + dy * u
+        d = math.hypot(px, py)
+        if d < R:
+            if d < 1e-6:
+                px, py, d = -dy, dx, math.hypot(dx, dy)
+            k = (R + 40) / d
+            _fly(m, px * k, py * k, max(tz, TRANSIT_Z), speed, hold=hold)
+            return False
+    return _fly(m, tx, ty, tz, speed, hold=hold)
+
+
+def _go_home(m, c):
+    """Leave by the way they came: off the glass, out through the gate from under it, or straight home."""
+    r = math.hypot(m["x"], m["y"])
+    m["state"] = "outbound"
+    on_glass = m.get("outside") or m.get("leave_glass")
+    m["leg"] = 3 if on_glass and r < c["wall_radius"] else 0 if r < c["wall_radius"] else 2
 
 
 def raid_snapshot(w: World):
@@ -344,7 +427,8 @@ def raid_snapshot(w: World):
     if not raid:
         return None
     left = (raid["arrive"] - w.t) if raid["phase"] == "gather" else (raid["until"] - w.t if raid["phase"] == "raid" else 0)
-    return {"phase": raid["phase"], "size": raid["size"], "hits": raid["hits"], "blocked": raid["blocked"], "left": max(0, left)}
+    return {"phase": raid["phase"], "size": raid["size"], "hits": raid["hits"], "blocked": raid["blocked"], "left": max(0, left),
+            "dome_hits": raid.get("dome_hits", 0)}
 
 
 def fauna_blame(w: World, house: int):

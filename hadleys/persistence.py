@@ -92,6 +92,10 @@ class Store:
             if tuple(w.cfg.get(key, old)) == old:
                 w.cfg[key] = CFG[key]
         w.cfg = {**CFG, **w.cfg}
+        if w.cfg.get("flying_crocs") and not w.cfg.get("dome_armor") and not getattr(w, "fauna_on_klyaksa", False):
+            # the flying crocodiles are Klyaksa's fauna: a LV-426 save from before that was settled loses its flock
+            w.cfg["flying_crocs"] = 0
+            w.crocs, w.croc_raid = [], None
         fresh = World(w.cfg)
         added = []
         for k, v in fresh.__dict__.items():

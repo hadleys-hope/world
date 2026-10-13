@@ -24,6 +24,7 @@ import numpy as np
 from hadleys.config import CFG
 from hadleys.geometry.klyaksa_layout import city_plan
 from hadleys.simulation import world_tick
+from hadleys.domains.fauna import fauna_snapshot, raid_snapshot
 from hadleys.world import World
 
 # name, houses per sector (6 sectors), houses per row, centre in metres from the colony centre on Klyaksa
@@ -38,6 +39,8 @@ CITIES = [
 BRANCHES = [("k1", "k2"), ("k2", "k5"), ("k1", "k3"), ("k3", "k6"), ("k1", "k4")]
 # a temperate coast: houses still heat at night, but nothing freezes
 CLIMATE = {"t_mean": 12.0, "t_daily_amp": 5.0}
+# Klyaksa's fauna: a flock of flying crocodiles per city and raids on the armoured domes (domains/fauna.py)
+FAUNA = {"flying_crocs": 7, "croc_raid_mean_days": 3.0, "dome_armor": True}
 
 
 class CityBusView:
@@ -78,8 +81,14 @@ class City:
         self.key, self.name, self.at, self.offset = key, name, at, offset
         # the flying crocodiles are LV-426 fauna: none in the Klyaksa cities
         self.w = saved or World(
-            {**CFG, **CLIMATE, "flying_crocs": 0, "seed": seed, "houses_per_sector": hps, "houses_per_row": per_row}
+            {**CFG, **CLIMATE, **FAUNA, "seed": seed, "houses_per_sector": hps, "houses_per_row": per_row}
         )
+        if saved is not None and not getattr(saved, "crocs", None):
+            # a city saved before Klyaksa had its fauna: give it the flock and the dome now
+            from hadleys.domains.fauna import fauna_init
+
+            saved.cfg.update(FAUNA)
+            fauna_init(saved)
         self.w.speed = 20
         self.w.bridge = CityBusView(self)
 
@@ -249,6 +258,9 @@ class Colony:
                     "t_in": np.round(w.h_t_in).astype(int).tolist(),
                     "water": {"tank_m3": round(w.water_tank_m3, 2), "capacity_m3": w.cfg["water_tank_m3"]},
                     "rovers": [self._visual_rover(c, r) for r in w.rovers + getattr(w, "traffic", [])],
+                    "crocs": fauna_snapshot(w),
+                    "raid": raid_snapshot(w),
+                    "dome_hp": round(float(getattr(w, "dome_hp", 100.0)), 1),
                     "flags": (w.h_power_ok.astype(int) + 2 * w.h_heater_on.astype(int) + 4 * w.h_ext.astype(int)).tolist(),
                 })
         body = json.dumps({"houses": self.houses, "cities": cities}).encode()

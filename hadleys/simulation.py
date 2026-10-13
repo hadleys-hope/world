@@ -93,7 +93,9 @@ def inject(w: World, cmd: str):
     elif cmd == "croc_raid":
         n = raid_start(w)
         gate = polar(180.0, c["wall_radius"])
-        text = f"A wild flock of {n} flying crocodiles is gathering: raid in 30 min" if n else "A crocodile raid is already on"
+        text = (f"A wild flock of {n} flying crocodiles is gathering: raid in 30 min" if n
+                else "No flying crocodiles here: they live on Klyaksa" if getattr(w, "fauna_rng", None) is None
+                else "A crocodile raid is already on")
         return {"x": gate[0], "y": gate[1], "text": text}
     elif cmd == "croc_lock":
         # shut the west gate against the flock: a lockdown of the sector the gate opens into
