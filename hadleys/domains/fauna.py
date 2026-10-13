@@ -39,7 +39,8 @@ CLIMB = 6.0  # largest change of height per tick
 # where a crocodile sits on a house, by house type: the viewer's house heights (models/materials.js DIM:
 # 7.25 m, and 10.65 m for the two-storey types) plus the height of its belly over its feet
 ROOF = (9.4, 12.8, 9.4, 12.8)
-GATE_Z = 8.0  # height of the pass through the gate
+GATE_Z = 8.0  # height of the pass through the gate: under the wall top, the only way in
+DOME_FOOT = 16.0  # the glass starts at the top of the wall posts (models/build.js, models/oasis.js)
 TRANSIT_Z = 45.0  # height over the open ground between the shore and the gate
 DAWN, DUSK = 7, 19  # the flock leaves the roost after DAWN and turns home at DUSK (hours)
 AIRBORNE = ("soar", "dive")
@@ -66,8 +67,8 @@ def roost_site(c, shift=0.0):
 
 def dome_ceiling(c, r):
     """Height of the glass above the ground at distance r from the hub (the viewer's dome, models/oasis.js)."""
-    R = c["dome_radius"]
-    return c["dome_height"] * math.sqrt(max(0.0, 1.0 - (r / R) ** 2)) if r < R else 0.0
+    R = c["wall_radius"]  # the dome stands on the wall, its footing at the top of the posts
+    return DOME_FOOT + c["dome_height"] * math.sqrt(max(0.0, 1.0 - (r / R) ** 2)) if r < R else 0.0
 
 
 def fauna_init(w: World):

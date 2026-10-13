@@ -65,8 +65,7 @@ CFG = {
     "croc_raid_size": 24,  # wild crocodiles in a raid
     "croc_raid_ticks": 180,  # how long they stay once they have arrived
     "croc_raid_hit_p": 0.6,  # a crocodile that has settled on its target wrecks it with this probability
-    "dome_radius": 735.0,  # the glass dome the viewer draws over the colony (models/oasis.js):
-    "dome_height": 320.0,  # the flock keeps under it
+    "dome_height": 300.0,  # the glass dome stands on the wall (models/oasis.js); the flock keeps under it
     # environment (LV-426: minus 40..60, permanent dusk, storms)
     "t_mean": -45.0,
     "t_daily_amp": 8.0,
