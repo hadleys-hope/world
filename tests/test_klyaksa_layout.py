@@ -101,11 +101,15 @@ class PresentationPlanTests(unittest.TestCase):
                 if da*db <= 0:
                     self.assertTrue(r.get('bridge'), r['id'])
                     bridges += 1
-        self.assertGreater(bridges, 3)
-        for road in c['roads'] + c['service_roads']:
-            if road.get('bridge'):
-                for x, y in (road['points'][0], road['points'][-1]):
-                    self.assertGreaterEqual(abs(y-river_centre(x)), 220, road['id'])
+        # Meridian crosses its river on four designed bridges only, each landing on an embankment, angled
+        crossing = [r for r in c['roads'] + c['service_roads'] if r.get('bridge')]
+        self.assertEqual(sorted(r['id'] for r in crossing), sorted('bridge-' + b['id'] for b in c['waterways']['bridges']))
+        self.assertEqual(len(crossing), 4)
+        for road in crossing:
+            (xa, ya), (xb, yb) = road['points'][0], road['points'][-1]
+            for x, y in ((xa, ya), (xb, yb)):
+                self.assertAlmostEqual(abs(y-river_centre(x)), c['waterways']['embankment'], delta=1.0)
+            self.assertGreater(abs(xa - xb), 20, f"{road['id']} is square to the river")
         self.assertTrue(all(not p['river']['enabled'] for p in self.geometry['cities'][1:]))
 
     def test_house_service_mission_maps_to_exact_house_frontage(self):

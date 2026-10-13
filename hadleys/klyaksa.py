@@ -30,8 +30,8 @@ from hadleys.world import World
 
 # name, houses per sector (6 sectors), houses per row, centre in metres from the colony centre on Klyaksa
 CITIES = [
-    ("k1", "Meridian", 250, 25, (0, 0)),
-    ("k2", "Eastgate", 200, 20, (2900, 400)),
+    ("k1", "Meridian", 200, 20, (0, 0)),       # the river city: canals and a port take ground, so fewer houses
+    ("k2", "Eastgate", 250, 25, (2900, 400)),
     ("k3", "Harbour", 150, 15, (-2500, -1500)),
     ("k4", "Northfield", 125, 25, (-200, 2900)),
     ("k5", "Far East", 75, 15, (5300, 1500)),
