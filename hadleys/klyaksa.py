@@ -129,6 +129,10 @@ class Colony:
             with open(path, "rb") as f:
                 w = pickle.load(f)
             if getattr(w, "schema", 1) == World.SCHEMA and w.N == houses:
+                # the same catch-up as LV-426's save: config keys and fields added since the city was saved
+                from hadleys.persistence import Store
+
+                Store.migrate(w)
                 return w
         except Exception as e:
             print(f"klyaksa {key}: saved city unreadable ({e}), building a new one")

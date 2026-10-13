@@ -93,3 +93,34 @@ class CityPagesTests(unittest.TestCase):
             again = Colony(SMALL, first_id=300, data_dir=d)
             self.assertEqual([x.w.t for x in again.cities], [3, 3])
             self.assertIsNotNone(again.cities[0].w.bridge, "a restored city gets its bus view back")
+
+
+class OldCitySaves(unittest.TestCase):
+    def test_a_city_saved_before_the_fauna_and_hazards_loads(self):
+        """A city pickled before its config had dome_height, the flock or the hazards: the server crashed on it."""
+        import pickle
+        import tempfile
+
+        from hadleys.klyaksa import FAUNA
+
+        with tempfile.TemporaryDirectory() as d:
+            c = Colony(SMALL, first_id=300, data_dir=d)
+            c.tick(2)
+            for city in c.cities:
+                w = city.w
+                for key in list(FAUNA) + ["dome_height", "croc_raid_size", "croc_bask_p", "migration_mean_days", "plankton_mean_days", "plankton_burn_at", "klyaksa_hazards", "dome_armor"]:
+                    w.cfg.pop(key, None)
+                for name in ("crocs", "croc_call", "fauna_rng", "croc_raid", "dome_hp", "dome_breached", "fauna_on_klyaksa",
+                             "hazards_on", "hazard_rng", "creatine_t", "mutation", "manure", "dome_dirt", "migrants", "migration",
+                             "aa", "plankton", "vapour", "drunk", "hazard_costs"):
+                    w.__dict__.pop(name, None)
+                w.cfg["flying_crocs"] = 0
+                city.w.bridge = None
+                with open(c._path(city.key), "wb") as f:
+                    pickle.dump(w, f)
+            again = Colony(SMALL, first_id=300, data_dir=d)
+            again.tick(3)
+            for city in again.cities:
+                self.assertEqual(len(city.w.crocs), 7)
+                self.assertTrue(city.w.hazards_on)
+                self.assertEqual(city.w.t, 5)
