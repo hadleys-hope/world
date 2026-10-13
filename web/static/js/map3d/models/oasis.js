@@ -56,17 +56,20 @@ export function makeDome(point, radius, height, uniforms, segments = 192, portal
 
 export function glassMaterial(uniforms) {
   return new THREE.ShaderMaterial({
-    transparent: true, depthWrite: false, side: THREE.DoubleSide, uniforms:{uStructure:{value:1},uGlare:{value:1},...uniforms},
+    transparent: true, depthWrite: false, side: THREE.DoubleSide, uniforms:{uStructure:{value:1},uGlare:{value:1},uArmor:{value:0},uFlash:{value:0},uDamage:{value:0},...uniforms},
     vertexShader: `attribute vec2 aUV; varying vec2 vUV; varying vec3 vN, vW, vC;
       void main(){ vUV=aUV; vN=normalize(mat3(modelMatrix)*normal); vec4 w=modelMatrix*vec4(position,1.0); vW=w.xyz;
         vC=(modelMatrix*vec4(0.,0.,0.,1.)).xyz; gl_Position=projectionMatrix*viewMatrix*w; }`,
-    fragmentShader: `uniform float uStructure,uGlare; uniform vec3 uSun; varying vec2 vUV; varying vec3 vN, vW, vC;
+    fragmentShader: `uniform float uStructure,uGlare,uArmor,uFlash,uDamage; uniform vec3 uSun; varying vec2 vUV; varying vec3 vN, vW, vC;
       void main(){ vec3 n=normalize(vN); vec3 v=normalize(cameraPosition-vW); if(dot(n,v)<0.0) n=-n;
         vec3 s=normalize(uSun); float day=smoothstep(-0.12,0.25,dot(normalize(vW-vC),s));
         float u=vUV.x*96.0, w=vUV.y*28.0;
         float l1=abs(fract(u+w*0.5)-0.5), l2=abs(fract(u-w*0.5)-0.5), l3=abs(fract(w)-0.5)*1.7;
-        float frame=1.0-smoothstep(0.012,0.035,min(min(l1,l2),l3));
-        frame*=uStructure;
+        // armoured domes (Klyaksa): struts three times as thick, a second lattice of laminate bars between them
+        float fw=0.035*(1.0+2.0*uArmor);
+        float frame=1.0-smoothstep(fw*0.35,fw,min(min(l1,l2),l3));
+        float lam=uArmor*(1.0-smoothstep(0.01,0.025,min(abs(fract(u*2.0+w)-0.5),abs(fract(u*2.0-w)-0.5))))*0.55;
+        frame=max(frame,lam)*uStructure;
         float base=smoothstep(0.035,0.0,vUV.y);
         float fres=pow(1.0-abs(dot(n,v)),3.0);
         float spec=pow(max(dot(reflect(-s,n),v),0.0),300.0)*day*2.5*uGlare;
@@ -74,7 +77,14 @@ export function glassMaterial(uniforms) {
         vec3 glass=mix(vec3(0.55,0.72,0.82), vec3(0.85,0.93,1.0), fres)*(0.25+0.75*day);
         vec3 steel=vec3(0.30,0.33,0.36)*(0.35+0.65*max(dot(n,s),0.0)*day+0.15);
         vec3 col=mix(glass, steel, max(frame,base))+vec3(1.0,0.97,0.9)*(spec+glint);
-        float a=mix(0.05+0.42*fres+spec, 0.92, max(frame*0.85,base));
+        float a=mix(0.05+0.42*fres+spec+0.08*uArmor, 0.92, max(frame*0.85,base));
+        col=mix(col, col*vec3(0.82,0.95,0.92), uArmor*(1.0-frame)*0.6);   // laminated armour glass: a faint green
+        // damage: panels go crazed, more of them as the dome loses health
+        vec2 cell=floor(vec2(u,w)); float hsh=fract(sin(dot(cell,vec2(12.9898,78.233)))*43758.5453);
+        float crazed=step(hsh,uDamage*0.9)*(1.0-frame);
+        col=mix(col, vec3(0.86,0.88,0.9), crazed*0.45); a+=crazed*0.22;
+        // a hit: the struts flare and the glass flashes, fading over half a second
+        col+=vec3(1.0,0.55,0.2)*uFlash*(frame*1.6+0.18+fres*0.6); a+=uFlash*0.25;
         col+=vec3(1.0,0.78,0.5)*0.08*(1.0-day)*(1.0-vUV.y);
         gl_FragColor=vec4(col, clamp(a,0.0,1.0)); }`,
   });

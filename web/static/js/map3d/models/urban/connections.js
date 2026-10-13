@@ -18,11 +18,13 @@ export function buildConnections(plan, body, R, env) {
       (x, y, h) => point(c.at[0] + x, c.at[1] + y, h),
       c.wall + 45,
       (c.wall + 45) * 0.42,
-      { ...env, uStructure: { value: 0.18 }, uGlare: { value: 0.1 } },
+      // armoured glass: thick struts and laminate bars, flashes when a crocodile hits it (models/klyaksa-fauna.js)
+      { ...env, uStructure: { value: 1 }, uGlare: { value: 0.35 }, uArmor: { value: 1 }, uFlash: { value: 0 }, uDamage: { value: 0 } },
       320,
       gates.map((g) => ({ angle: g.angle, width: 108, height: 35 })),
     );
     dome.name = `Dome ${c.id}`;
+    (state.klyaksaDomes ||= {})[c.id] = dome;
     body.add(dome);
     for (const g of gates) {
       const a = g.angle,

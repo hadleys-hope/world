@@ -14,6 +14,7 @@ import {
   riverContains,
 } from "./urban/geography.js";
 import { buildWaterfrontSteps, updateMarine } from "./urban/marine.js";
+import { syncKlyaksaFauna, updateKlyaksaFauna } from "./klyaksa-fauna.js";
 /** models/klyaksa: the new colony on Klyaksa. A branching chain of glass domes, each a city with the structure
  * of Hadley's Hope (rows of houses, roads, the towers of the hub), linked by glass corridors; forests, meadows
  * and flowers in the valleys around them; gardens inside. Plans come from /klyaksa/geometry.json once, the
@@ -442,6 +443,7 @@ export function updateKlyaksa(now) {
   if (!lod || state.activeBody !== 3 || state.systemView) return;
   const body = state.solarSystem.bodies[3];
   updateCityVehicles(now);
+  updateKlyaksaFauna(now);
   if (state.klyaksaFrame === undefined || ++state.klyaksaFrame % 12 === 0) {
     const cam = worldPointToBody(3, state.camera.position);
     for (const g of lod) g.userData.update(cam);
@@ -479,6 +481,7 @@ export function updateKlyaksa(now) {
       tint.needsUpdate = true;
       state.klyaksaState = s;
       syncCityVisuals(s, body, state.solarSystem.specs[3].radius);
+      syncKlyaksaFauna(s, body, state.solarSystem.specs[3].radius, performance.now());
     })
     .catch(() => {})
     .finally(() => {
