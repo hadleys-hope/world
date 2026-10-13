@@ -503,7 +503,8 @@ def incidents_step(w: World):
             )
             damage_target(w, f"reactor:{comp}", "marines", 0.6)
             w.log("ALARM", f"Stray marine fire damaged reactor {comp}")
-    if rng.random() < c["p_vandal"] * (2.0 if night else 1.0):
+    # Klyaksa's sea vapours: drunk personnel vandalise up to five times as often (domains/hazards.py)
+    if rng.random() < c["p_vandal"] * (2.0 if night else 1.0) * (1.0 + 4.0 * getattr(w, "drunk", 0.0)):
         s = int(rng.integers(0, S))
         roll = rng.random()
         ps = np.flatnonzero(w.p_sector == s)

@@ -49,6 +49,7 @@ class SimulationRegression(unittest.TestCase):
         # The flying crocodiles are additive and live on Klyaksa: LV-426, the golden run, has none.
         self.assertIsNone(value.pop("croc_raid"), "no raid in the golden run: it is all at night")
         self.assertEqual(value.pop("crocs"), [], "LV-426 has no flying crocodiles: they are Klyaksa's")
+        self.assertIsNone(value.pop("hazards"), "nor Klyaksa's hazards")
         return value
 
     def snap_kinematics(self, actual, expected):

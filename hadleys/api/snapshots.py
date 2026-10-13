@@ -12,6 +12,7 @@ from hadleys.geometry.roads import colony_layout, traffic_junctions
 from hadleys.geometry.terrain import RIVER_PROFILE
 from hadleys.models import Issue
 from hadleys.domains.fauna import fauna_snapshot, raid_snapshot
+from hadleys.domains.hazards import hazards_snapshot
 from hadleys.domains.households import house_finance, summary as households_summary
 from hadleys.domains.hydraulics import water_balance
 
@@ -247,6 +248,7 @@ def snapshot(w: World):
         },
         "crocs": fauna_snapshot(w),
         "croc_raid": raid_snapshot(w),
+        "hazards": hazards_snapshot(w),
         "wall_breach": [
             None if a is None else round(float(a), 1) for a in w.wall_breach
         ],

@@ -25,6 +25,7 @@ from hadleys.config import CFG
 from hadleys.geometry.klyaksa_layout import city_plan
 from hadleys.simulation import world_tick
 from hadleys.domains.fauna import fauna_snapshot, raid_snapshot
+from hadleys.domains.hazards import hazards_snapshot
 from hadleys.world import World
 
 # name, houses per sector (6 sectors), houses per row, centre in metres from the colony centre on Klyaksa
@@ -40,7 +41,8 @@ BRANCHES = [("k1", "k2"), ("k2", "k5"), ("k1", "k3"), ("k3", "k6"), ("k1", "k4")
 # a temperate coast: houses still heat at night, but nothing freezes
 CLIMATE = {"t_mean": 12.0, "t_daily_amp": 5.0}
 # Klyaksa's fauna: a flock of flying crocodiles per city and raids on the armoured domes (domains/fauna.py)
-FAUNA = {"flying_crocs": 7, "croc_raid_mean_days": 3.0, "dome_armor": True}
+FAUNA = {"flying_crocs": 7, "croc_raid_mean_days": 3.0, "dome_armor": True, "klyaksa_hazards": True,
+         "mine_income_per_tick": 75.0}  # the mine digs creatine: about 25x what LV-426's ore brings
 
 
 class CityBusView:
@@ -89,6 +91,11 @@ class City:
 
             saved.cfg.update(FAUNA)
             fauna_init(saved)
+        if saved is not None and not getattr(saved, "hazards_on", False):
+            from hadleys.domains.hazards import hazards_init
+
+            saved.cfg.update(FAUNA)
+            hazards_init(saved)
         self.w.speed = 20
         self.w.bridge = CityBusView(self)
 
@@ -261,6 +268,7 @@ class Colony:
                     "crocs": fauna_snapshot(w),
                     "raid": raid_snapshot(w),
                     "dome_hp": round(float(getattr(w, "dome_hp", 100.0)), 1),
+                    "hazards": hazards_snapshot(w),
                     "flags": (w.h_power_ok.astype(int) + 2 * w.h_heater_on.astype(int) + 4 * w.h_ext.astype(int)).tolist(),
                 })
         body = json.dumps({"houses": self.houses, "cities": cities}).encode()

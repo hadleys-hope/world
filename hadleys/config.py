@@ -59,7 +59,11 @@ CFG = {
     "walkers": 60,
     # fauna: flying crocodiles roost on the ocean shore and soar over the houses by day (domains/fauna.py)
     "flying_crocs": 0,  # size of the flock; LV-426 has none, Klyaksa's cities have seven each (klyaksa.CLIMATE)
-    "dome_armor": False,  # Klyaksa: an armoured dome over the city that raids must break before they get in
+    "dome_armor": False,
+    "klyaksa_hazards": False,  # Klyaksa: creatine, migrations and air defence, plankton tides, sea vapours (domains/hazards.py)
+    "migration_mean_days": 1.0,
+    "plankton_mean_days": 2.0,
+    "plankton_burn_at": 45.0,  # Klyaksa: an armoured dome over the city that raids must break before they get in
     "croc_bask_p": 0.004,  # per tick, a soaring crocodile comes down to bask on a heated roof
     # raids: a wild flock from the sea cliffs flies in to feed and wrecks what it lands on (domains/fauna.py)
     "croc_raid_mean_days": 3.0,  # one raid every ~3 days on average, by day and not in a storm; 0 = only on command

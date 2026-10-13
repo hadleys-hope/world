@@ -9,6 +9,7 @@ from hadleys.domains.attractors import attractor_sample
 from hadleys.domains.energy import power_step, reactor_scram, reactor_step
 from hadleys.domains.environment import env_step
 from hadleys.domains.fauna import WEST_GATE, fauna_call, fauna_step, raid_start
+from hadleys.domains.hazards import hazards_step, migration_start, plankton_burn, plankton_tide
 from hadleys.domains.finance import finance_day_close, finance_month_close
 from hadleys.domains.households import book, finance_tick
 from hadleys.domains.houses import house_events, houses_step
@@ -39,6 +40,7 @@ def world_tick(w: World):
     roads_step(w)
     people_step(w)
     fauna_step(w)
+    hazards_step(w)
     house_events(w)
     if w.t % 60 == 0:
         pipes_audit(w)
@@ -97,6 +99,19 @@ def inject(w: World, cmd: str):
                 else "No flying crocodiles here: they live on Klyaksa" if getattr(w, "fauna_rng", None) is None
                 else "A crocodile raid is already on")
         return {"x": gate[0], "y": gate[1], "text": text}
+    elif cmd == "migration":
+        n = migration_start(w)
+        return {"x": 0, "y": 0, "text": f"A migrating herd of {n} crocodiles is coming" if n else "No migration here, or one is already crossing"}
+    elif cmd == "aa_toggle":
+        if getattr(w, "hazards_on", False):
+            w.aa["on"] = not w.aa["on"]
+            w.aa["ammo"] = max(w.aa["ammo"], 600) if w.aa["on"] else w.aa["ammo"]
+            w.log("WARN", f"[manual] air defence {'ON' if w.aa['on'] else 'OFF'}")
+        return {"x": 0, "y": 0, "text": f"Air defence {'on' if getattr(w, 'aa', {}).get('on') else 'off'}"}
+    elif cmd == "plankton":
+        return {"x": 0, "y": 0, "text": "A plankton tide is coming in" if plankton_tide(w) else "No sea plankton here"}
+    elif cmd == "burn":
+        return {"x": 0, "y": 0, "text": "Plankton burned off" if getattr(w, "hazards_on", False) and plankton_burn(w) else "Nothing to burn"}
     elif cmd == "croc_lock":
         # shut the west gate against the flock: a lockdown of the sector the gate opens into
         w.lockdown_ticks[WEST_GATE] = max(int(w.lockdown_ticks[WEST_GATE]), 240)

@@ -12,6 +12,7 @@ import random
 import threading
 from hadleys.config import CFG, COSTS, colony_layout_cfg
 from hadleys.domains.fauna import fauna_init
+from hadleys.domains.hazards import hazards_init
 from hadleys.domains.households import households_init
 from hadleys.domains.hydraulics import UtilityNetwork, water_accounts
 from hadleys.domains.transport import make_traffic
@@ -384,6 +385,8 @@ class World:
 
         # ---- fauna: the flock of flying crocodiles (domains/fauna.py) ----
         fauna_init(self)
+        # ---- Klyaksa's hazards: creatine, migrations, air defence, plankton, vapours (domains/hazards.py) ----
+        hazards_init(self)
 
     # ---- pickling: drop the lock, recreate it on load ----
     def __getstate__(self):

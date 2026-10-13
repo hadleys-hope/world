@@ -224,7 +224,8 @@ def raid_start(w: World, size=None):
     g, c = getattr(w, "fauna_rng", None), w.cfg
     if g is None or getattr(w, "croc_raid", None):
         return 0
-    n = int(size or c.get("croc_raid_size", 24))
+    # creatine mutates the fauna: raids on a creatine colony grow with it (domains/hazards.py)
+    n = int(size or c.get("croc_raid_size", 24) * (1.0 + 0.5 * getattr(w, "mutation", 0.0)))
     first = max((m["id"] for m in w.crocs), default=0) + 1
     for k in range(n):
         hx, hy = roost_site(c, 300.0 + k * 14.0)  # further along the shore than the colony's own flock
@@ -269,7 +270,7 @@ def _pick_target(w, m, g, can_enter):
     c = w.cfg
     table = INSIDE if can_enter else OUTSIDE
     if not can_enter and c.get("dome_armor"):
-        table = (("dome", 0.8, DOME_HIT),) + tuple((k, p * 0.2, s) for k, p, s in OUTSIDE)
+        table = (("dome", 0.8, DOME_HIT * (1.0 + 0.3 * getattr(w, "mutation", 0.0))),) + tuple((k, p * 0.2, s) for k, p, s in OUTSIDE)
     weights = np.array([t[1] for t in table])
     kind, _, severity = table[int(g.choice(len(table), p=weights / weights.sum()))]
     if kind == "dome":
