@@ -7,7 +7,7 @@ import * as THREE from 'three';
 
 const MAX = 40; // pool cap: the colony's seven and a raid of two dozen
 const AWAY = new THREE.Vector3(0, -99999, 0); // hidden figures are parked here: the ray picker ignores `visible`
-const FLYING = { inbound: 1, soar: 1, dive: 1, outbound: 1, raid: 1 };
+const FLYING = { inbound: 1, soar: 1, dive: 1, outbound: 1, raid: 1, migrate: 1, falling: 1 };
 let shapes = null;
 let wingTime = 0, lastNow = 0;
 

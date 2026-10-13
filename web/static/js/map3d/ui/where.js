@@ -50,6 +50,23 @@ function locate() {
   return { place: "Surface", region: name };
 }
 
+function hazardsLine(where) {
+  const el = document.getElementById("hazards");
+  if (!el) return;
+  const h = where.city && state.klyaksaState?.cities.find((c) => c.id === where.city)?.hazards;
+  if (!h) { el.hidden = true; return; }
+  el.hidden = false;
+  const pct = (x) => `${Math.round(x * 100)}%`;
+  el.innerHTML = [
+    `<span title="creatine mined; the fauna mutates with it">creatine <b>${h.creatine_t.toFixed(0)} t</b> · mutation ${h.mutation.toFixed(1)}</span>`,
+    `<span class="${h.aa.on ? "ok" : "bad"}" title="air defence">ПВО <b>${h.aa.on ? "on" : "OFF"}</b> · ${h.aa.ammo} shells · ${h.aa.kills} down</span>`,
+    h.migration ? `<span class="warn">herd overhead: ${h.migrants.filter((m) => m.state === "migrate").length}</span>` : "",
+    `<span class="${h.manure_t + h.dome_dirt > 10 ? "warn" : ""}">manure <b>${h.manure_t.toFixed(1)} t</b> · dome ${h.dome_dirt.toFixed(0)}% covered</span>`,
+    `<span class="${h.plankton > 25 ? "warn" : ""}">plankton <b>${h.plankton.toFixed(0)}%</b>${h.tide ? " · tide" : ""}</span>`,
+    `<span class="${h.drunk > 0.5 ? "warn" : ""}">drunk <b>${pct(h.drunk)}</b></span>`,
+  ].filter(Boolean).join("");
+}
+
 function bossBar(where) {
   const box = document.getElementById("boss");
   if (!box) return;
@@ -83,4 +100,5 @@ export function updateWhere(now) {
     shown = text;
   }
   bossBar(where);
+  hazardsLine(where);
 }

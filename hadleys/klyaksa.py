@@ -181,7 +181,10 @@ class Colony:
                         neighbours.append((target.key, target.at[0] - c.at[0], target.at[1] - c.at[1]))
                 plan = city_plan(c, neighbours)
                 self._visual_plans[c.key] = plan
+                homes = [m["home"] for m in getattr(w, "crocs", []) if not m.get("raider")]
                 out.append({
+                    # where the city's flock sleeps: the 3D view builds their lair there
+                    "lair": [round(sum(h[0] for h in homes) / len(homes), 1), round(sum(h[1] for h in homes) / len(homes), 1)] if homes else None,
                     "id": c.key, "name": c.name, "at": list(c.at), "first_id": c.offset, "houses": w.N,
                     "hub": cfg["hub_radius"], "type": w.h_type.tolist(),
                     "sim_x": np.round(w.h_x, 3).tolist(), "sim_y": np.round(w.h_y, 3).tolist(),
