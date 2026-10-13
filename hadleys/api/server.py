@@ -287,6 +287,8 @@ def make_handler(
                         json.dumps({"ok": True, **info}).encode(),
                     )
                     return
+                elif cmd == "reset" and (req.get("city") or "").startswith("k") and w_holder.get("colony"):
+                    w_holder["colony"].reset()   # Klyaksa: found the whole colony anew
                 elif cmd == "reset":
                     w = new_colony(w_holder, "operator")
                 elif cmd == "reactor":

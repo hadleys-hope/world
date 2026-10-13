@@ -117,6 +117,21 @@ class Colony:
         self._visual_plans = {}
         self._visual_anchors = {}
 
+    def reset(self, cities=CITIES, first_id=300):
+        """Found Klyaksa anew: every city rebuilt from scratch (new seeds), its saves removed. The bus stays."""
+        self.generation = getattr(self, "generation", 0) + 1
+        fresh, offset = [], first_id
+        for i, (key, name, hps, per_row, at) in enumerate(cities):
+            path = self._path(key)
+            if path and os.path.exists(path):
+                os.remove(path)
+            c = City(key, name, hps, per_row, at, offset, 4242 + i + 100 * self.generation)
+            fresh.append(c)
+            offset += c.w.N
+        self.cities = fresh       # one reference swap: the tick thread sees the old list or the new one
+        self._geometry = None
+        self._state = (0, b"")
+
     def _path(self, key):
         return os.path.join(self.data_dir, f"klyaksa-{key}.pkl") if self.data_dir else None
 

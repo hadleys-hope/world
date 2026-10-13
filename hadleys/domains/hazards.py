@@ -134,10 +134,15 @@ def hazards_step(w: World):
             m["y"] += math.sin(m["heading"]) * 4
             r = math.hypot(m["x"], m["y"])
             floor = dome_ceiling(c, r) if c.get("dome_armor") else 0.0
-            if m["z"] < floor:   # it hits the dome and slides off the glass
+            if m["z"] < floor:   # it hits the dome and slides off the glass, outwards
                 m["z"] = floor
+                m["heading"] = math.atan2(m["y"], m["x"])
                 m["x"] += m["x"] / (r or 1) * 7.0
                 m["y"] += m["y"] / (r or 1) * 7.0
+            m["fall"] = m.get("fall", 0) + 1
+            if m["fall"] > 150:
+                w.migrants.remove(m)
+                continue
             if m["z"] <= 0:
                 w.migrants.remove(m)
             continue
@@ -218,6 +223,20 @@ def hazards_step(w: World):
             damage_target(w, f"gate:{s}", "plankton", 1.0)
     if p["level"] > c.get("plankton_burn_at", 45.0):
         plankton_burn(w)
+    # ---- contract crews: on top of the colony's own two, hired for the damage Klyaksa does (crocodiles, manure,
+    # plankton), paid half as much again; one job every 20 minutes, the oldest first
+    if w.t % 20 == 0:
+        from hadleys.domains.incidents import resolve_issue
+
+        jobs = [i for i in w.issues if i.cause in ("flying crocodiles", "manure", "plankton") and i.status in ("open", "funded", "unfunded")]
+        if jobs:
+            iss = min(jobs, key=lambda i: i.opened_t)
+            fee = 1.5 * float(getattr(iss, "cost", 0.0) or 0.0)
+            if w.colony_budget > fee:
+                w.colony_budget -= fee
+                w.hazard_costs += fee
+                resolve_issue(w, iss)
+                w.contract_repairs = getattr(w, "contract_repairs", 0) + 1
     # ---- vapours and the people who breathe them
     w.vapour = min(1.0, p["level"] / 60.0 + (0.15 if not day else 0.0))
     w.drunk += (w.vapour - w.drunk) * 0.01
@@ -238,4 +257,5 @@ def hazards_snapshot(w: World):
         "migrants": [{"x": round(m["x"], 1), "y": round(m["y"], 1), "z": round(m["z"], 1), "heading": round(m["heading"], 2), "state": m["state"], "id": m["id"]} for m in w.migrants],
         "plankton": round(w.plankton["level"], 1), "tide": w.t < w.plankton["tide_until"], "burns": w.plankton["burns"],
         "drunk": round(w.drunk, 2), "costs": round(w.hazard_costs),
+        "repairs": getattr(w, "contract_repairs", 0), "dome_repair": round(getattr(w, "dome_repair_spent", 0.0)),
     }

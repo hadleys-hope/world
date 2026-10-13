@@ -384,6 +384,46 @@ class KlyaksaFlock(unittest.TestCase):
         self.assertGreater(w.aa["kills"], 0)
 
 
+class AfterARaid(unittest.TestCase):
+    """A raid that breaks the dome: the crocodiles leave, the dome is repaired and paid for, the damage is fixed."""
+
+    def test_the_city_recovers(self):
+        from hadleys.klyaksa import City
+
+        w = City("k4", "Northfield", 125, 25, (-200, 2900), 3900, 11).w
+        w.cfg["croc_raid_mean_days"] = 0
+        w.t, w.dome_hp = 600, 3.0
+        inject(w, "croc_raid")
+        for _ in range(500):
+            world_tick(w)
+        self.assertTrue(w.dome_breached)
+        budget = w.colony_budget
+        for _ in range(1500):
+            world_tick(w)
+        self.assertIsNone(w.croc_raid, "the raid ends: nobody is left stuck in the air")
+        self.assertEqual([m for m in w.crocs if m.get("raider")], [])
+        self.assertGreater(w.dome_hp, 50.0, "the dome crews repair it")
+        self.assertFalse(w.dome_breached)
+        self.assertGreater(w.dome_repair_spent, 10000, "and the colony pays for it")
+        left = [i for i in w.issues if i.cause == "flying crocodiles" and i.status != "resolved"]
+        self.assertLessEqual(len(left), 2, "contract crews fix the damage")
+
+    def test_found_klyaksa_anew(self):
+        import tempfile
+
+        from hadleys.klyaksa import CITIES, Colony
+
+        with tempfile.TemporaryDirectory() as d:
+            colony = Colony(CITIES[4:6], first_id=4650, data_dir=d)
+            colony.cities[0].w.dome_hp = 5.0
+            colony.save()
+            old = [c.w for c in colony.cities]
+            colony.reset(CITIES[4:6], first_id=4650)
+            self.assertTrue(all(c.w is not o for c, o in zip(colony.cities, old)))
+            self.assertEqual(colony.cities[0].w.dome_hp, 100.0)
+            self.assertEqual([c.w.N for c in colony.cities], [o.N for o in old])
+
+
 class ArmouredDome(unittest.TestCase):
     """Klyaksa: a raid has to break the city's armoured dome before it gets at the houses."""
 

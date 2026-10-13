@@ -52,7 +52,8 @@ INSIDE = (("aeration", 0.45, 1.0), ("span", 0.2, 0.45), ("net_span", 0.12, 1.0),
 OUTSIDE = (("solar", 0.75, 0.06), ("tower_line", 0.25, 1.0))
 # Klyaksa's armoured domes: a raid has to break the dome before it gets at the city
 DOME_HIT = 0.6  # health points (of 100) a crocodile knocks off the armoured glass with one good hit
-DOME_REGEN = 0.03  # points per tick the dome crews restore between raids (about a day from empty)
+DOME_REGEN = 0.08  # points per tick the dome crews restore when not under attack (about 21 hours from empty)
+DOME_REPAIR_COST = 300.0  # cr per point of dome health, paid from the colony budget
 DOME_BREACH_UNTIL = 25.0  # a breached dome lets them in until it is repaired back to this
 
 
@@ -251,8 +252,14 @@ def raid_start(w: World, size=None):
 def _raid_clock(w, day, g):
     raid = getattr(w, "croc_raid", None)
     c = w.cfg
-    if c.get("dome_armor") and raid is None:
-        w.dome_hp = min(100.0, getattr(w, "dome_hp", 100.0) + DOME_REGEN)
+    if c.get("dome_armor") and (raid is None or raid["phase"] != "raid") and getattr(w, "dome_hp", 100.0) < 100.0:
+        # the dome crews work whenever the glass is not under attack, as long as the colony can pay them
+        step = min(DOME_REGEN, 100.0 - w.dome_hp)
+        if w.colony_budget > step * DOME_REPAIR_COST:
+            w.dome_hp += step
+            w.colony_budget -= step * DOME_REPAIR_COST
+            w.colony_month_expense = getattr(w, "colony_month_expense", 0.0) + step * DOME_REPAIR_COST
+            w.dome_repair_spent = getattr(w, "dome_repair_spent", 0.0) + step * DOME_REPAIR_COST
         if w.dome_breached and w.dome_hp >= DOME_BREACH_UNTIL:
             w.dome_breached = False
             w.log("INFO", "The dome is sealed again")
@@ -267,7 +274,8 @@ def _raid_clock(w, day, g):
     elif raid["phase"] == "raid" and w.t >= raid["until"]:
         raid["phase"] = "retreat"
         w.log("WARN", f"The crocodile raid is over: {raid['hits']} things wrecked, the flock flies back to the cliffs")
-    elif raid["phase"] == "retreat" and not any(m.get("raider") for m in w.crocs):
+    elif raid["phase"] == "retreat" and (not any(m.get("raider") for m in w.crocs) or w.t - raid["until"] > 300):
+        w.crocs[:] = [m for m in w.crocs if not m.get("raider")]   # stragglers have flown off by now
         w.croc_raid = None
 
 
@@ -314,11 +322,13 @@ def _raider_step(w, m, g, gate_open, outside, inside):
         m["y"] += math.sin(m["heading"]) * 3
         r = math.hypot(m["x"], m["y"])
         floor = dome_ceiling(c, r) if c.get("dome_armor") else 0.0
-        if m["z"] < floor:
+        if m["z"] < floor:   # on the glass: it slides off outwards, and keeps going that way
             m["z"] = floor
+            m["heading"] = math.atan2(m["y"], m["x"])
             m["x"] += m["x"] / (r or 1) * 6.0
             m["y"] += m["y"] / (r or 1) * 6.0
-        if m["z"] <= 0:
+        m["fall"] = m.get("fall", 0) + 1
+        if m["z"] <= 0 or m["fall"] > 150:
             w.crocs.remove(m)
         return
     if st == "gather":
@@ -492,8 +502,8 @@ def _go_home(m, c):
     """Leave by the way they came: off the glass, out through the gate from under it, or straight home."""
     r = math.hypot(m["x"], m["y"])
     m["state"] = "outbound"
-    on_glass = m.get("outside") or m.get("leave_glass")
-    m["leg"] = 3 if on_glass and r < c["wall_radius"] else 0 if r < c["wall_radius"] else 2
+    on_glass = m.get("outside") or m.get("leave_glass") or c.get("dome_armor")   # out of a broken dome: straight out
+    m["leg"] = 3 if on_glass and r < c["wall_radius"] + 45 else 0 if r < c["wall_radius"] else 2
 
 
 def raid_snapshot(w: World):
