@@ -24,6 +24,7 @@ import {
   lettering,
 } from "./kit.js";
 import { civicGeometry } from "./buildings.js";
+import { carStyle, PAINT, STYLES } from "./car-models.js";
 import { Surface } from "./streets.js";
 function valve(m, x, y, z, r = 0.45) {
   const g = new T.TorusGeometry(r, 0.055, 5, 12)
@@ -520,7 +521,7 @@ function mappedTarget(city, r) {
   return { x: city.x[nearest], y: city.y[nearest] };
 }
 export function syncCityVisuals(snapshot, body, R) {
-  const groups = [[], []],
+  const groups = [[], [], ...STYLES.map(() => [])],   // service vehicles, and a batch per body style of private car
     now = performance.now(),
     point = createPlacement(R, state.klyaksaPlanData);
   state.klyaksaVehicleHistory ||= new Map();
@@ -568,11 +569,13 @@ export function syncCityVisuals(snapshot, body, R) {
           y: edge.b.point[1],
         });
       } else if (entry.moving) retargetVehicle(entry.motion, target);
-      groups[/sludge|waste|garbage/.test(r.kind) ? 1 : 0].push(entry);
+      // a private car keeps its body style: picked from its key, so it never changes between polls
+      const style = [...String(key)].reduce((h, ch) => (h * 31 + ch.charCodeAt(0)) >>> 0, 7) % STYLES.length;
+      groups[/sludge|waste|garbage/.test(r.kind) ? 1 : /engineer|plumber|service|freight|truck|cargo|tanker|rover/.test(r.kind || "") ? 0 : 2 + style].push(entry);
     }
   }
   state.klyaksaVehicleBatches ||= [];
-  for (let k = 0; k < 2; k++) {
+  for (let k = 0; k < groups.length; k++) {
     let batch = state.klyaksaVehicleBatches[k];
     if (!batch || batch.capacity < groups[k].length) {
       if (batch) {
@@ -584,7 +587,7 @@ export function syncCityVisuals(snapshot, body, R) {
           16,
           2 ** Math.ceil(Math.log2(groups[k].length || 1)),
         ),
-        g = car(k === 1);
+        g = k < 2 ? car(k === 1) : carStyle(k - 2);
       g.setAttribute("color", g.getAttribute("aCol"));
       const mesh = new T.InstancedMesh(
         g,
@@ -592,6 +595,7 @@ export function syncCityVisuals(snapshot, body, R) {
         capacity,
       );
       mesh.instanceMatrix.setUsage(T.DynamicDrawUsage);
+      if (k >= 2) for (let i = 0; i < capacity; i++) mesh.setColorAt(i, new T.Color(PAINT[(i * 7 + k) % PAINT.length]));   // body paint
       mesh.frustumCulled = false;
       body.add(mesh);
       batch = { mesh, capacity, at: now };
