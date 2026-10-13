@@ -6,6 +6,7 @@ import { Surface } from "./streets.js";
 import { Model } from "./kit.js";
 import { PLATEAU } from "../../geometry/noise.js";
 import { state } from "../../state.js";
+import * as THREE from "three";
 
 export function buildConnections(plan, body, R, env) {
   const grade = R * PLATEAU + 0.25;
@@ -21,9 +22,38 @@ export function buildConnections(plan, body, R, env) {
       // armoured glass: thick struts and laminate bars, flashes when a crocodile hits it (models/klyaksa-fauna.js)
       { ...env, uStructure: { value: 1 }, uGlare: { value: 0.35 }, uArmor: { value: 1 }, uFlash: { value: 0 }, uDamage: { value: 0 } },
       320,
-      gates.map((g) => ({ angle: g.angle, width: 108, height: 35 })),
+      gates.map((g) => ({ angle: g.angle, width: 104, height: 36 })),
     );
     dome.name = `Dome ${c.id}`;
+    // each portal's sleeve: glass from the vertical arch in to the sloping dome, framed in steel on both edges,
+    // so the arch fits the dome with no gap and no dark plate behind it
+    const Rd = c.wall + 45, Hd = Rd * 0.42;
+    for (const g of gates) {
+      const a = g.angle, fw = [Math.cos(a), Math.sin(a)], sd = [-fw[1], fw[0]];
+      const arch = [], edge = [];
+      const outline = [[-52, 0], [-52, 4], ...[...Array(19)].map((_, k) => [Math.cos(Math.PI - (k / 18) * Math.PI) * 52, 4 + Math.sin((k / 18) * Math.PI) * 32]), [52, 4], [52, 0]];
+      for (const [s, h] of outline) {
+        arch.push(point(c.at[0] + g.x + sd[0] * s, c.at[1] + g.y + sd[1] * s, h));
+        const r = Rd * Math.sqrt(Math.max(0, 1 - (h / Hd) ** 2)), aa = a + s / Rd;      // the dome at that height
+        edge.push(point(c.at[0] + Math.cos(aa) * r, c.at[1] + Math.sin(aa) * r, h));
+      }
+      const pos = [], uv = [], idx = [];
+      arch.forEach((p, k) => { pos.push(...p.toArray(), ...edge[k].toArray()); uv.push(k / outline.length, 0, k / outline.length, 0.02); });
+      for (let k = 0; k + 1 < arch.length; k++) idx.push(2 * k, 2 * k + 2, 2 * k + 1, 2 * k + 1, 2 * k + 2, 2 * k + 3);
+      const sg = new THREE.BufferGeometry();
+      sg.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+      sg.setAttribute("aUV", new THREE.Float32BufferAttribute(uv, 2));
+      sg.setIndex(idx);
+      sg.computeVertexNormals();
+      const sleeve = new THREE.Mesh(sg, dome.material);
+      sleeve.renderOrder = 3;
+      body.add(sleeve);
+      for (let k = 0; k + 1 < arch.length; k++) {
+        frames.beam(edge[k].toArray(), edge[k + 1].toArray(), 1.1, 0x5f7480);   // the collar on the dome
+        frames.beam(arch[k].toArray(), arch[k + 1].toArray(), 0.9, 0x637e89);   // the portal's own frame
+        if (k % 3 === 0) frames.beam(arch[k].toArray(), edge[k].toArray(), 0.5, 0x7b8b91);   // ribs across the sleeve
+      }
+    }
     (state.klyaksaDomes ||= {})[c.id] = dome;
     body.add(dome);
     for (const g of gates) {

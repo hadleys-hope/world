@@ -36,10 +36,14 @@ export function makeDome(point, radius, height, uniforms, segments = 192, portal
   }
   for (let j = 0; j < EL; j++)
     for (let i = 0; i < AZ; i++) {
-      const angle = (i + 0.5) / AZ * Math.PI * 2;
-      const bottom = height * Math.sin(j / EL * Math.PI / 2);
-      if (portals.some(p => bottom < p.height &&
-        Math.abs(Math.atan2(Math.sin(angle - p.angle), Math.cos(angle - p.angle))) * radius < p.width / 2)) continue;
+      // a portal's opening follows its arch: a cell goes only if all four corners are inside the arch's outline
+      // (half-width p.width/2, 4 m straight legs, top at p.height), seen from the dome's centre
+      const inArch = (p, ai, hj) => {
+        const s = Math.atan2(Math.sin(ai - p.angle), Math.cos(ai - p.angle)) * radius, h = height * Math.sin(hj / EL * Math.PI / 2);
+        return h < p.height && (s / (p.width / 2)) ** 2 + (Math.max(0, h - 4) / (p.height - 4)) ** 2 < 1;
+      };
+      const a0 = (i / AZ) * Math.PI * 2, a1 = ((i + 1) / AZ) * Math.PI * 2;
+      if (portals.some((p) => inArch(p, a0, j) && inArch(p, a1, j) && inArch(p, a0, j + 1) && inArch(p, a1, j + 1))) continue;
       const a = j * (AZ + 1) + i, b = a + 1, c = a + AZ + 1, d = c + 1;
       idx.push(a, c, b, b, c, d);
     }
