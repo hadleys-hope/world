@@ -14,6 +14,7 @@ import {
 import { freightVehicle, updateCargo } from "../models/cargo.js";
 import { updatePhysicalState } from "../models/industry.js";
 import { updateOcean } from "../models/ocean.js";
+import { showFlyingCrocs, syncFlyingCrocs } from "../models/flying-crocs.js";
 import { detailedVehicle } from "../models/vehicles.js";
 import { updateMapKey } from "../ui/controls.js";
 import { flyTo, renderInfo } from "../ui/inspection.js";
@@ -45,6 +46,7 @@ export function applyLayers() {
   state.markers.packetsRed.visible = state.layers.packets;
   state.markers.people.visible = state.layers.people;
   state.markers.xenos.visible = state.layers.threats;
+  showFlyingCrocs(state.layers.fauna !== false);
   state.markers.marines.visible = state.layers.threats;
   state.labelGroup.visible = state.layers.labels;
   if (state.markers.ctrl) state.markers.ctrl.visible = state.layers.ctrl;
@@ -77,6 +79,7 @@ export function onState(s, first) {
   updatePhysicalState(s);
   updateCargo(s);
   updateOcean(s);
+  syncFlyingCrocs(s, now, first);
   const c = state.G.cfg,
     ns = c.sectors,
     hs = s.houses,
@@ -268,6 +271,11 @@ export function onState(s, first) {
       ]);
     if (s.xenos.length)
       alerts.push([`${s.xenos.length} xenomorphs on the ground`, true]);
+    const raid = s.croc_raid;
+    if (raid && raid.phase === "gather") alerts.push([`Wild crocodiles gathering: raid in ${raid.left} min, shut the west gate`, true]);
+    else if (raid && raid.phase === "raid") alerts.push([`Crocodile raid: ${raid.hits} things wrecked${raid.blocked ? ", gate holds" : ""}`, true]);
+    const overhead = (s.crocs || []).filter((k) => k.state !== "roost" && !k.wild).length;
+    if (overhead) alerts.push([`${overhead} flying crocodiles over the colony`, false]);
     s.sectors.forEach((x, i) => {
       if (x.lockdown > 0) alerts.push([`Lockdown sector ${i + 1}, ${x.lockdown} min left`, false]);
     });

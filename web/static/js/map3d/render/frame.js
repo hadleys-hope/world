@@ -8,6 +8,7 @@ import { buildAcheronLife } from "../models/acheron.js";
 import { upgradeWorlds } from "../models/worlds.js";
 import { buildDome, buildOasis } from "../models/oasis.js";
 import { updateKlyaksa } from "../models/klyaksa.js";
+import { updateFlyingCrocs } from "../models/flying-crocs.js";
 import { quatAt, sph } from "../geometry/planet.js";
 import { updateUtilityFlow } from "../models/drainage.js";
 import { updateSolarSystem } from "../models/solar-system.js";
@@ -203,6 +204,7 @@ export function frame() {
         else p.g.rotation.z = 0;
       }
     }
+    updateFlyingCrocs(now);
     if (state.squadGroup.userData.to) {
       const d = state.squadGroup.userData;
       const u = Math.min(1, (now - d.t0) / Math.max(200, state.pollGap));

@@ -9,6 +9,7 @@ if TYPE_CHECKING:
 
 import math
 import numpy as np
+from hadleys.domains.fauna import fauna_blame
 from hadleys.domains.finance import (
     finance_commit,
     finance_record,
@@ -521,6 +522,7 @@ def incidents_step(w: World):
         damage_target(
             w, f"house:{i}" if rng.random() < 0.5 else f"aeration:{i}", "wildlife", 1.0
         )
+        fauna_blame(w, i)  # the nearest flying crocodile in the air comes down on that roof
     for s in range(S):
         if w.sector_dark[s] and rng.random() < c["p_rover_hit"]:
             ps = np.flatnonzero(w.p_sector == s)

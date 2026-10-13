@@ -123,8 +123,25 @@ export function pick(ev, click) {
         ? `<b>POLE ${String(result.id + 1).padStart(3, "0")} · L1 / L2 / L3 / N</b><br>${((state.poleLoads[result.id] || 0) / 1000).toFixed(1)} kW · ${state.S.poles.span[result.id] ? "energized" : "isolated"}<br>F / double-click: inspect meter`
         : result.kind === "rover"
           ? `<b>${String(result.extra || result.id)}</b><div class="tip-keys">click, then <kbd>Enter</kbd> drive · <kbd>F</kbd> follow</div>`
-          : `<b>${result.kind} ${result.id}</b><br>F / double-click: focus`;
+          : result.kind === "croc"
+            ? `<b>${(state.S.crocs || [])[result.extra]?.wild ? "Wild flying crocodile" : "Flying crocodile"}</b><br>${crocDoing((state.S.crocs || [])[result.extra])}<br>F / double-click: focus`
+            : `<b>${result.kind} ${result.id}</b><br>F / double-click: focus`;
   tipHtml(tip, mx, my, html);
+}
+
+function crocDoing(x) {
+  if (!x) return "gone";
+  return {
+    roost: "asleep on the shore",
+    inbound: "flying in to the west gate",
+    soar: "soaring under the dome",
+    dive: "coming down on house " + x.house,
+    bask: "basking on the roof of house " + x.house,
+    outbound: "flying home to the shore",
+    gather: "gathering on the cliffs for a raid",
+    raid: "raiding the colony",
+    attack: x.house > 0 ? "wrecking house " + x.house : "wrecking a power line or the solar field",
+  }[x.state] || x.state;
 }
 
 export function tipHtml(tip, mx, my, html) {
@@ -472,6 +489,16 @@ export function renderInfo() {
           ["state", x.state],
           ["sector", x.sector],
           ["target house", x.target > 0 ? x.target : "none"],
+        ])
+      : "gone";
+  } else if (k === "croc") {
+    const x = (s.crocs || [])[state.selected.extra];
+    title = "Flying crocodile";
+    body = x
+      ? rows([
+          ["doing", crocDoing(x)],
+          ["height above ground", x.z + " m"],
+          ["house", x.house > 0 ? x.house : "none"],
         ])
       : "gone";
   } else if (k === "squad") {

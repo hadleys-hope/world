@@ -59,6 +59,7 @@ export const state = {
   windowSlots: undefined, // render/world
   lockWedges: undefined, // render/world
   xenoPool: undefined, // render/world
+  crocPool: undefined, // render/world; filled by models/flying-crocs
   squadGroup: undefined, // render/world
   wallPanels: undefined, // render/world
   wallSegs: undefined, // render/world

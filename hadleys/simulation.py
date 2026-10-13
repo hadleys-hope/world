@@ -8,6 +8,7 @@ from hadleys.config import CFG
 from hadleys.domains.attractors import attractor_sample
 from hadleys.domains.energy import power_step, reactor_scram, reactor_step
 from hadleys.domains.environment import env_step
+from hadleys.domains.fauna import WEST_GATE, fauna_call, fauna_step, raid_start
 from hadleys.domains.finance import finance_day_close, finance_month_close
 from hadleys.domains.households import book, finance_tick
 from hadleys.domains.houses import house_events, houses_step
@@ -37,6 +38,7 @@ def world_tick(w: World):
     incidents_step(w)
     roads_step(w)
     people_step(w)
+    fauna_step(w)
     house_events(w)
     if w.t % 60 == 0:
         pipes_audit(w)
@@ -83,6 +85,22 @@ def inject(w: World, cmd: str):
             "y": polar(s * 60 + 30, w.cfg["wall_radius"] + 60)[1],
             "text": f"Xenomorphs outside sector {s + 1}",
         }
+    elif cmd == "croc":
+        n = fauna_call(w)
+        w.log("WARN", f"[manual] flying crocodiles stirred: {n} leave the shore for the west gate")
+        gate = polar(180.0, c["wall_radius"])
+        return {"x": gate[0], "y": gate[1], "text": "Flying crocodiles are heading for the west gate"}
+    elif cmd == "croc_raid":
+        n = raid_start(w)
+        gate = polar(180.0, c["wall_radius"])
+        text = f"A wild flock of {n} flying crocodiles is gathering: raid in 30 min" if n else "A crocodile raid is already on"
+        return {"x": gate[0], "y": gate[1], "text": text}
+    elif cmd == "croc_lock":
+        # shut the west gate against the flock: a lockdown of the sector the gate opens into
+        w.lockdown_ticks[WEST_GATE] = max(int(w.lockdown_ticks[WEST_GATE]), 240)
+        w.log("WARN", "[manual] west gate shut against the flying crocodiles for 4 hours")
+        gate = polar(180.0, c["wall_radius"])
+        return {"x": gate[0], "y": gate[1], "text": "West gate shut against the flying crocodiles"}
     elif cmd == "storm":
         w.storm_ticks = 400
         w.storm_lighting = True

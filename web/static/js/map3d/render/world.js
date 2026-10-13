@@ -41,6 +41,7 @@ export function initialize() {
   state.windowSlots = [];
   state.lockWedges = [];
   state.xenoPool = [];
+  state.crocPool = [];
   state.squadGroup = null;
   state.wallPanels = null;
   state.wallSegs = [];

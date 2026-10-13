@@ -46,7 +46,7 @@ export function buildLandscape() {
     new THREE.Float32BufferAttribute(colors, 3),
   );
   land.material.vertexColors = true;
-  detailGround(land.material, { radius: state.RP, dome: 700 });   // close-up detail, snow and rock, the lawn
+  detailGround(land.material, { radius: state.RP, dome: state.G?.cfg?.wall_radius || 690 });   // lawn up to the wall: the dome stands on it   // close-up detail, snow and rock, the lawn
   const k = new Kit(state.world);
   for (const [px, py, height, width] of [
     [1250, 850, 180, 280],

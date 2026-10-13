@@ -9,7 +9,9 @@ import { instances, lifeMaterial, treeGeometry, tuftGeometry } from "./life.js";
 import { waterMaterial } from "./waters.js";
 import * as THREE from "three";
 
-const DOME_R = 735, DOME_H = 320;
+// The dome stands on the colony wall: the wall is its footing, the gates are the only ways in (models/build.js
+// draws the wall 13 m high with 16 m posts). hadleys/domains/fauna.py uses the same shape for the flock's ceiling.
+const WALL_TOP = 16, DOME_H = 300;
 
 function rng(seed) {
   let s = seed >>> 0;
@@ -79,8 +81,14 @@ export function glassMaterial(uniforms) {
 }
 
 export function buildDome() {
-  const rim = surfaceHeight(DOME_R, 0);
-  const dome = makeDome((x, y, up) => sph(x, y, rim + up - surfaceHeight(x, y) - 0.5), DOME_R, DOME_H, state.envUniforms);
+  const R = state.G?.cfg?.wall_radius || 690;
+  let rim = 0;
+  for (let k = 0; k < 36; k++) rim += surfaceHeight(R * Math.cos(k / 5.73), R * Math.sin(k / 5.73)) / 36;
+  // the lowest ring follows the wall top over the uneven ground; by a quarter of the way up the glass is a clean dome
+  const dome = makeDome((x, y, up) => {
+    const local = surfaceHeight(x, y), t = Math.min(1, up / (DOME_H * 0.25));
+    return sph(x, y, WALL_TOP + up + (rim - local) * t);
+  }, R, DOME_H, state.envUniforms);
   state.world.add(dome);
   state.dome = dome;
 }

@@ -57,6 +57,15 @@ CFG = {
     "medlab": (195.0, 244.0),
     "school": (315.0, 244.0),
     "walkers": 60,
+    # fauna: flying crocodiles roost on the ocean shore and soar over the houses by day (domains/fauna.py)
+    "flying_crocs": 7,  # size of the flock; 0 = none
+    "croc_bask_p": 0.004,  # per tick, a soaring crocodile comes down to bask on a heated roof
+    # raids: a wild flock from the sea cliffs flies in to feed and wrecks what it lands on (domains/fauna.py)
+    "croc_raid_mean_days": 3.0,  # one raid every ~3 days on average, by day and not in a storm; 0 = only on command
+    "croc_raid_size": 24,  # wild crocodiles in a raid
+    "croc_raid_ticks": 180,  # how long they stay once they have arrived
+    "croc_raid_hit_p": 0.6,  # a crocodile that has settled on its target wrecks it with this probability
+    "dome_height": 300.0,  # the glass dome stands on the wall (models/oasis.js); the flock keeps under it
     # environment (LV-426: minus 40..60, permanent dusk, storms)
     "t_mean": -45.0,
     "t_daily_amp": 8.0,

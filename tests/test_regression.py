@@ -46,6 +46,11 @@ class SimulationRegression(unittest.TestCase):
         self.assertLess(value["water"].pop("accounts")["residual"], 1e-6)
         if value["report"]:
             self.assertEqual(value["report"].pop("households")["debtors"], 0)
+        # The flying crocodiles are additive; every golden checkpoint is at night, so the flock is on the shore.
+        self.assertIsNone(value.pop("croc_raid"), "no raid in the golden run: it is all at night")
+        crocs = value.pop("crocs")
+        self.assertEqual(len(crocs), 7)
+        self.assertEqual({k["state"] for k in crocs}, {"roost"})
         return value
 
     def snap_kinematics(self, actual, expected):
